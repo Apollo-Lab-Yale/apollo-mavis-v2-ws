@@ -39,6 +39,9 @@ phase-01-core ──┬─→ phase-02-sim-workcell ─→ phase-03-ik-twin ─�
   （`python -m apollo_xarm7_runtime.dagger.trainer`，GPU 1，ZMQ 5757）。
 - phase-09 需要全部完成，且需要真机在场。
 
+> 多 agent 自主开发的编排方案（波次 DAG、验证门、故障恢复）见
+> [ORCHESTRATION.md](ORCHESTRATION.md)。
+
 ## 状态清单
 
 | Phase | 文件 | 仓库 | 依赖 | 状态 |
