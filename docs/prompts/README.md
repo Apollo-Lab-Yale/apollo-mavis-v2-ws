@@ -50,7 +50,7 @@ phase-01-core ──┬─→ phase-02-sim-workcell ─→ phase-03-ik-twin ─�
 | 02 | `phase-02-sim-workcell.md` | apollo-xarm7-sim | 01 | [x] 2026-09-01 完成（66 tests，benchmark 达标） |
 | 03 | `phase-03-ik-twin.md` | apollo-xarm7-sim | 01, 02 | [x] 2026-09-01 完成（105 tests，guardrail 12/12 PASS，IK p99 590µs/3臂） |
 | 04 | `phase-04-hardware.md` | apollo-xarm7-hardware | 01 | [x] 2026-09-01 完成（105 tests，FakeSDK 全覆盖，SDK pin 见 repo README） |
-| 05 | `phase-05-runtime-teleop.md` | apollo-xarm7-runtime | 01, 02, 03（04 接口对接） | [ ] |
+| 05 | `phase-05-runtime-teleop.md` | apollo-xarm7-runtime | 01, 02, 03（04 接口对接） | [x] 2026-09-01 完成（60 tests，e2e 全过；hardware 组装留 phase-09） |
 | 06 | `phase-06-ui.md` | apollo-xarm7-ui | 05 | [ ] |
 | 07 | `phase-07-data-collection.md` | apollo-xarm7-runtime (+ui) | 05, 06 | [ ] |
 | 08 | `phase-08-dagger-inference.md` | apollo-xarm7-runtime (+ui) | 07 | [ ] |
