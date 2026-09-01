@@ -36,4 +36,6 @@ clones (gitignored by the ws repo until converted to submodules).
   profiles must be matched to NICs programmatically at startup.
 - Arms may or may not have a linear track (rail); max rail travel 0.65 m.
   Presence must be auto-detected via the xArm SDK.
-- Machine: Ubuntu 22.04, 2× RTX 4090, Python 3.10, node 22, nmcli available.
+- Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
+  hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
+  NVENC needs a newer NVIDIA driver on this box (falls back to libsvtav1).
