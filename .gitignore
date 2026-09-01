@@ -1,0 +1,36 @@
+# Nested sub-repos: standalone git repos for now, will be converted to
+# git submodules once each has its initial commit pushed.
+/apollo-xarm7-core/
+/apollo-xarm7-hardware/
+/apollo-xarm7-sim/
+/apollo-xarm7-runtime/
+/apollo-xarm7-ui/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+dist/
+
+# Data / artifacts
+*.hdf5
+*.mp4
+datasets/
+checkpoints/
+
+# MuJoCo
+MUJOCO_LOG.TXT
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
