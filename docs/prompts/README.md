@@ -47,7 +47,7 @@ phase-01-core ──┬─→ phase-02-sim-workcell ─→ phase-03-ik-twin ─�
 | Phase | 文件 | 仓库 | 依赖 | 状态 |
 |---|---|---|---|---|
 | 01 | `phase-01-core.md` | apollo-xarm7-core | — | [x] 2026-09-01 完成（154 tests 全绿，schemas/ 已导出） |
-| 02 | `phase-02-sim-workcell.md` | apollo-xarm7-sim | 01 | [ ] |
+| 02 | `phase-02-sim-workcell.md` | apollo-xarm7-sim | 01 | [x] 2026-09-01 完成（66 tests，benchmark 达标） |
 | 03 | `phase-03-ik-twin.md` | apollo-xarm7-sim | 01, 02 | [ ] |
 | 04 | `phase-04-hardware.md` | apollo-xarm7-hardware | 01 | [ ] |
 | 05 | `phase-05-runtime-teleop.md` | apollo-xarm7-runtime | 01, 02, 03（04 接口对接） | [ ] |
