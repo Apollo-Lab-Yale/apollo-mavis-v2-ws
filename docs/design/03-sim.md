@@ -198,25 +198,31 @@ the debug inflation of 0.025 m. The scene author therefore declares them:
 
 **`mavis_v2`** (Apollo lab, tape-measured 2026-09-02; the YAML header carries
 the same numbers — edit there). World frame: z-up, origin on the floor under
-the table centre; +X along the long edge toward the *right* end, +Y across the
-table toward the *back*; the operator / camera-arm side is −Y.
+the table centre; the operator stands at the *front* (−Y) where the camera arm's
+rail is, +Y is toward the *back* (gripper arm's rail), +X is toward the *right*
+end. The two rails hug the two long edges; the workspace with the obstacle is
+the channel between them.
 
 | element | measurement | descriptor value |
 |---|---|---|
 | table | 1.215 × 0.63 × 0.03 m, top at 0.735 m | box half `[0.6075, 0.315, 0.015]` at z 0.72 |
-| rails | parallel to the long edge, feet on the table; zero at the right end, travel toward −X | `base_quat` yaw +90° `[0.7071, 0, 0, 0.7071]`; z = 0.735 + 0.107188 |
+| rails | two identical rails parallel to the long edge, feet on the table, mounted the same way; zero at the right end, travel toward −X | `base_quat` yaw +90° `[0.7071, 0, 0, 0.7071]`; z = 0.735 + 0.107188 |
 | front rail (`view`, camera-only) | outer edge 2 cm from the front edge | y0 = −0.315 + 0.02 + 0.120 = **−0.175** |
-| back rail (`grip`, gripper + wrist cam) | outer edge 42 cm from the front edge | y0 = −0.315 + 0.42 − 0.0724 = **0.0326** |
-| rail zero | arms 14.5 cm from the right edge at q = 0 | x0 = 0.6075 − 0.145 − 0.098 = **0.3645** (14.5 cm read to the carriage edge; base edge → 0.3995, base centre → 0.4625) |
-| obstacle | 0.16 × 0.16 × 0.26 m box, flush with the back edge, +X face 29.2 cm from the right edge | half `[0.08, 0.08, 0.13]` at `(0.2355, 0.235, 0.865)` |
-| keyframe | both rails at zero; gripper TCP 11 cm above the box, tool down; camera arm swung 0.5 rad, D435 1.5 m up looking at the back strip | audit-clean at δ = 0.008 and 0.025 |
-| `allowed_pairs` | carriages ↔ table (24 mm), carriages ↔ neighbouring rail (~2 mm) | four pairs |
+| back rail (`grip`, gripper + wrist cam) | 39.5 cm behind the front rail (base lines) | y0 = −0.175 + 0.395 = **0.220**; far edge 2.3 cm from the back edge |
+| channel | between the rail bodies | y ∈ [−0.1026, 0.100] (20.3 cm with the 19.2 cm mavis mesh; the front carriage protrudes 1.8 cm into it) |
+| rail zero | arm bases 14.5 cm from the right edge at q = 0 (literal: base centre) | x0 = 0.6075 − 0.145 = **0.4625** (base edge → 0.3995, carriage edge → 0.3645); the mavis mesh's zero end then overhangs the table end by 10 cm — unverified |
+| obstacle | 0.16 × 0.16 × 0.26 m box in the channel, left of the arms; +X face 29.2 cm from the right edge | half `[0.08, 0.08, 0.13]` at `(0.2355, 0.0075, 0.865)` (centred in the channel's free width) |
+| keyframe | both rails at zero; gripper arm turned round (j1 ≈ π) with the TCP 11 cm above the box top, tool down; camera 1.4 m up looking at the box | audit-clean at δ = 0.008 and 0.025 |
+| `allowed_pairs` | carriages ↔ table (24 mm by construction) | two pairs |
 
 Rail mesh facts used (mavis asset, unverified vs hardware — phase-09 item):
 across-axis extent `[−0.120, +0.0724]` m about the base line (the −0.120 side is
-a 3 mm cable-tray plate), carriage `[−0.098, +0.088]` m along the travel axis,
-1.0926 m long. The 2 cm / 42 cm / 39.5 cm readings disagree by 5 mm and the
-14.5 cm reference is ambiguous — both resolve in the phase-09 twin calibration.
+a 3 mm cable-tray plate; main body 14.2 cm), carriage `[−0.080, +0.090]` across /
+`[−0.098, +0.088]` along, 1.0926 m long with 0.2476 m beyond the carriage at
+q = 0. Open items for the phase-09 calibration: the 14.5 cm reference (base
+centre / base edge / carriage edge), the real rail width (a narrower rail widens
+the channel), whether the box touches a rail ("紧卡"), which end carries the
+motor housing, and the 2 / 42 / 39.5 cm readings (5 mm apart).
 
 ## 5. Scene composition via `mujoco.MjSpec`
 
