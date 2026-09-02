@@ -158,6 +158,22 @@ move together.
 
 ## 6. Installation and calibration (operator)
 
+Lab hardware (2026-09-02): the Vive Tracker 3.0 is dead (will not charge); a
+**Vive Pro controller** (libsurvive object `WM0`, subtype WAND, serial
+LHR-ABFB86B5) is paired to the Watchman dongle instead and plays the tracker
+role — same object name, same code path; its trigger/grip are a future clutch
+option. Four **Lighthouse 2.0** base stations; libsurvive detected gen 2 and
+tracked at ~150 Hz in the first probe (3 of 4 stations seen so far — check the
+fourth is powered and on a distinct channel).
+
+Pairing a controller to the dongle (once): run libsurvive with `--pair-device`
+(`survive-cli --pair-device --v 100 --lighthousecount 4`), then hold the
+controller's **Menu + System** buttons until the LED blinks blue; the dongle
+accepted the pairing after ~50 s of attempts. Always close libsurvive cleanly
+(`simple_close`): a killed process keeps the USB interface claimed and the next
+open fails with `LIBUSB_ERROR_BUSY` (`fuser /dev/bus/usb/<bus>/<dev>` finds the
+holder). The runtime's reader must close on shutdown and on SIGTERM.
+
 Scripts under `scripts/tracker/`: `01-sudo-udev-and-deps.sh` (apt deps, udev
 rule `/etc/udev/rules.d/60-apollo-teleop-input.rules` for 28de:2101 usb+hidraw
 and the gamepad, groups) and `02-build-pysurvive.sh` (full clone of libsurvive
@@ -165,7 +181,7 @@ at a pinned commit, `uv build --wheel`, `uv pip install --no-deps` into the
 runtime venv, optional `survive-cli`). First run with the tracker on and still,
 both base stations visible, ~10–20 s: libsurvive writes
 `~/.config/libsurvive/config.json`; delete it after moving a base station.
-Runtime config: `tracker: {backend: libsurvive}`.
+Runtime config: `tracker: {backend: libsurvive, libsurvive_args: ["--lighthousecount", "4"]}`.
 
 ## 7. Open items (phase-09 / after first hardware test)
 

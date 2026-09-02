@@ -24,6 +24,8 @@ if [ "${BUILD_SURVIVE_CLI:-1}" = "1" ]; then
   echo "--- building survive-cli (calibration / inspection) into ~/opt/libsurvive ..."
   cmake -G Ninja -S "$SRC" -B "$SRC/build" -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$HOME/opt/libsurvive" >/dev/null
   ninja -C "$SRC/build" install >/dev/null
-  echo "    ~/opt/libsurvive/bin/survive-cli --v 100 --lighthousecount 2   # first run = calibration (~10-20 s, tracker still)"
+  echo "    pairing (once):  LD_LIBRARY_PATH=~/opt/libsurvive/lib ~/opt/libsurvive/bin/survive-cli --pair-device --v 100 --lighthousecount 4"
+  echo "                     then hold the controller Menu + System buttons until the LED blinks blue (~50 s)"
+  echo "    calibration:     LD_LIBRARY_PATH=~/opt/libsurvive/lib ~/opt/libsurvive/bin/survive-cli --v 10 --lighthousecount 4   # device still, ~20 s, Ctrl-C"
 fi
 echo "--- done. Set  tracker: {backend: libsurvive}  in the runtime config (configs/mavis_v2.yaml)."
