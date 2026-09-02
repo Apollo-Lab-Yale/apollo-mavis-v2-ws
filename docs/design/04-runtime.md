@@ -219,7 +219,20 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   posture/limits/collision rows (hardware or safety_debug; plain
   posture+limits in sim), ~0.12 ms/arm measured. Task residual >
   `residual_max` (0.01 m / 0.1 rad) ⇒ freeze `target` back to the achieved
-  pose (glide, don't wind up).
+  pose (glide, don't wind up) — **component-wise** (2026-09-02): a position
+  residual re-anchors the position only, a rotation residual the orientation
+  only. The single-step QP trades position for orientation when the joint
+  velocity limits saturate (weights 1.0/m vs 0.5/rad), so re-anchoring both on
+  a rotation-only residual leaked the transient position error into the
+  tracker anchor and the TCP drifted several cm while the hand only rotated.
+- **Target rate limit (tracker path)**: the clutched target handed to IK moves
+  from the previous commanded target toward the leash-clamped hand target by at
+  most `target_rate.v_mps·dt` / `target_rate.w_radps·dt` (defaults 1.0 m/s,
+  2.0 rad/s). This keeps the QP out of velocity saturation (the leash alone
+  allows a 25 mm / 0.2 rad step per tick) so it never has to choose between
+  position and orientation; the truncation is NOT slipped into the anchor (the
+  target catches up within the leash), the leash slip still bounds the offset.
+  Keyboard twists are already rate-bounded by `teleop.*` and skip this stage.
 - **Per-tick joint clamp**: `|q_i − q_last_i| ≤ dq_max` (0.04 rad/tick ≈
   4 rad/s) before the gate; cartesian step stays < 2.5 mm at default rates.
 - **Gate** (§8): `supervisor.filter(q_cmd, q_meas, source)`; violating arms
@@ -229,6 +242,19 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   ignores them when the active arm has no rail (binding decision). The
   hardware driver sends sparse absolute mm targets (`command_rail`; the track
   has no streaming interface); measured rail position feeds the twin.
+  **Rail-only semantics (2026-09-02, to confirm on hardware in phase-09):** a
+  tick whose only motion input is a rail code holds the joint posture
+  (`q[:7] = q_last`) and integrates the rail slot alone, so the TCP rides the
+  rail by the travelled distance — the IK is NOT run against the frozen
+  world-frame target (before 2026-09-02 it was, and the arm folded to keep the
+  TCP fixed in the world while the base slid). Because the base moves under the
+  frozen target, a rail-only tick also invalidates the arm's teleop seed
+  (`_teleop_seeded.discard`; 13-tracker §4 re-seed rule (d)): the next
+  translate key or clutch engage re-seeds the integrator from the measured TCP
+  and moves by one twist step / zero, never by a leash-sized (25 mm) step
+  toward the stale target. Translate/rotate keys or a live clutch held
+  *together with* a rail code keep the world-frame target: the IK compensates
+  the rail (TCP fixed in the world within the leash).
 - **Gripper**: F/H integrate `open_frac ∈ [0,1]` → `GripperCommand` at
   ≤ 10 Hz (modbus is slow; `wait=False`).
 - **Tab / switch_arm**: server-authoritative — the Command cycles
@@ -237,33 +263,48 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
 - **Device-held codes + per-source scales** (13-tracker §1.1): step 2 also
   reads the newest `TrackerSample`; when it is fresh (`age ≤ tracker.stale_s`)
   its `held_codes` (Vive-controller buttons mapped by `tracker.controller_map`
-  to the keymap codes of `tracker_clutch` / `gripper_open` / `gripper_close`)
-  are merged into the tick's set: `held_eff = held ∪ device_codes`
+  to the keymap codes of `tracker_clutch` / `gripper_open` / `gripper_close` /
+  `rail_neg` / `rail_pos`) are merged into the tick's set: `held_eff = held ∪ device_codes`
   (`ControlLoop.sources: HeldSources`). Each source keeps its own scale — WS
   codes the `InputWatchdog` scale, device codes `1.0` fresh / `0.0` stale (the
   controller's ≥100 Hz sample stream is their heartbeat; a WS `AWAIT_EMPTY`
   latch never zeroes device-driven motion). A code held by both sources takes
   the larger scale (`HeldSources.scale_for`): the tracker clutch branch runs
   at the clutch holder's scale, `_gripper_step` integrates F/H per code at
-  that code's scale, keyboard translate/rotate/rail keep the WS scale (only
-  WS codes carry them), and the movement-key plan-cancel rule fires for any
-  code whose source scale is > 0. A running session is required; a connected
+  that code's scale, `_rail_rate` integrates the rail codes per code at that
+  code's scale (clamped to `teleop.rail_mps`, so WS + device holding the same
+  direction never double the speed; a device-held rail code moves the rail
+  with no browser connected and through a WS deadman latch; a rail-only tick
+  holds the arm joints at `q_last`, never seeds the teleop integrator and
+  invalidates an existing seed — see "Rail" above),
+  keyboard translate/rotate keep the WS scale (only WS codes carry them), and
+  the movement-key plan-cancel rule fires for any code whose source scale is
+  > 0. A running session is required; a connected
   `/ws/control` client is not. Telemetry echoes the raw controller state and
   the injected codes (`tracker.controller`, `tracker.device_held`).
 - **Trackpad click classification + device discrete actions** (13-tracker
   §1.1, remap 2026-09-02): the reader classifies a trackpad click ONCE at its
   press edge from `(x, y)` by the dominant axis (`|x|` and `|y|` both within
   `trackpad_deadzone` ⇒ ignored) and holds the class until release
-  (`ControllerState.click_seq` / `click_dir`, `classify_click`). Default
-  `controller_map`: `{clutch: trigger_click, gripper_close: trackpad_left,
-  gripper_open: trackpad_right, arm_next: trackpad_up, arm_prev:
-  trackpad_down}`; every input binds at most one action and the discrete
-  actions accept trackpad inputs only. Held bindings become `held_codes` as
-  above; the discrete ones ride on the sample as `click_action`
-  (`switch_arm` / `switch_arm_prev`) and the loop fires them in step 2 when
-  `click_seq` advances on a fresh sample (`_device_click_edge` →
-  `_handle_command`, i.e. the same `_op_switch_arm*` handlers and the same
-  nacks as the WS action, incl. the DAgger "takeover active" nack). The first
+  (`ControllerState.trackpad_dir`); every press edge of the trackpad click,
+  the menu button and the grip button advances `ControllerState.edge_seq` and
+  sets `edge_input` to the input that produced it (the classified
+  `trackpad_*`, `None` for a deadzone click, `menu_click`, `grip_click`;
+  `note_edges`). Default `controller_map`: `{clutch: trigger_click,
+  gripper_open: trackpad_up, gripper_close: trackpad_down, rail_neg:
+  trackpad_left, rail_pos: trackpad_right, arm_next: menu_click, arm_prev:
+  none}`; bindable inputs are `trigger_click`, `trackpad_left|right|up|down`,
+  `menu_click`, `grip_click`, `none` (system is never bindable: menu + system
+  is the pairing combo); every input binds at most one action, held actions
+  accept any input and the discrete actions accept any input except
+  `trigger_click` (held-only). Held bindings become `held_codes` as above; the
+  discrete ones ride on the sample as `click_actions` (`(seq, switch_arm |
+  switch_arm_prev)` for every remembered edge — `ControllerState.edges` keeps
+  the last 8 `(seq, input)` press edges) and the loop fires, in step 2 on a
+  fresh sample, every entry newer than the `edge_seq` it saw last
+  (`_device_click_edge` → `_handle_command`, i.e. the same `_op_switch_arm*`
+  handlers and the same nacks as the WS action, incl. the DAgger "takeover
+  active" nack), so two buttons edging inside one tick both fire. The first
   observed counter is adopted silently, stale edges are dropped, and the
   outcome is shown as `tracker.device_action` (`"switch_arm"` or
   `"switch_arm nacked: <detail>"`) for `DEVICE_ACTION_LINGER_S` = 1 s.
@@ -288,7 +329,9 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   `D ⊗ A_ee'.q == achieved.q` exactly for any hand rotation `D`. (c) The
   settings (yaw, scale, rotation flag, filter) are snapshotted at engagement;
   a `tracker_settings` change while engaged re-anchors (`A_trk ← filtered(
-  sample, new)`, `A_ee ← current target`) instead of re-interpreting the
+  sample, new)`, `A_ee ← the provider's leash-clamped target` — the raw target
+  the anchors produce with a still hand, not the rate-limited pose handed to
+  IK, so a pending rate-limit catch-up is kept) instead of re-interpreting the
   accumulated offset — the arm never moves on a settings change.
 - **Reader robustness** (13-tracker §4): the libsurvive loop polls
   `simple_next_event` (1 ms idle wait, so `stop()` and the no-device check
@@ -772,6 +815,7 @@ control:
   rate_hz: 100
   teleop: {linear_mps: 0.12, angular_rps: 0.6, rail_mps: 0.10, gripper_frac_ps: 1.2}
   leash: {pos_m: 0.025, rot_rad: 0.2}
+  target_rate: {v_mps: 1.0, w_radps: 2.0}   # tracker target approach rate (§6)
   dq_max_rad: 0.04           # per tick
   jog: {slew_rad_per_tick: 0.02, rail_m_per_tick: 0.002, goto_threshold_rad: 0.15}
   watchdog: {stale_s: 0.2, ramp_s: 0.1}   # = SafetyConfig input_deadman_s/input_ramp_s
@@ -788,10 +832,12 @@ tracker: {backend: none,            # none | fake | libsurvive (13-tracker §4)
           yaw_deg: 0.0, pos_scale: 1.0, follow_rotation: true,       # live defaults
           stale_s: 0.2, max_jump_m: 0.10,
           controller_map: {clutch: trigger_click,                    # 13-tracker §1.1;
-                           gripper_close: trackpad_left,             #   trackpad_* classified
-                           gripper_open: trackpad_right,             #   at the press edge;
-                           arm_next: trackpad_up,                    #   arm_* = discrete
-                           arm_prev: trackpad_down},                 #   (trackpad only)
+                           gripper_open: trackpad_up,                #   trackpad_* classified
+                           gripper_close: trackpad_down,             #   at the press edge;
+                           rail_neg: trackpad_left,                  #   rail codes drive the
+                           rail_pos: trackpad_right,                 #   rail at device scale;
+                           arm_next: menu_click,                     #   arm_* = discrete (any
+                           arm_prev: none},                          #   input but trigger_click)
           trackpad_deadzone: 0.3,             # |x|,|y| both within -> click ignored
           filter: {enabled: true, min_cutoff_hz: 1.0, beta: 0.05,    # One Euro (live: enabled/
                    d_cutoff_hz: 1.0, deadband_m: 0.002,              #   min_cutoff/beta via
@@ -803,7 +849,9 @@ egl_device_id: 0
 thread + live `TrackerSettings`); the `tracker_settings` action mutates
 yaw/scale/rotation and the live filter fields at runtime and telemetry echoes
 them (13-tracker §4). `ControllerMapConfig` rejects an input bound to more
-than one action and a non-trackpad input on `arm_next` / `arm_prev`.
+than one action and the held-only `trigger_click` on `arm_next` / `arm_prev`
+(the discrete actions accept `trackpad_*`, `menu_click`, `grip_click` or
+`none`).
 
 Version pins carried by the workspace (overview §9): MuJoCo 3.12.0,
 mink 1.3.0, lerobot ≥0.6 pinned, xArm-Python-SDK 1.18.5.

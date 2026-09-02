@@ -137,13 +137,14 @@ suitable_for: [sim, twin]
 options: {timestep: 0.002, integrator: implicitfast, cone: elliptic,
           impratio: 10, multiccd: true}
 offscreen: {width: 1920, height: 1080}      # spec.visual.global_.off*
+view: {azimuth: -90, elevation: -30}        # optional; spec.visual.global_.azimuth/elevation
 arms:                                       # attach prefix "<id>_"
   - {id: left, model: xarm7_on_rail,        # or xarm7_fixed
      base_pos: [0.0, -0.55, 0.0],           # rail-origin in world, m
      base_quat: [1, 0, 0, 0],               # wxyz
      gripper: xarm, wrist_cam: true}        # gripper: xarm | none
   - {id: right, ...}
-cameras:
+cameras:       # fixed MJCF cameras: xyaxes = image right, image up; looks along -z = -(x cross y)
   - {name: cam_front, pos: [2.0, 0.0, 1.2], xyaxes: [0, 1, 0, -0.5, 0, 1], fovy: 45}
 environment:   # plane | box | mesh; collider: convex_hull | mesh_copy | boxes;
   - ...        # baked inflated collider copies: visual false, group 3, alpha 0
@@ -158,6 +159,13 @@ allowed_pairs: # optional; structural pairs, twin pair labels (§4.2)
 subtree is deleted, `link_tcp` sits on the link7 flange, and the D435 + stand
 mesh becomes **collidable** (it is the tool; with a gripper mounted the same
 mesh stays visual-only because it overlaps the gripper hull).
+
+`view` (optional) sets MuJoCo's default **free camera** (`<visual><global
+azimuth elevation>`), which `RenderService` renders for the runtime `sim` /
+`twin` streams (`camera=None` → `-1`, §7); it orbits the model statistic
+centre. Azimuth 90 / elevation −45 (MuJoCo's defaults, used when the field is
+absent) puts the camera at −Y looking +Y; azimuth −90 puts it at +Y looking −Y.
+It is baked into the persisted scene XML like every other `<visual>` setting.
 
 `SceneOverrides` (runtime-supplied at session start): subset of arms to
 instantiate (`arm_ids`), per-arm base-pose overrides from `WorkcellConfig`
@@ -217,6 +225,14 @@ thin cable-tray plate toward the interior, zero at the right end, travel toward
 | obstacle | 0.16 × 0.16 × 0.24 m untouchable block, flush against the **left** edge (the empty end) in the channel; near face 27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(−0.5275, −0.045, 0.855)`, y ∈ [−0.125, 0.035]; its inner face is 1.4 cm past the mesh gripper-rail inner edge and the 1.0926 m mesh rail reaches 3.8 cm into its x-span — a static corner overlap (mesh vs real track), harmless to twin and physics |
 | keyframe | rails at zero (right end); gripper elbow-up in the channel, tool down, TCP 4.5 cm below the obstacle top; camera arm turned round (j1 ≈ π) looking down the channel | audit-clean at δ = 0.008 and 0.025 |
 | `allowed_pairs` | carriages ↔ table (24 mm by construction) | two pairs |
+| cameras / `view` | **operator convention**: the operator stands at the OUTER edge (+Y) facing −Y, i.e. facing the arms with the camera arm nearest; every overview is taken from that side, so image right = −X (the obstacle end on the right) | `cam_front` at `(0, 2.0, 1.9)`, `xyaxes [-1,0,0, 0,-0.55,1]` (looks −Y and down); `cam_top` at `(0, 0, 2.6)`, `xyaxes [-1,0,0, 0,-1,0]` (image up = −Y: outer edge at the bottom); `view: {azimuth: -90, elevation: -30}` (free camera at +Y looking −Y — the runtime `sim` stream default) |
+
+Reference renders live in `docs/renders/mavis_v2/` (`render_mavis_v2.py`
+regenerates them): `cam_front.png`, `cam_top.png`, the two wrist cams, the 2×2
+contact sheet and `operator_view.png` (free camera, azimuth −90 / elevation −30,
+lookat the table centre) all follow the operator convention above; the older
+`facing_outer_edge*.png` were taken from **behind the arms** (free camera at −Y,
+azimuth 45/90/135, before the convention was fixed) and are kept for comparison.
 
 Rail mesh facts used (mavis asset, unverified vs hardware — phase-09 item):
 across-axis extent `[−0.120, +0.0724]` m about the base line (the −0.120 side is

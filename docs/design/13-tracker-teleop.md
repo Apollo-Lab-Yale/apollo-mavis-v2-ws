@@ -2,7 +2,9 @@
 
 Status: v0.1, 2026-09-02. Extends 04-runtime §6 (teleop path), 01-core §13
 (keymap), 05-ui §6 (input). Everything here is additive to the existing
-keyboard teleop; the keyboard path keeps working unchanged.
+keyboard teleop; the keyboard path keeps working unchanged, with one revised
+semantic shared by every rail input: a rail-only tick holds the joint posture
+and lets the TCP ride the rail (§1.1, 04-runtime §6 "Rail"; 2026-09-02).
 
 ## 1. Goal and operating model
 
@@ -19,7 +21,8 @@ gamepad supplies the discrete/rate inputs. Motion is **relative and clutched**
 - Position deltas are scaled by `pos_scale` (default 1.0). Orientation deltas
   are applied when `follow_rotation` is on (default on), as a relative rotation
   about the anchored EE orientation.
-- The rail is never driven by the tracker; it stays on the D-pad / arrow keys.
+- The rail is never driven by the tracker *pose*; it stays on held inputs (arrow
+  keys, gamepad D-pad, controller trackpad left/right — §1.1).
 
 Gamepad mapping (served by `GET /api/keymap` via the new `gamepad` field, so
 the UI never hard-codes it):
@@ -45,26 +48,52 @@ trackpad x, `3` trackpad y (both −1..1, +y = top).
 | controller | injected | action | kind |
 |---|---|---|---|
 | trigger click (button 0 down) | code KeyC | tracker_clutch | held |
-| trackpad click, x < −0.3 (left) | code KeyF | gripper_close (rate, while held) | held |
-| trackpad click, x > +0.3 (right) | code KeyH | gripper_open (rate, while held) | held |
-| trackpad click, y > +0.3 (up) | action switch_arm | next arm | discrete, press edge |
-| trackpad click, y < −0.3 (down) | action switch_arm_prev | previous arm | discrete, press edge |
-| grip / menu / system / touch without click | — | none (menu+system is the pairing combo — never map it) | |
+| trackpad click, y > +0.3 (up) | code KeyH | gripper_open (rate, while held) | held |
+| trackpad click, y < −0.3 (down) | code KeyF | gripper_close (rate, while held) | held |
+| trackpad click, x < −0.3 (left) | code ArrowLeft | rail_neg (rail value decreases, while held) | held |
+| trackpad click, x > +0.3 (right) | code ArrowRight | rail_pos (rail value increases, while held) | held |
+| menu click (button 6 down) | action switch_arm | next arm | discrete, press edge |
+| grip / system / touch without click | — | none (system is half of the menu+system pairing combo — never map it) | |
+
+Mapping revised 2026-09-02 on operator request (was: pad left/right = gripper,
+pad up/down = arm switch); `switch_arm_prev` has no Vive-controller binding
+(keyboard `KeyZ` / gamepad `LB` only). Holding menu+system for the pairing
+gesture fires `switch_arm` once — harmless, and pairing is a one-off operation.
 
 A click is classified once, at its press edge, by the trackpad position at that
 moment (dominant axis wins; |x| and |y| both below the deadzone ⇒ ignored); the
 classification is held until release. Default `controller_map`:
-`{clutch: trigger_click, gripper_close: trackpad_left, gripper_open:
-trackpad_right, arm_next: trackpad_up, arm_prev: trackpad_down}` with
-`trackpad_deadzone: 0.3`. Device-sourced discrete actions are executed inside
-the control loop (`_op_switch_arm` / `_op_switch_arm_prev`) on the press edge,
+`{clutch: trigger_click, gripper_open: trackpad_up, gripper_close:
+trackpad_down, rail_neg: trackpad_left, rail_pos: trackpad_right, arm_next:
+menu_click, arm_prev: none}` with `trackpad_deadzone: 0.3`. Bindable inputs:
+`trigger_click`, `trackpad_left|right|up|down`, `menu_click`, `grip_click`,
+`none`; held actions accept any input, discrete actions accept any input except
+`trigger_click`; an input serves at most one action. Device-sourced discrete
+actions are executed inside the control loop (`_op_switch_arm` /
+`_op_switch_arm_prev`) on the press edge (`ControllerState.edge_seq` advances;
+`edge_input` names the input that produced the edge; the state keeps a short
+`(seq, input)` history so two buttons edging inside one 10 ms tick both fire),
 subject to the same nacks as the WS actions (e.g. takeover engaged); the
-telemetry `device_held` list shows the held codes, `device_action` the last
-discrete action fired (or its nack detail), cleared after ~1 s.
+telemetry `device_held` list
+shows the held codes, `device_action` the last discrete action fired (or its
+nack detail), cleared after ~1 s.
+
+Device-held **rail codes** integrate the rail exactly like the arrow keys, at the
+device source's scale (1.0 while the sample stream is fresh, 0.0 when stale) —
+the same per-source rule as the gripper codes; the WS deadman latch never zeroes
+a device-held rail input and a device-held code never depends on a browser
+being connected. **Rail-only semantics** (arrow keys, D-pad and trackpad alike;
+decided 2026-09-02, to be confirmed on hardware in phase-09): while only a rail
+input is held the arm keeps its joint posture and the TCP rides the rail — the
+IK is not run against the frozen world-frame target — and the teleop seed is
+invalidated so that the next translate key or clutch engage re-seeds from the
+measured TCP (§4 re-seed rule (d)); a rail input held together with translate
+keys or a live clutch keeps the world-frame target and the IK compensates the
+rail within the leash. Details: 04-runtime §6 "Rail".
 
 The default **active arm is the gripper arm**: sessions started from the
 devices page list `grip` first (`arms: [grip, view]`); operators can still
-switch with the trackpad or Tab/KeyZ.
+switch with the controller's menu button or Tab/KeyZ.
 
 These **device-held codes** are produced by the runtime's tracker reader
 (`TrackerSample.controller` + `TrackerSample.held_codes`) and merged into the
@@ -173,12 +202,22 @@ move together.
     `None`), anchors cleared.
 - Controller inputs (§1.1): the libsurvive backend parses button/axis events
   into `ControllerState`; `TrackerConfig.controller_map` defaults to the §1.1 table
-  (`{clutch: trigger_click, gripper_close: trackpad_left, gripper_open:
-  trackpad_right, arm_next: trackpad_up, arm_prev: trackpad_down}`) with
-  `trackpad_deadzone: 0.3`; the reader attaches the latest
-  controller state and the derived `held_codes` to every sample and publishes a
-  sample on each button edge. The fake backend exposes the same fields (no
-  buttons) so the merge path is unit-testable with a scripted controller state.
+  (`{clutch: trigger_click, gripper_open: trackpad_up, gripper_close:
+  trackpad_down, rail_neg: trackpad_left, rail_pos: trackpad_right, arm_next:
+  menu_click, arm_prev: none}`) with `trackpad_deadzone: 0.3`; the reader
+  attaches the latest controller state and the derived `held_codes` (clutch,
+  gripper and rail codes looked up from the keymap by action) to every sample
+  and publishes a sample on each button edge (re-publishing the last pose; this
+  never refreshes the pose's age — a pose older than `stale_s` is re-published
+  invalid so the clutch cannot anchor on it, and status / `age_s` / `rate_hz`
+  follow the real pose stream only). Press edges of the trackpad (classified),
+  menu and grip buttons are appended to `ControllerState.edges` as
+  `(seq, input)` (`edge_seq` / `edge_input` = the newest entry);
+  `derive_click_actions` maps every remembered edge through the discrete
+  bindings to `TrackerSample.click_actions`, and the loop fires the entries
+  newer than the `edge_seq` it saw last (lossless when two buttons edge inside
+  one tick). The fake backend exposes the same fields (no buttons) so the merge
+  path is unit-testable with a scripted controller state.
 - **Pose filter** (`TrackerConfig.filter`): the aligned tracker pose is passed
   through a One Euro filter before the anchor/delta math — position per axis
   (`min_cutoff_hz: 1.0`, `beta: 0.05`, `d_cutoff_hz: 1.0`) and orientation via
@@ -198,9 +237,26 @@ move together.
   `A_ee.q ← A_ee.q ⊗ dq_b` — so that `D ⊗ A_ee'.q == achieved.q` exactly for
   any hand rotation `D`; (c) the settings (yaw, scale, rotation flag, filter)
   are snapshotted at engagement; a `tracker_settings` change while engaged
-  re-anchors (`A_trk ← align(sample, new)`, `A_ee ← current target`) instead of
-  re-interpreting the accumulated offset — the arm never moves on a settings
-  change.
+  re-anchors (`A_trk ← align(sample, new)`, `A_ee ← the provider's leash-clamped
+  target`, i.e. the raw target the anchors produce with a still hand — not the
+  rate-limited pose handed to IK, so a pending rate-limit catch-up is kept)
+  instead of re-interpreting the accumulated offset — the arm never moves on a
+  settings change; (d) a rail-only tick (joints held at `q_last`, only the rail slot
+  integrates — §1.1) slides the base under the frozen world-frame target, so it
+  discards the arm's teleop seed: the next translate or clutch tick re-seeds
+  from the measured TCP (one twist step / zero delta) instead of stepping up to
+  a leash (25 mm) toward the stale target.
+- **Target rate limit and component-wise slip (2026-09-02):** the provider's
+  leash-clamped target is rate-limited toward the previous commanded target
+  (`control.target_rate`, 1.0 m/s / 2.0 rad/s; 04-runtime §6) before IK, and the
+  IK residual slip is component-wise (position residual → position anchor,
+  rotation residual → rotation anchor). Rationale: the QP's single differential
+  step trades position for orientation once the joint velocity limits saturate,
+  and slipping both components on a rotation-only residual turned that transient
+  into permanent TCP drift (measured 8–10 cm after a 240 °/s in-place rotation,
+  ≈0 with the two rules; the sim IK weights stay 1.0/0.5 because raising the
+  position weight broke the guardrail contract A2/A5). Rate-limit truncation is
+  not slipped (the target catches up inside the leash).
 - **Reader robustness:** every libsurvive event is guarded (finite position,
   unit-norm quaternion; a bad event is dropped and counted, never raised); the
   device status distinguishes `error` (no OBJECT-type device after the grace
@@ -256,8 +312,8 @@ move together.
 Lab hardware (2026-09-02): the Vive Tracker 3.0 is dead (will not charge); a
 **Vive Pro controller** (libsurvive object `WM0`, subtype WAND, serial
 LHR-ABFB86B5) is paired to the Watchman dongle instead and plays the tracker
-role — same object name, same code path (trigger = clutch, trackpad =
-gripper / arm switch, §1.1). Four **Lighthouse 2.0** base stations were
+role — same object name, same code path (trigger = clutch, trackpad up/down =
+gripper, trackpad left/right = rail, menu = arm switch, §1.1). Four **Lighthouse 2.0** base stations were
 installed, but one (serial E9BFDF83, channel 7) has corrupted firmware: its
 radio MCU is stuck in Nordic DFU (BLE name `LHB-DFU`), the FPGA image reads
 0xFFFFFFFF and its USB console (`/dev/ttyACM0`, `lhtx>` prompt, `id`/`mode`)
@@ -283,16 +339,29 @@ at a pinned commit, `uv build --wheel`, `uv pip install --no-deps` into the
 runtime venv, optional `survive-cli`). First run with the tracker on and still,
 both base stations visible, ~10–20 s: libsurvive writes
 `~/.config/libsurvive/config.json`; delete it after moving a base station.
-Runtime config: `tracker: {backend: libsurvive, libsurvive_args: ["--lighthousecount", "3"], yaw_deg: <from the gesture>}`.
-Yaw calibration gesture (used 2026-09-02, result −77.9°): click the trigger at a
-start point, then after each of six moves — left, forward, right, back, up, down
-(20–30 cm each, hand still at each click); record `pose_raw` at every click via
-telemetry and fit the yaw that maps left/right/forward/back onto −X/+X/+Y/−Y
-(up/down only verify that z is up). Redo it after any libsurvive recalibration
-(the lighthouse world frame is re-anchored then).
+Runtime config: `tracker: {backend: libsurvive, libsurvive_args: ["--lighthousecount", "3"], yaw_deg: 102.1}`.
+Yaw calibration gesture (used 2026-09-02): click the trigger at a start point,
+then after each of six moves — left, forward, right, back, up, down (20–30 cm
+each, hand still at each click); record `pose_raw` at every click via telemetry
+and fit the yaw that maps the operator's left/right/forward/back onto world
+axes. **The mapping depends on where the operator stands.** The lab operator
+stands at the OUTER edge facing the arms (facing −Y, camera-only arm nearest,
+the same side the mavis_v2 overview cameras look from since 2026-09-02), so
+forward = −Y and left = +X. The first fit (−77.9°) wrongly assumed the
+arm's viewpoint (forward = +Y) and produced the classic symptoms — hand forward
+moved the EE backward, pitch/yaw felt inverted, while left/right looked right on
+screen only because the old cameras looked from the opposite side; the correct
+value is the fit + 180° = **102.1°**. Verify with landmarks, not body words:
+move the controller toward the arm bases → the EE moves toward the bases; toward
+the right end of the rails (rail zero) → the EE moves to +X. Redo the gesture
+after any libsurvive recalibration (the lighthouse world frame is re-anchored
+then).
 
 ## 7. Open items (phase-09 / after first hardware test)
 
 Yaw calibration gesture instead of a numeric field; tracker mount → tool
 rotation; recording tracker poses into datasets; pairing (`--pair-device`) if
-the tracker is not paired to this dongle; base-station generation.
+the tracker is not paired to this dongle; base-station generation; confirm the
+rail-only semantics (§1.1: posture held, TCP rides the rail) with the operator
+on the real rail — the alternative (IK keeps the TCP fixed in the world while
+the base slides) is what the loop did before 2026-09-02.
