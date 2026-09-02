@@ -116,6 +116,7 @@ class SceneMeta:
     rail: dict[str, bool]; wrist_cams: dict[str, bool]   # per arm_id
     cameras: tuple[str, ...]        # named MJCF cameras (post-prefix names)
     suitable_for: frozenset[str]    # {"sim", "twin"} — most scenes: both
+    allowed_pairs: tuple[tuple[str, str], ...]  # scene-authored structural pairs (§4.2)
 
 class SceneRegistry:                # REGISTRY = SceneRegistry() at import,
     def list(self) -> list[SceneMeta]: ...        # scans assets/scenes/*.yaml
@@ -123,6 +124,8 @@ class SceneRegistry:                # REGISTRY = SceneRegistry() at import,
     def build(self, scene_id: str,
               overrides: SceneOverrides | None = None) -> BuiltScene: ...  # §5
 ```
+
+### 4.1 Descriptor schema
 
 Descriptor schema (pydantic `SceneDescriptor`, one YAML file per scene):
 
@@ -147,13 +150,73 @@ environment:   # plane | box | mesh; collider: convex_hull | mesh_copy | boxes;
 keyframe:      # optional; default = per-arm "home". NOTE: q is MJCF qpos
   left: {q: [0.325, 0, -0.247, 0, 0.909, 0, 1.15644, 0], gripper: 1.0}
                # order (rail slide FIRST, §3) — internal to scene authoring
+allowed_pairs: # optional; structural pairs, twin pair labels (§4.2)
+  - [left_rail_platform, table]
 ```
+
+`gripper: none` + `wrist_cam: true` composes a **camera-only arm**: the gripper
+subtree is deleted, `link_tcp` sits on the link7 flange, and the D435 + stand
+mesh becomes **collidable** (it is the tool; with a gripper mounted the same
+mesh stays visual-only because it overlaps the gripper hull).
 
 `SceneOverrides` (runtime-supplied at session start): subset of arms to
 instantiate (`arm_ids`), per-arm base-pose overrides from `WorkcellConfig`
 (twin scenes must mirror measured reality), `geom_inflation_m` (twin only,
 §8). `WorkcellConfig` arm ids must match descriptor arm ids;
-`SceneRegistry.build` raises `SceneArmMismatchError` otherwise.
+`SceneRegistry.build` raises `SceneArmMismatchError` otherwise. Arm ids must
+not be prefixes of each other (`cam` / `cam_2`): pair labels are
+`"<arm_id>_<body>"` and the twin attributes a label to an arm by prefix.
+
+### 4.2 Scene-authored structural pairs (`allowed_pairs`)
+
+Some pairs are permanently inside the inflation band **by construction**: a rail
+carriage rides 24 mm above the table it is bolted to; two rails mounted 1.5 cm
+apart put each carriage ~2 mm from the neighbour's cable-tray plate. Physics
+never reports them (static↔static pairs are weld-filtered; the carriage is the
+moving exception) but the twin's at-home audit would refuse to arm the gate at
+the debug inflation of 0.025 m. The scene author therefore declares them:
+
+- `allowed_pairs: [[label_a, label_b], ...]` with the twin's pair labels — world
+  geoms by **geom name** (`table`, `obstacle`, `floor`), arm bodies as
+  `"<arm_id>_<body>"` (`grip_rail_platform`, `view_rail_base`).
+- Validated at build time against the built model: an unknown label raises
+  `SceneCompileError` (labels of arms dropped by an `arm_ids` override are
+  skipped). Carried on `SceneMeta.allowed_pairs`.
+- `DigitalTwin` merges them as source (a) of 11-safety §6.3, before
+  `safety.allowed_pairs_extra` (b) and the built-in rail-platform↔plane rule;
+  `default_collision_pairs(scene, twin.allowed)` therefore drops them from the IK
+  avoidance rows too. They are a whitelist of *labels*, never a change of geometry.
+
+### 4.3 Scene catalog
+
+| id | arms | purpose |
+|---|---|---|
+| `single_rail`, `single_fixed_tabletop` | 1 | dev defaults |
+| `dual_rail_tabletop`, `dual_mixed`, `triple_rail_row` | 2–3 | composition coverage |
+| `guardrail_env`, `guardrail_face`, `guardrail_rail` | 1–2 | safety CI cells (§11) |
+| **`mavis_v2`** | 2 | **the lab cell**: digital-twin reference for the real arms and a sim scenario |
+
+**`mavis_v2`** (Apollo lab, tape-measured 2026-09-02; the YAML header carries
+the same numbers — edit there). World frame: z-up, origin on the floor under
+the table centre; +X along the long edge toward the *right* end, +Y across the
+table toward the *back*; the operator / camera-arm side is −Y.
+
+| element | measurement | descriptor value |
+|---|---|---|
+| table | 1.215 × 0.63 × 0.03 m, top at 0.735 m | box half `[0.6075, 0.315, 0.015]` at z 0.72 |
+| rails | parallel to the long edge, feet on the table; zero at the right end, travel toward −X | `base_quat` yaw +90° `[0.7071, 0, 0, 0.7071]`; z = 0.735 + 0.107188 |
+| front rail (`view`, camera-only) | outer edge 2 cm from the front edge | y0 = −0.315 + 0.02 + 0.120 = **−0.175** |
+| back rail (`grip`, gripper + wrist cam) | outer edge 42 cm from the front edge | y0 = −0.315 + 0.42 − 0.0724 = **0.0326** |
+| rail zero | arms 14.5 cm from the right edge at q = 0 | x0 = 0.6075 − 0.145 − 0.098 = **0.3645** (14.5 cm read to the carriage edge; base edge → 0.3995, base centre → 0.4625) |
+| obstacle | 0.16 × 0.16 × 0.26 m box, flush with the back edge, +X face 29.2 cm from the right edge | half `[0.08, 0.08, 0.13]` at `(0.2355, 0.235, 0.865)` |
+| keyframe | both rails at zero; gripper TCP 11 cm above the box, tool down; camera arm swung 0.5 rad, D435 1.5 m up looking at the back strip | audit-clean at δ = 0.008 and 0.025 |
+| `allowed_pairs` | carriages ↔ table (24 mm), carriages ↔ neighbouring rail (~2 mm) | four pairs |
+
+Rail mesh facts used (mavis asset, unverified vs hardware — phase-09 item):
+across-axis extent `[−0.120, +0.0724]` m about the base line (the −0.120 side is
+a 3 mm cable-tray plate), carriage `[−0.098, +0.088]` m along the travel axis,
+1.0926 m long. The 2 cm / 42 cm / 39.5 cm readings disagree by 5 mm and the
+14.5 cm reference is ambiguous — both resolve in the phase-09 twin calibration.
 
 ## 5. Scene composition via `mujoco.MjSpec`
 

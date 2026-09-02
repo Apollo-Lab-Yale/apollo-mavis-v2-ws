@@ -243,8 +243,11 @@ excludes gripper-knuckle pairs). Then:
   keyframe under inflation must be allowed or fixed — the twin **refuses to arm the
   gate** with unexplained at-home contacts.
 - **AllowedPairs** (body-name granularity): `frozenset({body_a, body_b})` from
-  (a) scene-registry metadata, (b) `safety.allowed_pairs_extra`, (c) session-scoped
-  additions (fingertips ↔ named grasp object).
+  (a) the scene descriptor's `allowed_pairs` (scene-authored structural pairs,
+  validated against the built model at build time and carried on
+  `SceneMeta` — 03-sim §4.2; e.g. `mavis_v2`'s carriages 24 mm above the table
+  and ~2 mm from the neighbouring rail), (b) `safety.allowed_pairs_extra`,
+  (c) session-scoped additions (fingertips ↔ named grasp object).
 - **Convex hulls** over-approximate — conservative but can false-alarm in tight
   layouts. Escape hatch: decompose the offending link mesh with **CoACD** into a few
   convex pieces as collision-only geoms (`group="3"`, alpha 0) in a scene-local

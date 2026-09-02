@@ -36,6 +36,11 @@ clones (gitignored by the ws repo until converted to submodules).
   profiles must be matched to NICs programmatically at startup.
 - Arms may or may not have a linear track (rail); max rail travel 0.65 m.
   Presence must be auto-detected via the xArm SDK.
+- Lab cell geometry (tape-measured 2026-09-02): 1.215 × 0.63 × 0.03 m table, top
+  0.735 m above the floor; two parallel rails (camera-only arm in front, gripper +
+  wrist-cam arm behind); 0.16 × 0.16 × 0.26 m obstacle at the back edge. Encoded in
+  apollo-xarm7-sim `scenes/mavis_v2.yaml` (header lists every measurement and the
+  assumptions to confirm in phase-09); docs/design/03-sim.md §4.3 has the arithmetic.
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
   hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
   NVIDIA driver 580.173.02 (upgraded 2026-09-01); NVENC works. lerobot's
