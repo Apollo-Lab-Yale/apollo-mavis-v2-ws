@@ -79,7 +79,7 @@ InferencePanel 真实接线（phase-08）；WebRTC、MuJoCo-WASM、SSR（明确�
 
 - `apollo-xarm7-ui/` 完整工程：`package.json`（scripts：dev/build/preview/lint/format/
   test/gen:sync/gen:types/gen:check）、`vite.config.ts`（dev 代理 `/api` `/ws` `/video`
-  → `APOLLO_RUNTIME_URL ?? http://localhost:8000`）、`schemas/`（vendored）、`src/gen/`
+  → `APOLLO_RUNTIME_URL ?? http://localhost:8765`）、`schemas/`（vendored）、`src/gen/`
   （生成并入库）。
 - `tests/mocks/mockWs.ts`（讲 runtime 协议的 mock-socket 服务器：hello、记录
   KeysMsg/ActionMsg、推 telemetry fixture 与二进制视频帧）。

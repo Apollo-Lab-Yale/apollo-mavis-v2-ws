@@ -9,7 +9,7 @@ Status: v0.1 (2026-09-01). Conforms to `00-overview.md` (spine, v0.3) and mirror
 Runtime = session engine + server: composes a workcell (hardware or sim),
 runs the 100 Hz control loop for all four modes (teleop / collect / DAgger /
 inference), owns recording, safety supervision, the DAgger trainer process,
-and the single FastAPI app (REST + WS + video + SPA) on **port 8000**.
+and the single FastAPI app (REST + WS + video + SPA) on **port 8765**.
 Depends on `apollo_xarm7_core`; `hardware` and `sim` are optional extras
 (hardware mode with twin safety needs both — the twin lives in `sim`).
 Server deps: `fastapi`, `uvicorn[standard]`, `opencv-python`, `lerobot>=0.6`
@@ -667,13 +667,13 @@ def create_app(runtime: Runtime) -> FastAPI:
     return app
 
 # __main__.py
-uvicorn.run(create_app(runtime), host=cfg.host, port=cfg.port,  # default 8000
+uvicorn.run(create_app(runtime), host=cfg.host, port=cfg.port,  # default 8765
             ws_per_message_deflate=False,        # 100 Hz control channel
             log_level="info")
 ```
 
 SPA uses hash routing, so `StaticFiles(html=True)` deep-link 404s never
-occur; dev mode runs Vite with a proxy to `http://localhost:8000` (05-ui
+occur; dev mode runs Vite with a proxy to `http://localhost:8765` (05-ui
 §1.1). `MUJOCO_GL=egl` is set in `__main__.py` before any mujoco import;
 `MUJOCO_EGL_DEVICE_ID` from config (render on GPU 0; trainer owns GPU 1).
 
@@ -684,7 +684,7 @@ env; defaults sane for sim-only dev):
 
 ```yaml
 host: 127.0.0.1
-port: 8000
+port: 8765
 ui_dist: null                # path to built SPA; null = API-only (Vite dev)
 workcells:                   # POST /api/session picks by requested kind
   hardware: { <WorkcellConfig, core §3.2>: arms/ips/base_in_world/cameras,

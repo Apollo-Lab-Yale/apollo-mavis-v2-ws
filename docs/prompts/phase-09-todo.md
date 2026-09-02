@@ -13,8 +13,8 @@
       ——udev rules 保留。）顺带修了 recorder 的 NVENC 探测 bug（真因是 lerobot 的
       `g=2` 需配 `bf=0`，与驱动无关）。
 - [ ] **改 sudo 密码**：密码曾在聊天记录里出现过，尽快 `passwd` 换掉。
-- [ ] **处理 8000 端口占用**：查明占用进程（`ss -ltnp | grep :8000`），
-      释放它或告知 Claude 把 runtime 默认端口改掉。
+- [x] ~~处理 8000 端口占用~~ 2026-09-02 runtime 默认端口改为 **8765**（8000 由
+      gohttpserver 服务占用，不再需要释放）。UI Vite 代理默认值、设计文档同步。
 - [ ] （可选）确认三臂 IP 各在**不同子网**（UFACTORY Studio 里查/改）——
       同子网会破坏 NIC 探测（research/network-manager.md 风险 #1）；
       顺手记录每台臂固件版本（gripper 电流需 fw ≥ 2.7.100）。

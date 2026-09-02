@@ -74,7 +74,7 @@ twist → 微分 IK → servo 的 teleop 管线、直接关节控制路径（`jo
   走 control WS ActionMsg（`set_initial_condition` 无 `profile_id` 时 = 先把当前状态
   存为名 `"initial"` 的 profile（**覆盖**）再指定为 initial）；管理性 CRUD 走 REST；
   删除 designated initial ⇒ 409。
-- **FastAPI 服务（单端口 8000）**：
+- **FastAPI 服务（单端口 8765）**：
   - REST `/api`（响应模型全部来自 `core.protocol`）：`GET /api/health`（epoch）、
     `GET /api/workcell`（`WorkcellStatus` 含 per-arm 连接/rail/gripper +
     `policies_available`）、`GET /api/cameras`、`GET /api/scenes?kind=sim|twin`、
@@ -119,7 +119,7 @@ UI 本体（phase-06，本 phase 用 Python WS 客户端测试）；WebRTC / MuJ
   `session/ control/ safety/ profiles/ streams/ server/`（04-runtime §2 布局；
   `recorder/` 属 phase-07、`dagger/` 属 phase-08）。
 - 启动入口：`uv run python -m apollo_xarm7_runtime --config <runtime.yaml>`
-  （uvicorn 内嵌，端口默认 8000，`ws_per_message_deflate=False`）。
+  （uvicorn 内嵌，端口默认 8765，`ws_per_message_deflate=False`）。
 - `tests/`：单元（watchdog 状态机穷举、seq 去重、单 writer/observer、gate
   hold-last-safe/hysteresis/escape、jog/goto、start_from 解析、chokepoint AST 扫描）
   + WS/REST 契约（starlette TestClient + FakeWorkcell）+ **sim-backed e2e**
