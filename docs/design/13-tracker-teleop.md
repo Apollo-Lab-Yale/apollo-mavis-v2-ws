@@ -42,12 +42,29 @@ pose AND the discrete inputs; the gamepad is optional. libsurvive button events
 trackpad, `7` grip, `6` menu, `3` system; axis ids `1` trigger (0..1), `2`
 trackpad x, `3` trackpad y (both −1..1, +y = top).
 
-| controller | code injected | action |
-|---|---|---|
-| trigger click (button 0 down) | KeyC | tracker_clutch |
-| trackpad click with y > +0.3 | KeyH | gripper_open (rate, while held) |
-| trackpad click with y < −0.3 | KeyF | gripper_close (rate, while held) |
-| grip / menu / system / touch without click | — | none (menu+system is the pairing combo — never map it) |
+| controller | injected | action | kind |
+|---|---|---|---|
+| trigger click (button 0 down) | code KeyC | tracker_clutch | held |
+| trackpad click, x < −0.3 (left) | code KeyF | gripper_close (rate, while held) | held |
+| trackpad click, x > +0.3 (right) | code KeyH | gripper_open (rate, while held) | held |
+| trackpad click, y > +0.3 (up) | action switch_arm | next arm | discrete, press edge |
+| trackpad click, y < −0.3 (down) | action switch_arm_prev | previous arm | discrete, press edge |
+| grip / menu / system / touch without click | — | none (menu+system is the pairing combo — never map it) | |
+
+A click is classified once, at its press edge, by the trackpad position at that
+moment (dominant axis wins; |x| and |y| both below the deadzone ⇒ ignored); the
+classification is held until release. Default `controller_map`:
+`{clutch: trigger_click, gripper_close: trackpad_left, gripper_open:
+trackpad_right, arm_next: trackpad_up, arm_prev: trackpad_down}` with
+`trackpad_deadzone: 0.3`. Device-sourced discrete actions are executed inside
+the control loop (`_op_switch_arm` / `_op_switch_arm_prev`) on the press edge,
+subject to the same nacks as the WS actions (e.g. takeover engaged); the
+telemetry `device_held` list shows the held codes, `device_actions` the last
+discrete action fired.
+
+The default **active arm is the gripper arm**: sessions started from the
+devices page list `grip` first (`arms: [grip, view]`); operators can still
+switch with the trackpad or Tab/KeyZ.
 
 These **device-held codes** are produced by the runtime's tracker reader
 (`TrackerSample.controller` + `TrackerSample.held_codes`) and merged into the
@@ -161,6 +178,17 @@ move together.
   controller state and the derived `held_codes` to every sample and publishes a
   sample on each button edge. The fake backend exposes the same fields (no
   buttons) so the merge path is unit-testable with a scripted controller state.
+- **Pose filter** (`TrackerConfig.filter`): the aligned tracker pose is passed
+  through a One Euro filter before the anchor/delta math — position per axis
+  (`min_cutoff_hz: 1.0`, `beta: 0.05`, `d_cutoff_hz: 1.0`) and orientation via
+  the same filter on the rotation-vector increment (slerp-equivalent for small
+  steps), followed by a rest deadband (`deadband_m: 0.002`, `deadband_rad:
+  0.005`): displacements below the deadband since the last emitted pose are
+  dropped. The filter runs in the provider at the 100 Hz tick on the latest
+  sample (not in the reader), resets on engage and on stale/invalid gaps, and
+  `filter.enabled: false` bypasses it. `tracker_settings` gains optional
+  `filter_min_cutoff_hz` / `filter_beta` so the debug page can tune it live;
+  telemetry echoes the effective settings and reports `pose_filtered`.
 - `_op_switch_arm_prev` mirrors `_op_switch_arm` with `(i − 1) mod n`; the
   DAgger override nacks it while a takeover is engaged, like `switch_arm`.
 - `_op_tracker_settings` updates the live settings and echoes them in telemetry.
@@ -186,7 +214,10 @@ move together.
 - Arming: gamepad input arms capture automatically when the control link is
   open and the role is controller; the armed state is shown by the existing
   chip plus a gamepad chip.
-- New hash route `#/devices` (no session loader): gamepad panel (mapping
+- New hash route `#/devices` (no session loader). The page wraps its video
+  area in the same keyboard-capture surface as the cockpit (`TeleopSurface`), so
+  keyboard teleop (incl. `KeyC` clutch) works there too; its session start uses
+  `arms: [grip, view]` (gripper arm active by default). Contents: gamepad panel (mapping
   string, raw button/axis indices and values, mapped actions lit when active),
   tracker panel (status/backend/rate/age, raw and world poses, 2-D top-down trail
   canvas with the anchor and current target when engaged, z readout), settings
