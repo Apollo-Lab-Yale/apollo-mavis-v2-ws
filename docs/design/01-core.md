@@ -516,9 +516,10 @@ discriminators let one `TypeAdapter` parse the channel.
 
 ```python
 ActionName = Literal[
-    "switch_arm", "takeover_toggle",
+    "switch_arm", "switch_arm_prev", "takeover_toggle",
     "episode_new", "episode_save", "episode_discard",
     "save_profile", "set_initial_condition", "joint_target",
+    "tracker_settings",
 ]
 
 class HelloMsg(BaseModel):               # server -> client, immediately after accept
@@ -560,6 +561,11 @@ class SetInitialConditionArgs(BaseModel):
     profile_id: str | None = None        # None: save current state first (name "initial",
                                          #   overwrite), then designate (04-runtime §9)
 
+class TrackerSettingsArgs(BaseModel):    # name == "tracker_settings" (13-tracker §3.4)
+    yaw_deg: float | None = None         # fields omitted (None) = unchanged
+    pos_scale: float | None = None       # 0.1 <= pos_scale <= 3.0
+    follow_rotation: bool | None = None
+
 ControlClientMsg = Annotated[KeysMsg | ActionMsg, Field(discriminator="t")]
 ControlServerMsg = Annotated[HelloMsg | AckMsg, Field(discriminator="t")]
 ```
@@ -567,7 +573,9 @@ ControlServerMsg = Annotated[HelloMsg | AckMsg, Field(discriminator="t")]
 Normative: **Space = discrete takeover toggle** — one
 `ActionMsg{takeover_toggle}` per physical press, never in `KeysMsg.held`;
 recorded intervention in DAgger, never-recorded safety escape in inference.
-`switch_arm` carries no index; the server cycles the authoritative active arm.
+`switch_arm` / `switch_arm_prev` carry no index; the server cycles the
+authoritative active arm forward / backward (`(i ± 1) mod n`). `validate_action_args`
+requires `args == {}` for every action without an args model.
 
 ## 11. Protocol: telemetry (`protocol/telemetry.py`)
 
@@ -617,6 +625,22 @@ class SessionTelemetry(BaseModel):       # additive block (04-runtime §13.3)
     start_from_progress: float | None = None    # 0-1 during START_FROM
     plan_status: str | None = None; trainer_alive: bool | None = None
 
+class TrackerSettingsMsg(BaseModel):     # live tracker settings (13-tracker §3.5)
+    yaw_deg: float; pos_scale: float; follow_rotation: bool
+
+class TrackerTelemetry(BaseModel):       # additive block (13-tracker §3.5)
+    backend: Literal["libsurvive", "fake", "none"]
+    status: Literal["no_backend", "starting", "searching", "tracking", "stale", "error"]
+    detail: str = ""; object_name: str = ""
+    seq: int = 0; rate_hz: float = 0.0; age_s: float | None = None
+    pose_raw: PoseMsg | None = None      # lighthouse world
+    pose_world: PoseMsg | None = None    # after yaw alignment
+    clutch: bool = False; engaged_arm: str | None = None
+    anchor_tcp: PoseMsg | None = None    # EE pose at engagement (world)
+    target_tcp: PoseMsg | None = None    # tracker-derived EE target (world)
+    settings: TrackerSettingsMsg         # device fields populated even without a
+                                         #   session; session fields None otherwise
+
 class TelemetryMsg(BaseModel):
     t: Literal["telemetry"] = "telemetry"
     seq: int; ts: float; epoch: str      # ts = server monotonic, s
@@ -629,6 +653,7 @@ class TelemetryMsg(BaseModel):
     dagger: DaggerStatus | None          # None outside DAgger
     inference: InferenceStatus | None    # None outside inference
     session: SessionTelemetry | None = None     # additive
+    tracker: TrackerTelemetry | None = None     # additive (13-tracker §3.5)
 ```
 
 ## 12. Protocol: session & REST models (`protocol/session.py`)
@@ -717,40 +742,53 @@ def is_reserved_stream(stream_id: str) -> bool
 ```
 
 **Canonical keymap.** `GET /api/keymap` serves exactly this table; the UI
-builds its bound-key set from it — no hardcoded duplicate (binding).
+builds its bound-key set — and its gamepad mapping — from it; no hardcoded
+duplicate (binding; 13-tracker §1/§3).
 
 ```python
 class KeymapEntry(BaseModel):
     code: str                            # KeyboardEvent.code
-    action: str                          # held: axis name; discrete: ActionName
+    action: str                          # held: axis name or held modifier; discrete: ActionName
     kind: Literal["held", "discrete"]
     label: str                           # overlay text
-    group: Literal["translate", "rotate", "gripper", "rail", "session", "episode"]
+    group: Literal["translate", "rotate", "gripper", "rail", "session", "episode", "tracker"]
     requires_rail: bool = False
+    gamepad: str | None = None           # XInput control mirrored on this row:
+                                         #   DpadLeft/DpadRight/A/B/LB/RB/RT (additive)
 
-KEYMAP: tuple[KeymapEntry, ...]          # exactly these 21 entries:
+KEYMAP: tuple[KeymapEntry, ...]          # exactly these 23 entries:
 # held/translate: KeyW translate_x_pos "+x (forward)" | KeyS translate_x_neg "-x (back)"
 #                 KeyA translate_y_pos "left" | KeyD translate_y_neg "right"
 #                 KeyE translate_z_pos "up"   | KeyQ translate_z_neg "down"
 # held/rotate:    KeyI roll_pos  | KeyK roll_neg      (about TCP axes; spine §5:
 #                 KeyJ pitch_pos | KeyL pitch_neg      I/K roll, J/L pitch, U/O yaw)
 #                 KeyU yaw_pos   | KeyO yaw_neg
-# held/gripper:   KeyF gripper_close | KeyH gripper_open
-# held/rail:      ArrowLeft rail_neg | ArrowRight rail_pos   (requires_rail=True)
-# discrete/session: Tab switch_arm | Space takeover_toggle
+# held/gripper:   KeyF gripper_close (gamepad B) | KeyH gripper_open (gamepad A)
+# held/rail:      ArrowLeft rail_neg (DpadLeft) | ArrowRight rail_pos (DpadRight)
+#                 (requires_rail=True)
+# held/tracker:   KeyC tracker_clutch "tracker clutch (hold)" (gamepad RT) — a held
+#                 MODIFIER, not an axis (13-tracker §1)
+# discrete/session: KeyZ switch_arm_prev "previous arm" (gamepad LB)
+#                 | Tab switch_arm (gamepad RB) | Space takeover_toggle
 #                 (label: "takeover toggle (DAgger: recorded; inference: safety
 #                  escape, never recorded)")
 # discrete/episode: KeyN episode_new | Enter episode_save | Backspace episode_discard
 
 HELD_CODES: frozenset[str]; DISCRETE_CODES: dict[str, str]   # derived views
+HELD_MODIFIER_ACTIONS: frozenset[str] = frozenset({"tracker_clutch"})
+    # held actions that are NOT axes: excluded from axis_map(); runtime's
+    # held_to_twist ignores them (13-tracker §3.3)
 def axis_map() -> dict[str, tuple[str, float]]
-    # held action -> (axis, sign), e.g. "translate_x_pos" -> ("x", +1.0);
+    # held axis action -> (axis, sign), e.g. "translate_x_pos" -> ("x", +1.0);
     # single source of signs for runtime's held_to_twist
 ```
 
-Invariants (tested §18): 21 entries (6 translate + 6 rotate + 2 gripper +
-2 rail + 2 session + 3 episode — matches spine §5), unique codes; every discrete `action` is
-a valid `ActionName`; exactly the rail entries have `requires_rail=True`; no
+Invariants (tested §18): 23 entries (6 translate + 6 rotate + 2 gripper +
+2 rail + 1 tracker + 3 session + 3 episode — matches spine §5), unique codes;
+every discrete `action` is a valid `ActionName`; exactly the rail entries have
+`requires_rail=True`; every held action is either an axis (in `axis_map()`,
+with a ± partner on the same axis) or a member of `HELD_MODIFIER_ACTIONS`,
+never both; exactly the seven 13-tracker §1 rows carry a `gamepad` label; no
 browser-owned chords. Episode keys are always listed; runtime nacks them in
 modes without a recorder.
 
@@ -763,9 +801,9 @@ UI pipeline (05-ui §2): core exports JSON Schema → UI `pnpm gen:sync` copies
 ```python
 EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   # control:  HelloMsg, KeysMsg, ActionMsg, AckMsg, JointTargetArgs,
-  #           SaveProfileArgs, SetInitialConditionArgs
+  #           SaveProfileArgs, SetInitialConditionArgs, TrackerSettingsArgs
   # telemetry: TelemetryMsg (embeds ArmTelemetry/CollisionReport/EpisodeStatus/
-  #           DaggerStatus/TrainerStatus/InferenceStatus via $defs)
+  #           DaggerStatus/TrainerStatus/InferenceStatus/TrackerTelemetry via $defs)
   # session:  SessionSpec, SessionInfo, WorkcellStatus, ArmStatusInfo,
   #           CameraInfo, SceneInfo, ProfileInfo, PolicyInfo
   # misc:     StateProfile, KeymapEntry, CollisionEvent

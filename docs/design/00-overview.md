@@ -209,25 +209,30 @@ arms; **Tab** cycles which one keyboard teleop drives; non-active arms hold.
 
 ## 5. Keybindings (canonical)
 
-| Key | Action |
-|---|---|
-| W / S | translate +x / −x (forward/back) |
-| A / D | translate left / right |
-| E / Q | translate up / down |
-| I / K | roll + / − |
-| J / L | pitch + / − |
-| U / O | yaw + / − |
-| F / H | gripper close / open |
-| ← / → | rail left / right (only if rail detected; 0–0.65 m) |
-| Tab | switch active arm |
-| Space | takeover toggle (DAgger: recorded as intervention; inference: safety escape, never recorded) |
-| N | start new episode (collect/DAgger) |
-| Enter | save current episode |
-| Backspace | discard current episode |
+| Key | Gamepad | Action |
+|---|---|---|
+| W / S | — | translate +x / −x (forward/back) |
+| A / D | — | translate left / right |
+| E / Q | — | translate up / down |
+| I / K | — | roll + / − |
+| J / L | — | pitch + / − |
+| U / O | — | yaw + / − |
+| F / H | B / A | gripper close / open |
+| ← / → | D-pad left / right | rail left / right (only if rail detected; 0–0.65 m) |
+| C (hold) | RT (hold, ≥ 0.5) | tracker clutch — Vive tracker drives the EE while held (13-tracker §1) |
+| Z | LB | switch to previous arm |
+| Tab | RB | switch active arm |
+| Space | — | takeover toggle (DAgger: recorded as intervention; inference: safety escape, never recorded) |
+| N | — | start new episode (collect/DAgger) |
+| Enter | — | save current episode |
+| Backspace | — | discard current episode |
 
 Note: the user's spec listed K for both roll and pitch; resolved as I/K = roll,
 J/L = pitch (IJKL cluster). Teleop & collection pages must display a keybinding
-hint overlay. Keymap is defined once in `core.protocol.keymap` and served to UI.
+hint overlay. Keymap is defined once in `core.protocol.keymap` and served to UI;
+the **Gamepad** column is the `KeymapEntry.gamepad` field (13-tracker §3), so
+the UI never hard-codes the pad mapping. The tracker clutch is a *held
+modifier* (not an axis): the rail is never driven by the tracker.
 
 ## 6. Safety & collision (all modes, all command sources)
 

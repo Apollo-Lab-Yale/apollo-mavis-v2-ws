@@ -29,8 +29,11 @@ src/apollo_xarm7_runtime/        # pyproject extras: [hardware] [sim] [trainer]
 ├── session/    manager.py (state machine §5), types.py (SessionState; SessionSpec/
 │               SessionInfo imported from core.protocol.session, core §12)
 ├── control/    loop.py (ControlLoop 100 Hz §6), teleop.py (keys→twist→target),
+│               tracker_teleop.py (clutched tracker target provider, 13-tracker §4),
 │               joint_panel.py (jog/goto §7), arm_sender.py (per-arm senders §3),
 │               snapshot.py (StateSnapshot + publisher)
+├── devices/    tracker.py (TrackerReader thread: libsurvive|fake|none → LatestSlot;
+│               the ONLY pysurvive import site, 13-tracker §2)
 ├── safety/     gate.py (SafetyGate/NullGate §8), supervisor.py (twin gate §8),
 │               watchdog.py (InputWatchdog + ArmReportWatchdog §8)
 ├── profiles/   store.py (core ProfileStore re-export + save_from_snapshot §9)
@@ -710,8 +713,16 @@ video: {preview_fps: 15, session_fps: 30}
 dagger: {policy_hz: 15, t_blend_s: 0.3, pause_others_on_takeover: true,
          trainer: {gpu: 1, min_new_labels: 100, push_period_s: 5,   # 12-dagger §7
                    port: 5757}}                                     # tcp://127.0.0.1
+tracker: {backend: none,            # none | fake | libsurvive (13-tracker §4)
+          object_name: WM0, libsurvive_args: ["--lighthousecount", "2"],
+          yaw_deg: 0.0, pos_scale: 1.0, follow_rotation: true,       # live defaults
+          stale_s: 0.2, max_jump_m: 0.10}
 egl_device_id: 0
 ```
+
+`tracker.*` is owned by `Runtime` for the process lifetime (`TrackerReader`
+thread + live `TrackerSettings`); the `tracker_settings` action mutates
+yaw/scale/rotation at runtime and telemetry echoes them (13-tracker §4).
 
 Version pins carried by the workspace (overview §9): MuJoCo 3.12.0,
 mink 1.3.0, lerobot ≥0.6 pinned, xArm-Python-SDK 1.18.5.
