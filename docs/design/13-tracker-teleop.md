@@ -189,6 +189,26 @@ move together.
   `filter.enabled: false` bypasses it. `tracker_settings` gains optional
   `filter_min_cutoff_hz` / `filter_beta` so the debug page can tune it live;
   telemetry echoes the effective settings and reports `pose_filtered`.
+- **Anchor and re-seed rules (review 2026-09-02):** (a) whenever an arm's tick
+  was resolved by a non-teleop source (goto plan, joint jog, policy), the teleop
+  target is re-seeded from the measured TCP before teleop resumes, so the first
+  clutched tick after such motion has zero delta; (b) anchor slip for rotation
+  is applied in the BODY frame — `dq_b = conj(intended.q) ⊗ achieved.q`,
+  `A_ee.q ← A_ee.q ⊗ dq_b` — so that `D ⊗ A_ee'.q == achieved.q` exactly for
+  any hand rotation `D`; (c) the settings (yaw, scale, rotation flag, filter)
+  are snapshotted at engagement; a `tracker_settings` change while engaged
+  re-anchors (`A_trk ← align(sample, new)`, `A_ee ← current target`) instead of
+  re-interpreting the accumulated offset — the arm never moves on a settings
+  change.
+- **Reader robustness:** every libsurvive event is guarded (finite position,
+  unit-norm quaternion; a bad event is dropped and counted, never raised); the
+  device status distinguishes `error` (no OBJECT-type device after the grace
+  period — dongle busy/not openable, tracker off/unpaired — with the libusb
+  detail) from `searching` (device present, no pose yet) by enumerating
+  OBJECT-type objects, and reports a mismatching `object_name` explicitly;
+  `rate_hz` decays to 0 when samples stop; libsurvive warnings are rate-limited
+  (≤ 1 line/s per message class) and the runtime entry point configures Python
+  logging.
 - `_op_switch_arm_prev` mirrors `_op_switch_arm` with `(i − 1) mod n`; the
   DAgger override nacks it while a takeover is engaged, like `switch_arm`.
 - `_op_tracker_settings` updates the live settings and echoes them in telemetry.
@@ -211,6 +231,10 @@ move together.
   keymap. Held rows → codes in a shared held set (union with the keyboard set;
   `setHeldSource` becomes a union of sources); discrete rows → `sendAction` on
   press edge; release-all on `gamepaddisconnected`, blur, hidden, disarm.
+- Release-all on blur/hidden/link-down is latched: no new press edges are
+  accepted until every mapped control reads released (or the page is focused and
+  visible again); the settings form sends `tracker_settings` on commit
+  (Enter/blur), not per keystroke, and shows nacks as toasts.
 - Arming: gamepad input arms capture automatically when the control link is
   open and the role is controller; the armed state is shown by the existing
   chip plus a gamepad chip.
