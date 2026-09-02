@@ -408,8 +408,10 @@ slot; per frame pull `read_latest()` from each recorded camera (max_age
 2/fps, else drop + count `frames_dropped`); `add_frame`. The 100 Hz control
 loop is never recorded directly — it interpolates between recorded actions
 (lerobot `interpolation_multiplier` pattern, here 100/fps = 4). Encoding:
-`streaming_encoding=True`, `rgb_encoder.vcodec="auto"` → NVENC (`h264_nvenc`)
-on the 4090s, so `save_episode()` is near-instant between episodes.
+`streaming_encoding=True`, `rgb_encoder.vcodec="auto"` → NVENC (`h264_nvenc`,
+with `bf=0` for lerobot's `g=2`; resumed datasets keep their codec family —
+10-frames §7.5) on the 4090s, so `save_episode()` is near-instant between
+episodes.
 
 ### 10.2 Dataset schema (always, every mode that records)
 

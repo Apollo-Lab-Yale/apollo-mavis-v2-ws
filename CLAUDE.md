@@ -38,4 +38,6 @@ clones (gitignored by the ws repo until converted to submodules).
   Presence must be auto-detected via the xArm SDK.
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
   hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
-  NVENC needs a newer NVIDIA driver on this box (falls back to libsvtav1).
+  NVIDIA driver 580.173.02 (upgraded 2026-09-01); NVENC works. lerobot's
+  `g=2` GOP needs `bf=0` on NVENC (runtime recorder injects it), otherwise
+  the open fails and `vcodec: auto` falls back to libsvtav1.

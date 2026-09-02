@@ -521,6 +521,28 @@ features["policy_version"] = {"dtype": "int32", "shape": (1,), "names": None,
   `rgb_encoder.vcodec="auto"` → `h264_nvenc` on the 4090s, `pix_fmt=
   "yuv420p"`, `g=2` (keyframe every 2 frames), per-feature
   `info["video.*"]` filled by lerobot. `save_episode()` is near-instant.
+  - NVENC needs `bf=0` alongside lerobot's `g=2`: its default 3 B-frames
+    violate "GOP length > bf + 1" and `avcodec_open2` fails with EINVAL
+    (regardless of driver or frame size). The recorder injects it via
+    `RGBEncoderConfig.extra_options` for `h264_nvenc`/`hevc_nvenc`.
+  - `"auto"` is resolved by a REAL open-probe that mirrors lerobot's exact
+    codec options + `pix_fmt` at the **smallest** recorded stream size
+    (hardware encoders enforce a minimum frame size), in lerobot's
+    `HW_VIDEO_CODECS` order, falling back to `libsvtav1`. Listing an encoder
+    is not enough; a bare open without options is not enough either.
+  - A **resumed** dataset keeps its codec family (`info.json`
+    `video.codec` = h264/hevc/av1): `"auto"` re-probes only within that
+    family (hardware first, then the software encoder), and an explicit
+    `vcodec` of another family is rejected at session start — lerobot's
+    offline merge (§8) refuses mixed-codec videos.
+  - GeForce NVENC allows 8 concurrent sessions per host and lerobot opens one
+    per recorded video stream per episode; the 4-slot camera budget stays
+    under that. Exhaustion surfaces as encoder-thread errors +
+    `frames_dropped`, not at probe time.
+  - Size/CPU: lerobot maps crf 30 to NVENC constqp `qp=30`; on noisy sensor
+    content that is ~3× the bytes of `libsvtav1` at equal PSNR (smaller on
+    clean scenes). NVENC buys CPU offload (~13× less CPU per frame), not
+    wall speed.
 - `robot_type` distinguishes real vs sim: `xarm7_{n}arm_rail` vs
   `xarm7_{n}arm_rail_mujoco`.
 
