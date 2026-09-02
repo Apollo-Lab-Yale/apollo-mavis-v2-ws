@@ -234,6 +234,22 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
 - **Tab / switch_arm**: server-authoritative — the Command cycles
   `active_arm` over `session.arms`; the previous arm's target freezes; the UI
   learns the new arm via telemetry only.
+- **Device-held codes + per-source scales** (13-tracker §1.1): step 2 also
+  reads the newest `TrackerSample`; when it is fresh (`age ≤ tracker.stale_s`)
+  its `held_codes` (Vive-controller buttons mapped by `tracker.controller_map`
+  to the keymap codes of `tracker_clutch` / `gripper_open` / `gripper_close`)
+  are merged into the tick's set: `held_eff = held ∪ device_codes`
+  (`ControlLoop.sources: HeldSources`). Each source keeps its own scale — WS
+  codes the `InputWatchdog` scale, device codes `1.0` fresh / `0.0` stale (the
+  controller's ≥100 Hz sample stream is their heartbeat; a WS `AWAIT_EMPTY`
+  latch never zeroes device-driven motion). A code held by both sources takes
+  the larger scale (`HeldSources.scale_for`): the tracker clutch branch runs
+  at the clutch holder's scale, `_gripper_step` integrates F/H per code at
+  that code's scale, keyboard translate/rotate/rail keep the WS scale (only
+  WS codes carry them), and the movement-key plan-cancel rule fires for any
+  code whose source scale is > 0. A running session is required; a connected
+  `/ws/control` client is not. Telemetry echoes the raw controller state and
+  the injected codes (`tracker.controller`, `tracker.device_held`).
 
 `StateSnapshot` (published every tick, consumed at lower rates):
 
@@ -716,7 +732,11 @@ dagger: {policy_hz: 15, t_blend_s: 0.3, pause_others_on_takeover: true,
 tracker: {backend: none,            # none | fake | libsurvive (13-tracker §4)
           object_name: WM0, libsurvive_args: ["--lighthousecount", "2"],
           yaw_deg: 0.0, pos_scale: 1.0, follow_rotation: true,       # live defaults
-          stale_s: 0.2, max_jump_m: 0.10}
+          stale_s: 0.2, max_jump_m: 0.10,
+          controller_map: {clutch: trigger_click,                    # 13-tracker §1.1;
+                           gripper_open: trackpad_up,                #   values also
+                           gripper_close: trackpad_down},            #   accept "none"
+          trackpad_deadzone: 0.3}
 egl_device_id: 0
 ```
 

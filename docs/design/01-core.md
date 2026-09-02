@@ -628,6 +628,14 @@ class SessionTelemetry(BaseModel):       # additive block (04-runtime §13.3)
 class TrackerSettingsMsg(BaseModel):     # live tracker settings (13-tracker §3.5)
     yaw_deg: float; pos_scale: float; follow_rotation: bool
 
+class ControllerTelemetry(BaseModel):    # raw Vive-controller inputs (13-tracker §1.1)
+    trigger: float = 0.0                 # analog pull 0..1
+    trigger_pressed: bool = False        # trigger click (libsurvive button 0)
+    trackpad_touch: bool = False         # finger on pad (TOUCH_DOWN/UP)
+    trackpad_click: bool = False         # pad pressed (button 1)
+    trackpad_x: float = 0.0; trackpad_y: float = 0.0   # -1..1, +y = top
+    grip: bool = False; menu: bool = False; system: bool = False   # buttons 7/6/3
+
 class TrackerTelemetry(BaseModel):       # additive block (13-tracker §3.5)
     backend: Literal["libsurvive", "fake", "none"]
     status: Literal["no_backend", "starting", "searching", "tracking", "stale", "error"]
@@ -640,6 +648,9 @@ class TrackerTelemetry(BaseModel):       # additive block (13-tracker §3.5)
     target_tcp: PoseMsg | None = None    # tracker-derived EE target (world)
     settings: TrackerSettingsMsg         # device fields populated even without a
                                          #   session; session fields None otherwise
+    controller: ControllerTelemetry | None = None   # None = backend reports no controller
+    device_held: list[str] = []          # key codes injected from the controller (§1.1
+                                         #   table, e.g. ["KeyC", "KeyH"]); [] when stale
 
 class TelemetryMsg(BaseModel):
     t: Literal["telemetry"] = "telemetry"
@@ -803,7 +814,7 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   # control:  HelloMsg, KeysMsg, ActionMsg, AckMsg, JointTargetArgs,
   #           SaveProfileArgs, SetInitialConditionArgs, TrackerSettingsArgs
   # telemetry: TelemetryMsg (embeds ArmTelemetry/CollisionReport/EpisodeStatus/
-  #           DaggerStatus/TrainerStatus/InferenceStatus/TrackerTelemetry via $defs)
+  #           DaggerStatus/TrainerStatus/InferenceStatus/TrackerTelemetry/ControllerTelemetry via $defs)
   # session:  SessionSpec, SessionInfo, WorkcellStatus, ArmStatusInfo,
   #           CameraInfo, SceneInfo, ProfileInfo, PolicyInfo
   # misc:     StateProfile, KeymapEntry, CollisionEvent
