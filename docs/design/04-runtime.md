@@ -250,6 +250,60 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   code whose source scale is > 0. A running session is required; a connected
   `/ws/control` client is not. Telemetry echoes the raw controller state and
   the injected codes (`tracker.controller`, `tracker.device_held`).
+- **Trackpad click classification + device discrete actions** (13-tracker
+  §1.1, remap 2026-09-02): the reader classifies a trackpad click ONCE at its
+  press edge from `(x, y)` by the dominant axis (`|x|` and `|y|` both within
+  `trackpad_deadzone` ⇒ ignored) and holds the class until release
+  (`ControllerState.click_seq` / `click_dir`, `classify_click`). Default
+  `controller_map`: `{clutch: trigger_click, gripper_close: trackpad_left,
+  gripper_open: trackpad_right, arm_next: trackpad_up, arm_prev:
+  trackpad_down}`; every input binds at most one action and the discrete
+  actions accept trackpad inputs only. Held bindings become `held_codes` as
+  above; the discrete ones ride on the sample as `click_action`
+  (`switch_arm` / `switch_arm_prev`) and the loop fires them in step 2 when
+  `click_seq` advances on a fresh sample (`_device_click_edge` →
+  `_handle_command`, i.e. the same `_op_switch_arm*` handlers and the same
+  nacks as the WS action, incl. the DAgger "takeover active" nack). The first
+  observed counter is adopted silently, stale edges are dropped, and the
+  outcome is shown as `tracker.device_action` (`"switch_arm"` or
+  `"switch_arm nacked: <detail>"`) for `DEVICE_ACTION_LINGER_S` = 1 s.
+- **Tracker pose filter** (13-tracker §4 "Pose filter"): `TrackerTeleop`
+  runs `control/pose_filter.PoseFilter` (One Euro on position and on the
+  orientation increment, then a rest deadband) on the *aligned* sample pose at
+  the 100 Hz tick, before the anchor/delta math. Static fields come from
+  `tracker.filter` (`d_cutoff_hz`, `deadband_m`, `deadband_rad`); `enabled` /
+  `min_cutoff_hz` / `beta` live in the process-wide `TrackerSettings` and are
+  retuned live by `tracker_settings` (`filter_*` args). The filter resets on
+  engage and after stale/invalid gaps, free-runs while the clutch is up (so
+  `tracker.pose_filtered` is live in any session), and `enabled: false`
+  bypasses it. Telemetry `tracker.settings` echoes the effective filter fields.
+- **Anchor and re-seed rules** (13-tracker §4, review 2026-09-02):
+  (a) `_resolve_arms` (and the DAgger override) records the per-arm resolving
+  source (`_note_source`); any non-teleop source (plan, jog, policy)
+  invalidates the arm's teleop seed, and `_teleop_step` re-seeds the integrated
+  target from the measured TCP the moment motion input starts (keys / clutch,
+  not on idle hold ticks), so the first clutched or keyed tick after such
+  motion has zero delta. (b) Rotation anchor slip is applied in the BODY frame:
+  `dq_b = conj(intended.q) ⊗ achieved.q`, `A_ee.q ← A_ee.q ⊗ dq_b`, hence
+  `D ⊗ A_ee'.q == achieved.q` exactly for any hand rotation `D`. (c) The
+  settings (yaw, scale, rotation flag, filter) are snapshotted at engagement;
+  a `tracker_settings` change while engaged re-anchors (`A_trk ← filtered(
+  sample, new)`, `A_ee ← current target`) instead of re-interpreting the
+  accumulated offset — the arm never moves on a settings change.
+- **Reader robustness** (13-tracker §4): the libsurvive loop polls
+  `simple_next_event` (1 ms idle wait, so `stop()` and the no-device check
+  never hang on a silent dongle); every event is guarded (finite position,
+  unit-norm quaternion; malformed events and handler exceptions are dropped
+  and counted in `bad_events`, never raised); the loop auto-restarts with
+  backoff 0.5 → 5 s when it dies and `start()` is restartable (`_thread`
+  cleared on exit); after a 3 s grace the status is `error` when libsurvive
+  enumerates no OBJECT-type device (detail: dongle busy / not openable / udev
+  / tracker off / unpaired + the last libusb line) and `searching` when a
+  device is present but silent (a mismatching `object_name` is spelled out);
+  `rate_hz` is measured over a 1 s window and decays to 0 when samples stop;
+  forwarded libsurvive warnings are rate-limited to ≤ 1 line/s per message
+  class; `python -m apollo_xarm7_runtime` configures Python logging (INFO to
+  stderr) unless the root logger already has handlers.
 
 `StateSnapshot` (published every tick, consumed at lower rates):
 
@@ -734,15 +788,22 @@ tracker: {backend: none,            # none | fake | libsurvive (13-tracker §4)
           yaw_deg: 0.0, pos_scale: 1.0, follow_rotation: true,       # live defaults
           stale_s: 0.2, max_jump_m: 0.10,
           controller_map: {clutch: trigger_click,                    # 13-tracker §1.1;
-                           gripper_open: trackpad_up,                #   values also
-                           gripper_close: trackpad_down},            #   accept "none"
-          trackpad_deadzone: 0.3}
+                           gripper_close: trackpad_left,             #   trackpad_* classified
+                           gripper_open: trackpad_right,             #   at the press edge;
+                           arm_next: trackpad_up,                    #   arm_* = discrete
+                           arm_prev: trackpad_down},                 #   (trackpad only)
+          trackpad_deadzone: 0.3,             # |x|,|y| both within -> click ignored
+          filter: {enabled: true, min_cutoff_hz: 1.0, beta: 0.05,    # One Euro (live: enabled/
+                   d_cutoff_hz: 1.0, deadband_m: 0.002,              #   min_cutoff/beta via
+                   deadband_rad: 0.005}}                             #   tracker_settings)
 egl_device_id: 0
 ```
 
 `tracker.*` is owned by `Runtime` for the process lifetime (`TrackerReader`
 thread + live `TrackerSettings`); the `tracker_settings` action mutates
-yaw/scale/rotation at runtime and telemetry echoes them (13-tracker §4).
+yaw/scale/rotation and the live filter fields at runtime and telemetry echoes
+them (13-tracker §4). `ControllerMapConfig` rejects an input bound to more
+than one action and a non-trackpad input on `arm_next` / `arm_prev`.
 
 Version pins carried by the workspace (overview §9): MuJoCo 3.12.0,
 mink 1.3.0, lerobot ≥0.6 pinned, xArm-Python-SDK 1.18.5.

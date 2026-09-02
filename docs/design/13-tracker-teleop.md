@@ -59,8 +59,8 @@ trackpad_right, arm_next: trackpad_up, arm_prev: trackpad_down}` with
 `trackpad_deadzone: 0.3`. Device-sourced discrete actions are executed inside
 the control loop (`_op_switch_arm` / `_op_switch_arm_prev`) on the press edge,
 subject to the same nacks as the WS actions (e.g. takeover engaged); the
-telemetry `device_held` list shows the held codes, `device_actions` the last
-discrete action fired.
+telemetry `device_held` list shows the held codes, `device_action` the last
+discrete action fired (or its nack detail), cleared after ~1 s.
 
 The default **active arm is the gripper arm**: sessions started from the
 devices page list `grip` first (`arms: [grip, view]`); operators can still
@@ -172,9 +172,10 @@ move together.
   - Clutch released / sample stale or invalid / arm switched ⇒ hold-last (return
     `None`), anchors cleared.
 - Controller inputs (§1.1): the libsurvive backend parses button/axis events
-  into `ControllerState`; `TrackerConfig.controller_map` defaults to
-  `{clutch: trigger_click, gripper_open: trackpad_up, gripper_close:
-  trackpad_down}` with `trackpad_deadzone: 0.3`; the reader attaches the latest
+  into `ControllerState`; `TrackerConfig.controller_map` defaults to the §1.1 table
+  (`{clutch: trigger_click, gripper_close: trackpad_left, gripper_open:
+  trackpad_right, arm_next: trackpad_up, arm_prev: trackpad_down}`) with
+  `trackpad_deadzone: 0.3`; the reader attaches the latest
   controller state and the derived `held_codes` to every sample and publishes a
   sample on each button edge. The fake backend exposes the same fields (no
   buttons) so the merge path is unit-testable with a scripted controller state.
@@ -246,7 +247,7 @@ move together.
   tracker panel (status/backend/rate/age, raw and world poses, 2-D top-down trail
   canvas with the anchor and current target when engaged, z readout), settings
   (yaw, scale, rotation toggle → `tracker_settings`), session controls (start a
-  `teleop`/`sim`/`mavis_v2` session with arms `view`,`grip` if none) and the
+  `teleop`/`sim`/`mavis_v2` session with arms `grip`,`view` if none) and the
   session's video streams (`sim`, cameras; `twin` only under `safety_debug`).
 - `KeymapOverlay`: new `tracker` group and a gamepad glyph column.
 

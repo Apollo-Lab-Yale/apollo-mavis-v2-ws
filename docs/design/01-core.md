@@ -561,10 +561,13 @@ class SetInitialConditionArgs(BaseModel):
     profile_id: str | None = None        # None: save current state first (name "initial",
                                          #   overwrite), then designate (04-runtime §9)
 
-class TrackerSettingsArgs(BaseModel):    # name == "tracker_settings" (13-tracker §3.4)
+class TrackerSettingsArgs(BaseModel):    # name == "tracker_settings" (13-tracker §3.4, §4)
     yaw_deg: float | None = None         # fields omitted (None) = unchanged
     pos_scale: float | None = None       # 0.1 <= pos_scale <= 3.0
     follow_rotation: bool | None = None
+    filter_enabled: bool | None = None   # One Euro pose filter (13-tracker §4 "Pose filter")
+    filter_min_cutoff_hz: float | None = None   # 0.05 <= x <= 50 (0 would freeze the filter)
+    filter_beta: float | None = None     # 0 <= x <= 5 (speed coefficient)
 
 ControlClientMsg = Annotated[KeysMsg | ActionMsg, Field(discriminator="t")]
 ControlServerMsg = Annotated[HelloMsg | AckMsg, Field(discriminator="t")]
@@ -576,6 +579,15 @@ recorded intervention in DAgger, never-recorded safety escape in inference.
 `switch_arm` / `switch_arm_prev` carry no index; the server cycles the
 authoritative active arm forward / backward (`(i ± 1) mod n`). `validate_action_args`
 requires `args == {}` for every action without an args model.
+
+`tracker_settings` is a partial update: every field is optional and `None`
+means "unchanged", so the UI settings form can send only the field it
+committed (Enter/blur). The `filter_*` fields tune the runtime's One Euro pose
+filter live (devices/debug page); the bounds are wire-level guards only — the
+runtime owns the defaults (`min_cutoff_hz 1.0`, `beta 0.05`) via
+`TrackerConfig.filter`. A settings change while the clutch is engaged makes
+the runtime re-anchor (13-tracker §4 "Anchor and re-seed rules"); it never
+moves the arm.
 
 ## 11. Protocol: telemetry (`protocol/telemetry.py`)
 
@@ -625,8 +637,11 @@ class SessionTelemetry(BaseModel):       # additive block (04-runtime §13.3)
     start_from_progress: float | None = None    # 0-1 during START_FROM
     plan_status: str | None = None; trainer_alive: bool | None = None
 
-class TrackerSettingsMsg(BaseModel):     # live tracker settings (13-tracker §3.5)
+class TrackerSettingsMsg(BaseModel):     # live tracker settings (13-tracker §3.5, §4)
     yaw_deg: float; pos_scale: float; follow_rotation: bool
+    filter_enabled: bool = True          # effective One Euro pose-filter settings; defaults
+    filter_min_cutoff_hz: float = 1.0    #   = the runtime's TrackerConfig.filter defaults
+    filter_beta: float = 0.05            #   (additive; pre-filter producers still parse)
 
 class ControllerTelemetry(BaseModel):    # raw Vive-controller inputs (13-tracker §1.1)
     trigger: float = 0.0                 # analog pull 0..1
@@ -643,6 +658,8 @@ class TrackerTelemetry(BaseModel):       # additive block (13-tracker §3.5)
     seq: int = 0; rate_hz: float = 0.0; age_s: float | None = None
     pose_raw: PoseMsg | None = None      # lighthouse world
     pose_world: PoseMsg | None = None    # after yaw alignment
+    pose_filtered: PoseMsg | None = None # world, after alignment + One Euro filter (§4);
+                                         #   the pose the anchor/delta math consumes
     clutch: bool = False; engaged_arm: str | None = None
     anchor_tcp: PoseMsg | None = None    # EE pose at engagement (world)
     target_tcp: PoseMsg | None = None    # tracker-derived EE target (world)
@@ -651,6 +668,8 @@ class TrackerTelemetry(BaseModel):       # additive block (13-tracker §3.5)
     controller: ControllerTelemetry | None = None   # None = backend reports no controller
     device_held: list[str] = []          # key codes injected from the controller (§1.1
                                          #   table, e.g. ["KeyC", "KeyH"]); [] when stale
+    device_action: str | None = None     # last device-sourced discrete action ("switch_arm"
+                                         #   / "switch_arm_prev"); runtime clears it ~1 s later
 
 class TelemetryMsg(BaseModel):
     t: Literal["telemetry"] = "telemetry"
