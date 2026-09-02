@@ -256,10 +256,17 @@ move together.
 Lab hardware (2026-09-02): the Vive Tracker 3.0 is dead (will not charge); a
 **Vive Pro controller** (libsurvive object `WM0`, subtype WAND, serial
 LHR-ABFB86B5) is paired to the Watchman dongle instead and plays the tracker
-role — same object name, same code path; its trigger/grip are a future clutch
-option. Four **Lighthouse 2.0** base stations; libsurvive detected gen 2 and
-tracked at ~150 Hz in the first probe (3 of 4 stations seen so far — check the
-fourth is powered and on a distinct channel).
+role — same object name, same code path (trigger = clutch, trackpad =
+gripper / arm switch, §1.1). Four **Lighthouse 2.0** base stations were
+installed, but one (serial E9BFDF83, channel 7) has corrupted firmware: its
+radio MCU is stuck in Nordic DFU (BLE name `LHB-DFU`), the FPGA image reads
+0xFFFFFFFF and its USB console (`/dev/ttyACM0`, `lhtx>` prompt, `id`/`mode`)
+reports `Radio Timeout`; it blinks amber and never sweeps. Until it is
+re-flashed with SteamVR (or RMA'd) the cell runs on **three** stations
+(channels 3/12/14, `--lighthousecount 3`). With a clean 3-station calibration
+the resting pose noise is 0.1 mm std / 1 mm peak-to-peak / 0.08° — the 5 cm
+"jitter" seen before was the broken station plus a stale calibration.
+libsurvive's poser thread uses about one CPU core continuously.
 
 Pairing a controller to the dongle (once): run libsurvive with `--pair-device`
 (`survive-cli --pair-device --v 100 --lighthousecount 4`), then hold the
@@ -276,7 +283,13 @@ at a pinned commit, `uv build --wheel`, `uv pip install --no-deps` into the
 runtime venv, optional `survive-cli`). First run with the tracker on and still,
 both base stations visible, ~10–20 s: libsurvive writes
 `~/.config/libsurvive/config.json`; delete it after moving a base station.
-Runtime config: `tracker: {backend: libsurvive, libsurvive_args: ["--lighthousecount", "4"]}`.
+Runtime config: `tracker: {backend: libsurvive, libsurvive_args: ["--lighthousecount", "3"], yaw_deg: <from the gesture>}`.
+Yaw calibration gesture (used 2026-09-02, result −77.9°): click the trigger at a
+start point, then after each of six moves — left, forward, right, back, up, down
+(20–30 cm each, hand still at each click); record `pose_raw` at every click via
+telemetry and fit the yaw that maps left/right/forward/back onto −X/+X/+Y/−Y
+(up/down only verify that z is up). Redo it after any libsurvive recalibration
+(the lighthouse world frame is re-anchored then).
 
 ## 7. Open items (phase-09 / after first hardware test)
 
