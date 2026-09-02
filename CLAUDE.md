@@ -36,10 +36,11 @@ clones (gitignored by the ws repo until converted to submodules).
   profiles must be matched to NICs programmatically at startup.
 - Arms may or may not have a linear track (rail); max rail travel 0.65 m.
   Presence must be auto-detected via the xArm SDK.
-- Lab cell geometry (tape-measured 2026-09-02): 1.215 × 0.63 × 0.03 m table, top
-  0.735 m above the floor; two parallel rails 39.5 cm apart hugging the long edges
-  (camera-only arm in front, gripper + wrist-cam arm behind); 0.16 × 0.16 × 0.26 m
-  obstacle in the channel between them, left of the arms' rail zero. Encoded in
+- Lab cell geometry (tape-measured 2026-09-02): 1.215 × 0.62 × 0.03 m table, top
+  0.735 m above the floor; two identical rails 39.5 cm apart along the long axis
+  (camera-only arm on the outer rail, 2.6 cm from the edge the arms face; gripper +
+  wrist-cam arm inward), zero at the right end; 0.16 × 0.16 × 0.24 m untouchable
+  obstacle flush against the right end in the channel between the rails. Encoded in
   apollo-xarm7-sim `scenes/mavis_v2.yaml` (header lists every measurement and the
   assumptions to confirm in phase-09); docs/design/03-sim.md §4.3 has the arithmetic.
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/

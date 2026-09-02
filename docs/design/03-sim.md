@@ -197,32 +197,35 @@ the debug inflation of 0.025 m. The scene author therefore declares them:
 | **`mavis_v2`** | 2 | **the lab cell**: digital-twin reference for the real arms and a sim scenario |
 
 **`mavis_v2`** (Apollo lab, tape-measured 2026-09-02; the YAML header carries
-the same numbers — edit there). World frame: z-up, origin on the floor under
-the table centre; the operator stands at the *front* (−Y) where the camera arm's
-rail is, +Y is toward the *back* (gripper arm's rail), +X is toward the *right*
-end. The two rails hug the two long edges; the workspace with the obstacle is
-the channel between them.
+the same numbers — edit there). World frame follows the lab's own definitions:
+z-up, origin on the floor under the table centre; **+Y = the outer edge**, i.e.
+the long edge the arms' end effectors face at rail zero (the camera rail runs
+along it); standing on the inner side and *facing the outer edge*, **+X is to
+the right** — the end where both arms sit at rail zero and where the obstacle
+is. Both rails are mounted the same way (arm base +X toward the outer edge,
+thin cable-tray plate toward the interior, zero at the right end, travel toward
+−X). The workspace is the channel between the rails.
 
 | element | measurement | descriptor value |
 |---|---|---|
-| table | 1.215 × 0.63 × 0.03 m, top at 0.735 m | box half `[0.6075, 0.315, 0.015]` at z 0.72 |
-| rails | two identical rails parallel to the long edge, feet on the table, mounted the same way; zero at the right end, travel toward −X | `base_quat` yaw +90° `[0.7071, 0, 0, 0.7071]`; z = 0.735 + 0.107188 |
-| front rail (`view`, camera-only) | outer edge 2 cm from the front edge | y0 = −0.315 + 0.02 + 0.120 = **−0.175** |
-| back rail (`grip`, gripper + wrist cam) | 39.5 cm behind the front rail (base lines) | y0 = −0.175 + 0.395 = **0.220**; far edge 2.3 cm from the back edge |
-| channel | between the rail bodies | y ∈ [−0.1026, 0.100] (20.3 cm with the 19.2 cm mavis mesh; the front carriage protrudes 1.8 cm into it) |
-| rail zero | arm bases 14.5 cm from the right edge at q = 0 (literal: base centre) | x0 = 0.6075 − 0.145 = **0.4625** (base edge → 0.3995, carriage edge → 0.3645); the mavis mesh's zero end then overhangs the table end by 10 cm — unverified |
-| obstacle | 0.16 × 0.16 × 0.26 m box in the channel, left of the arms; +X face 29.2 cm from the right edge | half `[0.08, 0.08, 0.13]` at `(0.2355, 0.0075, 0.865)` (centred in the channel's free width) |
-| keyframe | both rails at zero; gripper arm turned round (j1 ≈ π) with the TCP 11 cm above the box top, tool down; camera 1.4 m up looking at the box | audit-clean at δ = 0.008 and 0.025 |
-| `allowed_pairs` | carriages ↔ table (24 mm by construction) | two pairs |
+| table | 1.215 × 0.62 × 0.03 m, top at 0.735 m | box half `[0.6075, 0.31, 0.015]` at z 0.72 |
+| rails | identical, same orientation; zero at the right end, travel toward −X | `base_quat` yaw +90° `[0.7071, 0, 0, 0.7071]`; z = 0.735 + 0.107188 |
+| camera rail (`view`, camera-only) | outer edge 2.6 cm from the table's outer edge | y0 = 0.31 − 0.026 − 0.0724 = **0.2116** |
+| gripper rail (`grip`, gripper + wrist cam) | 39.5 cm inward (base lines) | y0 = 0.2116 − 0.395 = **−0.1834**; plate edge 0.66 cm from the inner table edge |
+| channel | between the rail bodies | y ∈ [−0.111, 0.0916] (20.3 cm with the 19.2 cm mavis mesh) |
+| rail zero | arm base *right side* 14 cm from the right edge | x0 = 0.6075 − 0.14 − 0.063 = **0.4045** (base centre); the mavis mesh's zero end overhangs the table end by 4.5 cm — unverified |
+| obstacle | 0.16 × 0.16 × 0.24 m, flush against the right edge, in the channel beside the gripper carriage; near face ~27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(0.5275, −0.0084, 0.855)`, i.e. depth 23.8–39.8 cm: placed 0.5 cm clear of the (mesh) carriage sweep because 27.5–43.5 would overlap the mesh rail body by 1.4 cm and the carriage by 3.2 cm |
+| keyframe | rails at zero; gripper hovering over the obstacle, tool down, TCP 14.5 cm above its top; camera arm turned round (j1 ≈ π) looking into the channel | audit-clean at δ = 0.008 and 0.025 |
+| `allowed_pairs` | carriages ↔ table (24 mm by construction); gripper carriage ↔ obstacle (slides past it 0.5 cm away) | three pairs |
 
 Rail mesh facts used (mavis asset, unverified vs hardware — phase-09 item):
 across-axis extent `[−0.120, +0.0724]` m about the base line (the −0.120 side is
 a 3 mm cable-tray plate; main body 14.2 cm), carriage `[−0.080, +0.090]` across /
 `[−0.098, +0.088]` along, 1.0926 m long with 0.2476 m beyond the carriage at
-q = 0. Open items for the phase-09 calibration: the 14.5 cm reference (base
-centre / base edge / carriage edge), the real rail width (a narrower rail widens
-the channel), whether the box touches a rail ("紧卡"), which end carries the
-motor housing, and the 2 / 42 / 39.5 cm readings (5 mm apart).
+q = 0. Open items for the phase-09 calibration: the real rail/carriage width
+(the obstacle in the lab sits against the gripper rail at ~27.5 cm depth, which
+only fits if the real rail is ~1.5–3 cm narrower than the mesh), the rail's
+zero-end overhang, and whether the 14 cm reads to the base or to the carriage.
 
 ## 5. Scene composition via `mujoco.MjSpec`
 
@@ -647,7 +650,9 @@ matching `target_pair_prefixes` counts as a real-contact failure.
 
 Scenarios: `env_table_descend` (−z into table), `env_pedestal_sweep` (+x
 into pedestal) for arm↔environment; `cross_arm_head_on` (+y toward arm1),
-`cross_arm_rail_converge` (rail drive toward arm1) for arm↔arm.
+`cross_arm_rail_converge` (rail drive toward arm1) for arm↔arm;
+`mavis_v2_obstacle_descend` (the lab cell's gripper arm −z onto its obstacle,
+§4.3) as the deployment cell's own regression.
 
 **Assertion contract** (11-safety §5.1 — all must hold; failures name the
 scenario):
@@ -663,9 +668,9 @@ scenario):
   `max |q_sent(t) − q_sent(t_block)| ≤ 1e-4` (rad; rail slot m) per driven arm.
 - **A4 Escape works**: after twist reversal, `kind="cleared"` within 100
   ticks, min pair clearance non-decreasing (tol 1e-4 m), motion resumes.
-- **A5 Layer independence**: each scenario runs twice — IK avoidance ON:
-  graze variants produce **0 blocked events** (L2 glides); OFF
-  (`--no-ik-avoidance`): the gate alone must still satisfy A1–A4.
+- **A5 Layer independence**: each scenario runs three times — gate-only main
+  (`--no-ik-avoidance`: L1 alone must satisfy A1–A4), IK-on main, and the
+  IK-on graze variant, which must produce **0 blocked events** (L2 glides).
 
 CI wiring: `uv run python -m apollo_xarm7_sim.tools.guardrail_check --all` in
 sim CI + runtime CI (integration job, both extras); < 30 s total (virtual
@@ -738,7 +743,7 @@ No hardware anywhere; the only split is CPU-only vs EGL-capable. Markers:
 | Twin (§8) | inflation thresholds: contact appears at δ, not 1.1δ (two-arm approach sweep); link_base↔link1 excluded; grasp whitelist; `check` restores measured qpos; clearance vs analytic sphere distance; audit sweep (no false alarms at δ=0.025) |
 | IK (§9) | circle-tracking servo 500 ticks: pos err < 0.5 mm, no limit violations; rail-preference (lateral target moves joints, rail < 1 cm); unreachable target sets `diverged` within 10 ticks; ECAA weight slews & floors; flat-tolerance frees roll; row cap respected (perf: p99 < 1 ms with 3 arms + env) |
 | Planner (§10) | two-arm position swap on `dual_rail_tabletop`: sequential plan succeeds within ≤2 orderings, edges valid at `max_step_rad` resolution; impossible variant returns `goal_in_collision` with the correct pair; start-inside-inflation hysteresis escapes; waypoints all pass `check_config` |
-| Guardrail (§11) | all four scenarios × {IK avoidance on, off}, full A1–A5 contract (11-safety §5.1) — this IS the safety CI |
+| Guardrail (§11) | all five scenarios × {IK avoidance on, off}, full A1–A5 contract (11-safety §5.1) — this IS the safety CI |
 | Semantics (§13) | `test_mujoco_semantics.py` suite |
 | Rendering (§7) | egl: 640×480 frame non-black & correct shape; stream fps pacing; `show_inflation` toggles group-3 pixels; renderer crash isolates stream |
 | Interfaces | `SimWorkcell`/`DigitalTwin`/`MinkIKSolver` satisfy core ABCs (isinstance + signature check via `inspect`) |

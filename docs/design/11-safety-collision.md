@@ -151,7 +151,9 @@ def main(argv: list[str]) -> int: ...      # exit 0 = all assertions pass; nonze
 
 Scenarios: `env_table_descend` (−z into table), `env_pedestal_sweep` (+x into
 pedestal) for arm↔environment; `cross_arm_head_on` (+y toward arm1),
-`cross_arm_rail_converge` (rail drive toward arm1) for arm↔arm. Each builds a
+`cross_arm_rail_converge` (rail drive toward arm1) for arm↔arm;
+`mavis_v2_obstacle_descend` (the lab cell's gripper arm onto its obstacle, 03-sim
+§4.3) as the deployment cell's own regression. Each builds a
 `safety_debug` session programmatically (no server), injects a synthetic `TeleopInput`
 holding the twist, and steps the control loop tick-by-tick. **Ground truth** = the
 *physics* model with zero inflation: any tick with a `mj_collision` contact `dist <=
@@ -169,9 +171,9 @@ holding the twist, and steps the control loop tick-by-tick. **Ground truth** = t
   `max |q_sent(t) − q_sent(t_block)| ≤ 1e-4` (rad; rail slot m) per driven arm.
 - **A4 Escape works**: after twist reversal, `kind="cleared"` within 100 ticks, min
   pair clearance non-decreasing (tol 1e-4 m), motion resumes.
-- **A5 Layer independence**: each scenario runs twice — IK avoidance ON: graze
-  variants produce **0 blocked events** (L2 glides); OFF (`--no-ik-avoidance`): the
-  gate alone must still satisfy A1–A4.
+- **A5 Layer independence**: each scenario runs three times — gate-only main
+  (`--no-ik-avoidance`: L1 alone must satisfy A1–A4), IK-on main, and the IK-on
+  graze variant, which must produce **0 blocked events** (L2 glides).
 
 CI wiring: `uv run python -m apollo_xarm7_sim.tools.guardrail_check --all` in sim CI +
 runtime CI (integration job, both extras); < 30 s total (virtual ticks, 0.75 ms/tick max).
