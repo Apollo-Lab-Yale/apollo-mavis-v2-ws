@@ -213,19 +213,20 @@ thin cable-tray plate toward the interior, zero at the right end, travel toward
 | camera rail (`view`, camera-only) | outer edge 2.6 cm from the table's outer edge | y0 = 0.31 − 0.026 − 0.0724 = **0.2116** |
 | gripper rail (`grip`, gripper + wrist cam) | 39.5 cm inward (base lines) | y0 = 0.2116 − 0.395 = **−0.1834**; plate edge 0.66 cm from the inner table edge |
 | channel | between the rail bodies | y ∈ [−0.111, 0.0916] (20.3 cm with the 19.2 cm mavis mesh) |
-| rail zero | arm base *right side* 14 cm from the right edge | x0 = 0.6075 − 0.14 − 0.063 = **0.4045** (base centre); the mavis mesh's zero end overhangs the table end by 4.5 cm — unverified |
-| obstacle | 0.16 × 0.16 × 0.24 m, flush against the right edge, in the channel beside the gripper carriage; near face ~27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(0.5275, −0.0084, 0.855)`, i.e. depth 23.8–39.8 cm: placed 0.5 cm clear of the (mesh) carriage sweep because 27.5–43.5 would overlap the mesh rail body by 1.4 cm and the carriage by 3.2 cm |
-| keyframe | rails at zero; gripper hovering over the obstacle, tool down, TCP 14.5 cm above its top; camera arm turned round (j1 ≈ π) looking into the channel | audit-clean at δ = 0.008 and 0.025 |
-| `allowed_pairs` | carriages ↔ table (24 mm by construction); gripper carriage ↔ obstacle (slides past it 0.5 cm away) | three pairs |
+| rail zero | the rails' zero end is flush with the table's right edge; the arms' carriage ~14 cm from it | x0 = 0.6075 − 0.2476 = **0.3599** (base centre; mesh zero-end overhang 0.2476); carriage right edge 15.0 cm, base cylinder 18.5 cm from the edge |
+| obstacle | 0.16 × 0.16 × 0.24 m untouchable block, flush against the **left** edge (the empty end) in the channel; near face 27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(−0.5275, −0.045, 0.855)`, y ∈ [−0.125, 0.035]; its inner face is 1.4 cm past the mesh gripper-rail inner edge and the 1.0926 m mesh rail reaches 3.8 cm into its x-span — a static corner overlap (mesh vs real track), harmless to twin and physics |
+| keyframe | rails at zero (right end); gripper elbow-up in the channel, tool down, TCP 4.5 cm below the obstacle top; camera arm turned round (j1 ≈ π) looking down the channel | audit-clean at δ = 0.008 and 0.025 |
+| `allowed_pairs` | carriages ↔ table (24 mm by construction) | two pairs |
 
 Rail mesh facts used (mavis asset, unverified vs hardware — phase-09 item):
 across-axis extent `[−0.120, +0.0724]` m about the base line (the −0.120 side is
 a 3 mm cable-tray plate; main body 14.2 cm), carriage `[−0.080, +0.090]` across /
 `[−0.098, +0.088]` along, 1.0926 m long with 0.2476 m beyond the carriage at
-q = 0. Open items for the phase-09 calibration: the real rail/carriage width
-(the obstacle in the lab sits against the gripper rail at ~27.5 cm depth, which
-only fits if the real rail is ~1.5–3 cm narrower than the mesh), the rail's
-zero-end overhang, and whether the 14 cm reads to the base or to the carriage.
+q = 0. Open items for the phase-09 calibration: the mesh rail length/width vs
+the real track (the obstacle's inner face at 43.5 cm depth is 1.4 cm past the
+mesh gripper-rail edge, and the mesh rail's left end reaches 3.8 cm into the
+obstacle's x-span) and the mesh's zero-end overhang (sets x0 from the flush
+right end).
 
 ## 5. Scene composition via `mujoco.MjSpec`
 
@@ -651,8 +652,8 @@ matching `target_pair_prefixes` counts as a real-contact failure.
 Scenarios: `env_table_descend` (−z into table), `env_pedestal_sweep` (+x
 into pedestal) for arm↔environment; `cross_arm_head_on` (+y toward arm1),
 `cross_arm_rail_converge` (rail drive toward arm1) for arm↔arm;
-`mavis_v2_obstacle_descend` (the lab cell's gripper arm −z onto its obstacle,
-§4.3) as the deployment cell's own regression.
+`mavis_v2_rail_sweep` (the lab cell's gripper arm −x along the channel into
+its obstacle, §4.3) as the deployment cell's own regression.
 
 **Assertion contract** (11-safety §5.1 — all must hold; failures name the
 scenario):

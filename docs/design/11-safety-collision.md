@@ -152,8 +152,8 @@ def main(argv: list[str]) -> int: ...      # exit 0 = all assertions pass; nonze
 Scenarios: `env_table_descend` (−z into table), `env_pedestal_sweep` (+x into
 pedestal) for arm↔environment; `cross_arm_head_on` (+y toward arm1),
 `cross_arm_rail_converge` (rail drive toward arm1) for arm↔arm;
-`mavis_v2_obstacle_descend` (the lab cell's gripper arm onto its obstacle, 03-sim
-§4.3) as the deployment cell's own regression. Each builds a
+`mavis_v2_rail_sweep` (the lab cell's gripper arm along the channel into its
+obstacle, 03-sim §4.3) as the deployment cell's own regression. Each builds a
 `safety_debug` session programmatically (no server), injects a synthetic `TeleopInput`
 holding the twist, and steps the control loop tick-by-tick. **Ground truth** = the
 *physics* model with zero inflation: any tick with a `mj_collision` contact `dist <=
