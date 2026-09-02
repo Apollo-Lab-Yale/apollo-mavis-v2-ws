@@ -6,10 +6,11 @@
 ## A. 需要你亲自做的（物理在场 / sudo / 决策）
 
 **A0. 前置环境（去实验室前就可以做）**
-- [ ] **升级 NVIDIA 驱动并重启**（当前 565.77，源里已有 580.159.03；解锁
-      torch CUDA cu130 + NVENC）：
-      `sudo apt update && sudo apt full-upgrade` → 重启 →
-      `nvidia-smi` 确认 580.x。在 Claude Code 里可用 `! sudo apt ...` 交互执行。
+- [x] ~~升级 NVIDIA 驱动~~ 2026-09-01 已由 Claude 完成到 **580.173.02**（同时
+      清理了 409 个 ROS 包、修复 librealsense 源 key、恢复 Pop systemd 渠道、
+      移除坏的 librealsense2-dkms——udev rules 保留）。**只差你重启**：重启后
+      `nvidia-smi` 应显示 580.173.02（重启前 GPU 负载会报
+      Driver/library version mismatch，属预期）。
 - [ ] **处理 8000 端口占用**：查明占用进程（`ss -ltnp | grep :8000`），
       释放它或告知 Claude 把 runtime 默认端口改掉。
 - [ ] （可选）确认三臂 IP 各在**不同子网**（UFACTORY Studio 里查/改）——
