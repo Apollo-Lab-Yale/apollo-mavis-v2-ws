@@ -33,6 +33,35 @@ the UI never hard-codes it):
 
 No other gamepad control is mapped (Start/Back/sticks/LT/X/Y are ignored).
 
+### 1.1 Vive controller as the only input (lab default since 2026-09-02)
+
+With a Vive Pro controller paired to the dongle, the same device supplies the
+pose AND the discrete inputs; the gamepad is optional. libsurvive button events
+(verified on the lab controller): event types `3` BUTTON_DOWN, `2` BUTTON_UP,
+`5` TOUCH_DOWN, `4` TOUCH_UP, `8` AXIS_CHANGED; button ids `0` trigger, `1`
+trackpad, `7` grip, `6` menu, `3` system; axis ids `1` trigger (0..1), `2`
+trackpad x, `3` trackpad y (both −1..1, +y = top).
+
+| controller | code injected | action |
+|---|---|---|
+| trigger click (button 0 down) | KeyC | tracker_clutch |
+| trackpad click with y > +0.3 | KeyH | gripper_open (rate, while held) |
+| trackpad click with y < −0.3 | KeyF | gripper_close (rate, while held) |
+| grip / menu / system / touch without click | — | none (menu+system is the pairing combo — never map it) |
+
+These **device-held codes** are produced by the runtime's tracker reader
+(`TrackerSample.controller` + `TrackerSample.held_codes`) and merged into the
+tick's held set (`held ∪ device_codes`) while the sample is fresh
+(`age ≤ stale_s`); a stale sample contributes nothing (= released). They are
+NOT covered by the WebSocket `InputWatchdog`: the controller's own ≥100 Hz
+sample stream is their heartbeat, so a keyboard/WS deadman latch
+(`AWAIT_EMPTY`) must not zero device-driven motion — the tick uses per-source
+scales: WS-sourced codes use the WS watchdog scale, device-sourced codes use
+`1.0` when fresh / `0.0` when stale. The tracker branch takes the scale of the
+source that holds the clutch. A running session is still required; the browser
+controller connection is not. Telemetry echoes the raw controller state and the
+injected codes (`TrackerTelemetry.controller`, `.device_held`).
+
 ## 2. Architecture
 
 ```
@@ -72,7 +101,10 @@ No other gamepad control is mapped (Start/Back/sticks/LT/X/Y are ignored).
 4. `ActionName` gains `switch_arm_prev` (no args) and `tracker_settings` with
    args model `TrackerSettingsArgs {yaw_deg: float|None, pos_scale: float|None
    (0.1–3), follow_rotation: bool|None}` (fields omitted = unchanged).
-5. Telemetry, additive: `TelemetryMsg.tracker: TrackerTelemetry | None`:
+5. Telemetry, additive: `TelemetryMsg.tracker: TrackerTelemetry | None` (plus
+   `controller: ControllerTelemetry | None {trigger: float, trigger_pressed,
+   trackpad_touch, trackpad_click, trackpad_x, trackpad_y, grip, menu, system}`
+   and `device_held: list[str]`, §1.1):
    `backend` (`libsurvive|fake|none`), `status` (`no_backend|starting|
    searching|tracking|stale|error`), `detail: str`, `object_name`, `seq`,
    `rate_hz`, `age_s`, `pose_raw: PoseMsg|None` (lighthouse world), `pose_world:
@@ -122,6 +154,13 @@ move together.
     rail keys and gripper keys keep working.
   - Clutch released / sample stale or invalid / arm switched ⇒ hold-last (return
     `None`), anchors cleared.
+- Controller inputs (§1.1): the libsurvive backend parses button/axis events
+  into `ControllerState`; `TrackerConfig.controller_map` defaults to
+  `{clutch: trigger_click, gripper_open: trackpad_up, gripper_close:
+  trackpad_down}` with `trackpad_deadzone: 0.3`; the reader attaches the latest
+  controller state and the derived `held_codes` to every sample and publishes a
+  sample on each button edge. The fake backend exposes the same fields (no
+  buttons) so the merge path is unit-testable with a scripted controller state.
 - `_op_switch_arm_prev` mirrors `_op_switch_arm` with `(i − 1) mod n`; the
   DAgger override nacks it while a takeover is engaged, like `switch_arm`.
 - `_op_tracker_settings` updates the live settings and echoes them in telemetry.
