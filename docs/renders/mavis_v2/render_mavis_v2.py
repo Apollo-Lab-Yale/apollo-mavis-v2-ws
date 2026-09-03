@@ -7,9 +7,10 @@ Usage (from the workspace root, sim repo's uv env)::
 
 Writes the scene cameras (cam_front, cam_top, view_wrist_cam, grip_wrist_cam), a
 2x2 contact sheet, and ``operator_view.png`` from MuJoCo's free camera using the
-scene's default ``view`` (azimuth -90 / elevation -30: camera at +Y looking -Y,
-the operator's side; camera-only arm nearest). The older ``facing_outer_edge*.png``
-in this directory were taken from behind the arms (-Y side) and are NOT regenerated.
+scene's default ``view`` (azimuth +90 / elevation -30: camera at -Y looking +Y),
+which frames the red obstacle (the -X end) on the LEFT, matching the operator's
+real view of the cell (the gripper arm renders nearer, the camera-only arm far).
+The older ``facing_outer_edge*.png`` in this directory are NOT regenerated.
 """
 
 from __future__ import annotations
@@ -71,7 +72,7 @@ def main() -> None:
         cam.type = mujoco.mjtCamera.mjCAMERA_FREE
         cam.lookat[:] = OPERATOR_VIEW["lookat"]
         cam.distance = OPERATOR_VIEW["distance"]
-        cam.azimuth = model.vis.global_.azimuth  # -90: at +Y looking -Y
+        cam.azimuth = model.vis.global_.azimuth  # +90: at -Y looking +Y (obstacle on the left)
         cam.elevation = model.vis.global_.elevation  # -30
         r.update_scene(data, camera=cam, scene_option=opt)
         save(r.render(), "operator_view.png")

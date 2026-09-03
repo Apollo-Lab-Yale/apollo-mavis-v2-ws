@@ -225,14 +225,14 @@ thin cable-tray plate toward the interior, zero at the right end, travel toward
 | obstacle | 0.16 × 0.16 × 0.24 m untouchable block, flush against the **left** edge (the empty end) in the channel; near face 27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(−0.5275, −0.045, 0.855)`, y ∈ [−0.125, 0.035]; its inner face is 1.4 cm past the mesh gripper-rail inner edge and the 1.0926 m mesh rail reaches 3.8 cm into its x-span — a static corner overlap (mesh vs real track), harmless to twin and physics |
 | keyframe | rails at zero (right end); gripper elbow-up in the channel, tool down, TCP 4.5 cm below the obstacle top; camera arm turned round (j1 ≈ π) looking down the channel | audit-clean at δ = 0.008 and 0.025 |
 | `allowed_pairs` | carriages ↔ table (24 mm by construction) | two pairs |
-| cameras / `view` | **operator convention**: the operator stands at the OUTER edge (+Y) facing −Y, i.e. facing the arms with the camera arm nearest; every overview is taken from that side, so image right = −X (the obstacle end on the right) | `cam_front` at `(0, 2.0, 1.9)`, `xyaxes [-1,0,0, 0,-0.55,1]` (looks −Y and down); `cam_top` at `(0, 0, 2.6)`, `xyaxes [-1,0,0, 0,-1,0]` (image up = −Y: outer edge at the bottom); `view: {azimuth: -90, elevation: -30}` (free camera at +Y looking −Y — the runtime `sim` stream default) |
+| cameras / `view` | **operator convention**: every overview is framed so the red obstacle (the −X / empty end) is on the LEFT of the image, matching the operator's real view of the cell; all three look from the −Y side toward +Y, so image right = +X. From this side the gripper arm (−Y) renders nearer and the camera-only arm (+Y) far | `cam_front` at `(0, -2.0, 1.9)`, `xyaxes [1,0,0, 0,0.55,1]` (looks +Y and down); `cam_top` at `(0, 0, 2.6)`, `xyaxes [1,0,0, 0,1,0]` (image up = +Y: outer edge at the top); `view: {azimuth: 90, elevation: -30}` (free camera at −Y looking +Y — the runtime `sim` stream default) |
 
 Reference renders live in `docs/renders/mavis_v2/` (`render_mavis_v2.py`
 regenerates them): `cam_front.png`, `cam_top.png`, the two wrist cams, the 2×2
-contact sheet and `operator_view.png` (free camera, azimuth −90 / elevation −30,
-lookat the table centre) all follow the operator convention above; the older
-`facing_outer_edge*.png` were taken from **behind the arms** (free camera at −Y,
-azimuth 45/90/135, before the convention was fixed) and are kept for comparison.
+contact sheet and `operator_view.png` (free camera, azimuth +90 / elevation −30,
+lookat the table centre) all follow the operator convention above (obstacle on
+the LEFT); the older `facing_outer_edge*.png` predate the convention and are kept
+for comparison.
 
 Rail mesh facts used (mavis asset, unverified vs hardware — phase-09 item):
 across-axis extent `[−0.120, +0.0724]` m about the base line (the −0.120 side is
