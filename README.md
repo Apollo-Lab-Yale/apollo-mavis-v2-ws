@@ -43,6 +43,9 @@ apollo-mavis-v2-hardware        apollo-mavis-v2-sim
 - `docs/design/` — detailed design documents per repo + cross-cutting protocols.
 - `docs/prompts/` — phased development prompts; each phase is meant to be a
   self-contained instruction for one implementation session.
+- `docs/deploy/DEPLOYMENT.md` — operations deployment guide (dedicated `mavis`
+  account, `/opt/apollo-mavis-v2`, systemd user service, dev-vs-ops hardware
+  ownership); the matching scripts live in `scripts/deploy/`.
 
 ## Development flow
 

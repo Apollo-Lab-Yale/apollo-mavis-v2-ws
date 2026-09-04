@@ -30,3 +30,6 @@ MUJOCO_LOG.TXT
 
 # Locally built wheels (pysurvive; see scripts/tracker/02-build-pysurvive.sh)
 /third_party/wheels/
+
+# uv-managed interpreters of an ops checkout (UV_PYTHON_INSTALL_DIR, scripts/deploy/install-stack.sh)
+/.uv/

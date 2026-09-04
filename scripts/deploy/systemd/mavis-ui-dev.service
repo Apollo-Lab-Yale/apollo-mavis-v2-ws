@@ -1,0 +1,21 @@
+# Vite dev server -- DEVELOPER accounts only (systemd --user). NOT for operations:
+# the ops UI is the built bundle the runtime serves itself from ui_dist (same origin,
+# no proxy, no node at runtime). Install with WITH_UI_DEV=1 ALLOW_ANY_USER=1
+# scripts/deploy/install-services.sh from your own account; edit the paths/ports.
+[Unit]
+Description=MAVIS v2 UI dev server (Vite, hot reload; proxies /api /ws /video to a dev runtime)
+
+[Service]
+Type=simple
+# %h = the developer's home; point at YOUR checkout and YOUR dev runtime port (S8).
+WorkingDirectory=%h/projects/apollo-mavis-v2-ws/apollo-mavis-v2-ui
+Environment=APOLLO_RUNTIME_URL=http://127.0.0.1:8766
+Environment=UI_HOST=127.0.0.1
+Environment=UI_PORT=5173
+Environment=NVM_DIR=%h/.nvm
+ExecStart=%h/projects/apollo-mavis-v2-ws/scripts/deploy/ui-dev.sh
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
