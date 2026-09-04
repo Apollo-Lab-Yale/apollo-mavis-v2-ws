@@ -1,6 +1,7 @@
 # apollo-mavis-v2 — System Overview & Contract
 
-Status: v0.3 (2026-09-01; renamed and re-scoped 2026-09-03). This document is
+Status: v0.3 (2026-09-01; renamed and re-scoped 2026-09-03; §8 UI-pages
+paragraph amended 2026-09-03 for the phase-11 MAVIS Welcome page). This document is
 the **spine** of the stack: every other design doc and every sub-repo must stay
 consistent with it. All major technology decisions are resolved against
 `docs/research/` (several were benchmarked live on the target machine).
@@ -321,14 +322,20 @@ UUID-addressed profiles):
 
 Single FastAPI app, one port:
 
-- REST under `/api`: workcell/config discovery, scene & digital-twin-scene
-  registry, profiles CRUD, camera enumeration, session lifecycle
+- REST under `/api`: workcell/config discovery (`GET /api/workcell[?kind=
+  hardware|sim]` — the hardware view answers from config with no session,
+  incl. per-arm `reachable` probe results and `hardware_ready`), scene &
+  digital-twin-scene registry (hidden scenes filtered; MAVIS v2 exposes the
+  single `mavis_v2` scene), profiles CRUD, camera and microphone enumeration
+  (`/api/cameras`, `/api/microphones`), session lifecycle
   (`POST /api/session {mode, arms, frames, scene, profile}`), episode ops.
 - `/ws/control` — single-writer WS, hybrid key protocol: immediate held-key-set
   message on every key transition + 20–50 Hz full-state heartbeat with seq
   numbers; permessage-deflate disabled; server watchdog per §6.
 - `/ws/telemetry` — 20–30 Hz broadcast: arm states, rail positions, active arm,
-  collision report/clearances, episode & DAgger status, network/arm health.
+  collision report/clearances, episode & DAgger status, network/arm health,
+  tracker block, and the view-arm microphone block (level + 64-bin envelope
+  for the Welcome-page waveform; phase-11, additive).
 - `/ws/video/{stream_id}` — binary JPEG frames (timestamp header), depth-1
   latest-frame slot per client. Real cameras, sim render, and digital-twin
   render are all uniform streams. `/video/{stream_id}.mjpg` MJPEG debug
@@ -340,9 +347,15 @@ Single FastAPI app, one port:
 - Message schemas defined as pydantic models in `core.protocol`; TS types
   generated from their JSON schema.
 
-UI pages: **Landing** (hardware/sim toggle, camera preview grid ×4, arm
-selection + per-arm status, scene / digital-twin scene pickers, profile picker
-+ `start_from` choice: keep current state vs load selected profile)
+UI pages: **Welcome** (`#/`; phase-11, 05-ui §8.1): hero **APOLLO MAVIS V2 —
+Manipulation and Viewpoint Selection**, **Hardware | Sim** tabs that both open
+without a robot (Sim: the four digital-twin previews; Hardware: the real wrist
+cameras `grip_wrist` / `view_wrist` — pure black when absent — plus the live RØDE microphone waveform),
+per-arm status, the single locked scene *APOLLO MAVIS V2 Digital Twin*
+(`mavis_v2`), `start_from` choice (keep current state vs load a profile), and
+four mode launcher cards — Hardware launchers enabled only once every
+configured arm is reachable (`hardware_ready`); task / policy are collected in
+an in-page `<dialog>` sheet, not on the page
 → **Mode pages** (teleop / collect / DAgger / inference) with camera streams,
 sim & twin renders, keybinding overlay, collision banner, episode controls.
 Teleop page additionally has the direct joint-control panel (per-joint sliders

@@ -694,8 +694,8 @@ and showing "yaw alignment needed" until a new yaw is applied.
 **Verify with landmarks, not body words:** move the controller toward the arm
 bases (away from you) → the EE moves toward the bases (−Y); move it toward
 your LEFT, i.e. toward rail zero at the +X end where the obstacle sits → the
-EE moves to +X; toward your RIGHT, where the arms rest flush with the table
-edge (−X) → the EE moves to −X. (Since the 2026-09-03 rail flip rail zero is
+EE moves to +X; toward your RIGHT, the Manipulation Arm's end of the rails (rail 0.65 m,
+its initial position, −X) → the EE moves to −X. (Since the 2026-09-03 rail flip rail zero is
 at the operator's LEFT and rail q increases toward −X; earlier revisions of
 this section called it "the right end of the rails".)
 

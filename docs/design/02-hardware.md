@@ -1,6 +1,7 @@
 # 02 — apollo-mavis-v2-hardware (`apollo_mavis_v2_hardware`)
 
-Status: v0.1 (2026-09-01). Conforms to `00-overview.md` v0.3 (spine). Ground
+Status: v0.2 (2026-09-04: §7.4 NM dispatcher, state-path precedence,
+permissions; v0.1 2026-09-01). Conforms to `00-overview.md` v0.3 (spine). Ground
 truth: `docs/research/xarm-python-sdk.md` (SDK 1.18.5, verified against
 source), `network-manager.md` (audited on the target machine),
 `web-teleop-stack.md` §5 (camera ABC). Depends **only** on
@@ -24,8 +25,9 @@ apollo-mavis-v2-hardware/
 │   │                           #   GripperFaultEvent
 │   ├── netsetup/               # (§7) __init__.py (NetSetup facade), nmcli.py,
 │   │                           #   types.py, probe.py, match.py, reconcile.py,
-│   │                           #   install.py, state.py, __main__.py (CLI:
-│   │                           #   verify|match|reconcile|install|status)
+│   │                           #   install.py, state.py, dispatcher.py (§7.4 NM
+│   │                           #   hook renderer), __main__.py (CLI: verify|
+│   │                           #   match [--repair]|reconcile|install|status)
 │   ├── cameras/                # (§8) __init__.py (make_camera, find_all_cameras),
 │   │                           #   opencv_camera.py, realsense_camera.py
 │   └── workcell.py             # HardwareWorkcell (§9)
@@ -338,18 +340,30 @@ def split_terse(line: str) -> list[str]: ...
     # split on unescaped ':' — literal colons come escaped '\:' (MACs!)
 # types.py dataclasses: ArmNet(name, ip, prefix=24, host_ip=None -> .12 default),
 #   NicInfo(dev, mac, state, carrier, connection), ProfileInfo(uuid, name, ifname,
-#   autoconnect, method, addresses, gateway, never_default, mac_pin),
+#   autoconnect, method, addresses, gateway, never_default, mac_pin,
+#   permissions -> .user_restricted),
 #   MatchResult(arm, ifname, mac, profile_uuid, probe: "open|refused|unreachable",
-#               detail=""), NicMapEntry(mac, ifname, profile_uuid, arm_ip, ts)
+#               detail="", reason: "" | no-mapping | nic-missing | profile-inactive |
+#               unreachable | no-candidate), NicMapEntry(mac, ifname, profile_uuid,
+#               arm_ip, ts)
 class NetSetup:
     def __init__(self, arms: list[ArmNet],
-                 state_path: Path = Path("~/.config/apollo-mavis-v2/nic_map.json"),
+                 state_path: Path | None = None,   # None -> resolve_state_path() (§7.4)
                  run: NmcliRunner = nmcli) -> None: ...
+    state_path: Path                                 # property, resolved on every access
     def verify(self) -> dict[str, MatchResult]: ...  # fast path; raises NetSetupError
     def match(self) -> dict[str, MatchResult]: ...   # full probe (§7.2), persists state
+    def repair(self, deadline_s=60, poll_s=5, holdoff_s=600) -> dict[str, MatchResult]
+                                                     # dispatcher mode (§7.4)
     def reconcile(self, apply: bool = False) -> ReconcilePlan: ...  # §7.3
     def status(self) -> list[NicInfo]: ...           # landing-page network health
+    install_problems: list[str]   # verify(): polkit/dispatcher/permissions warnings
+    warnings: list[str]; notes: list[str]            # match()/repair() decision trail
 ```
+
+State file (`state.py`): `USER_STATE_PATH = ~/.config/apollo-mavis-v2/nic_map.json`,
+`SYSTEM_STATE_PATH = /etc/apollo-mavis-v2/nic_map.json` (root-written by the
+dispatcher / `install`); precedence in §7.4.
 
 Denylist (`probe.py::internet_devices`): devices of the lowest-metric
 default route (`ip -j route show default`) plus every non-`ethernet` NM
@@ -371,8 +385,11 @@ probing a profile on NIC2 silently detaches it from NIC1).
    `nmcli connection add type ethernet con-name apollo-{arm} ifname "*"
    connection.autoconnect no ipv4.method manual ipv4.addresses {host_ip}/24
    ipv4.never-default yes ipv4.gateway "" ipv6.method disabled`.
-2. Temporarily clear `connection.interface-name` (a profile pinned to devA
-   cannot activate on devB).
+2. If at least one candidate NIC exists, clear **both** pins in one `modify` —
+   `connection.interface-name ""` and `802-3-ethernet.mac-address ""` (a profile
+   pinned to devA cannot activate on devB; a MAC pin alone would make a cable
+   swap un-matchable forever). No candidate (no carrier anywhere) → pins stay,
+   so NM autoconnect still re-activates the profile on re-plug.
 3. Pool: ethernet devices, carrier on (`/sys/class/net/<dev>/carrier`;
    carrier-off = NM state 20, `con up` fails fast), not denylisted, not
    mapped. Per candidate: `nmcli -w 15 connection up uuid <UUID> ifname
@@ -398,9 +415,13 @@ profile — pin `connection.interface-name <dev>` +
 `802-3-ethernet.mac-address <mac>` (MAC survives ifname renames),
 `connection.autoconnect yes`, `autoconnect-priority 50`; route hygiene —
 `ipv4.never-default yes`, `ipv4.gateway ""`, `ipv6.method disabled`, force
-`ipv4.method manual` (DHCP on an arm NIC hangs ~45 s/cycle). Per
-stale/duplicate profile in an arm subnet: `connection.autoconnect no`
-(`--delete` for hard removal). **Known pollution the plan must fix**
+`ipv4.method manual` (DHCP on an arm NIC hangs ~45 s/cycle), and
+`connection.permissions ""` (system-wide, §7.4). Per stale/duplicate profile in
+a **mapped** arm's subnet: `connection.autoconnect no` (`--delete` for hard
+removal). Arms without a persisted mapping are skipped entirely — with no
+keeper nothing is a duplicate, so `reconcile --apply` before `match` is
+harmless (2026-09-04 live regression: the plan wanted to disable both working
+profiles). **Known pollution the plan must fix**
 (regression fixture §11): (a) two `xarm7_1` profiles, different UUIDs/IPs →
 keep the matched one, disable the other; (b) `xarm7_1`/`xarm7_2` carry
 `ipv4.gateway 192.168.1.1` (xarm7_2's outside its own subnet), source of the
@@ -413,9 +434,94 @@ headless/SSH needs the `.pkla` grant — write
 `Identity=unix-group:netdev`, `Action=org.freedesktop.NetworkManager.network-control;org.freedesktop.NetworkManager.settings.modify.system`,
 `ResultAny/ResultInactive/ResultActive=yes` (exact file: research
 `network-manager.md` §10), plus `sudo usermod -aG netdev $USER` (re-login;
-polkitd watches the dir). `install --check` verifies grant (`pkaction`) +
-group; `verify()` runs it so a missing grant becomes an actionable
-landing-page warning, not a mid-bring-up failure.
+polkitd watches the dir; `$USER` = `SUDO_USER` when install itself runs under
+sudo). It further creates `/etc/apollo-mavis-v2/` (`install -d -m 755`),
+installs the dispatcher hook (`install -D -m 755 <rendered>
+/etc/NetworkManager/dispatcher.d/90-mavis-netsetup`, §7.4) and — if every arm
+answers TCP 502 — runs `sudo <venv python> -m apollo_mavis_v2_hardware.netsetup
+match --state /etc/apollo-mavis-v2/nic_map.json --arm …` once, so the system
+map exists and both profiles are pinned before the operator is even in
+`netdev`. `--dispatcher-only` = dir + hook only; `--check` (read-only) verifies
+grant + group + hook (present, executable, equal to the rendering when arms are
+given); `verify()` runs the same check so a missing piece becomes an actionable
+landing-page warning, not a mid-bring-up failure. `install_commands()` /
+`plan_install()` return the exact sudo lines, printed before execution.
+
+### 7.4 Boot / hot-plug automation: NM dispatcher (`dispatcher.py`)
+
+Pins + `autoconnect yes` make NetworkManager alone do the right thing at boot
+and when a cable returns to the *same* NIC. Two cases need a re-probe: a cable
+**swap** (both profiles auto-activate on their pinned NICs with the wrong arm
+behind each) and a cable **moved** to another NIC. Neither may depend on a
+user being logged in, so the hook runs as **root** from
+`/etc/NetworkManager/dispatcher.d/90-mavis-netsetup` (rendered by
+`render_dispatcher(python, arms, state)`, installed by `netsetup install`):
+
+- NetworkManager-dispatcher(8) calls it for every device event (`$1` iface,
+  `$2` action; env `CONNECTION_UUID`/`CONNECTION_ID`). It handles only
+  `up`/`down` of **physical ethernet** devices — sysfs `type == 1`
+  (ARPHRD_ETHER), a `device` symlink (PCI/USB; bridges, veth, tap, tun, lo have
+  none), no `wireless`/`phy80211`, no `bridge`. Everything else exits 0
+  silently (on this machine: selects `enp36s0f0`, `enp36s0f1`,
+  `enx00e04c683d97`; rejects `wlp38s0`, `docker0`, `br-*`, `virbr0`,
+  `tailscale0`, `lo`).
+- It returns immediately (NM kills slow scripts): the worker is re-exec'd with
+  `setsid -f` (own session, stdio to the log), sleeps `SETTLE_S = 2`, then runs
+  `flock -w 600 /run/lock/mavis-netsetup.lock <venv python> -m
+  apollo_mavis_v2_hardware.netsetup match --repair --state
+  /etc/apollo-mavis-v2/nic_map.json --arm view=192.168.2.219 --arm
+  grip=192.168.1.201` (arm args baked in at install time from
+  `--arm`/`--config`). Log `/var/log/mavis-netsetup.log` (fallback `logger -t
+  mavis-netsetup`). Missing venv python → one log line, exit 0. Env overrides
+  `MAVIS_NETSETUP_{LOCK,LOG,SETTLE_S,SYSFS_NET}` serve tests / manual runs.
+- Root needs no polkit grant, so this path works before `install`'s
+  `.pkla`/`netdev` steps take effect and when nobody is logged in.
+
+**`match --repair` = `NetSetup.repair()`.** The hook must not run the plain
+`match`: every `nmcli connection up/down` it issues emits new `up`/`down`
+events (feedback loop), and probing an arm on the *other* arm's NIC kicks a
+healthy profile off it. Policy (`match.classify_for_repair`):
+
+1. `verify()`; arms that pass are **frozen** — their NICs are never candidates.
+   All OK → zero nmcli mutations → no new events (the loop terminator).
+2. `no-mapping` / `nic-missing` → re-probe now.
+3. `profile-inactive`, stored NIC **without carrier** (unplugged / box off) →
+   nothing to match; NM autoconnect re-activates the pinned profile on
+   re-plug. Exception: a *free* NIC (ethernet, carrier, unmapped, not frozen)
+   exists → re-probe on the free NICs (cable moved). Stored NIC **with**
+   carrier → re-probe (a foreign profile grabbed it / autoconnect blocked;
+   `match` re-activates it).
+4. `unreachable` (profile active on its NIC, probe fails) → **pending**: the
+   box may be booting (link is up seconds before its IP stack). Poll `verify`
+   every `REPAIR_POLL_S = 5` s up to `REPAIR_DEADLINE_S = 60`; still failing →
+   re-probe (swap suspected), but at most once per `REPAIR_HOLDOFF_S = 600`
+   (stamp `nic_map.holdoff` beside the state file) so a silent box does not
+   cause periodic down/up churn.
+5. Re-probe = `match(targets, frozen=…)` (pins cleared, serialized per §7.2).
+   Targets that still find no NIC are put back on their stored NIC
+   (`connection up uuid <U> ifname <dev>`) — things are left as found.
+6. `reconcile(apply=True)` last: re-pins (both pins are cleared by `match`),
+   clears `connection.permissions`, route hygiene. `connection modify` on an
+   active profile does not re-activate it, so live SDK traffic is untouched.
+
+`MatchResult.reason` carries the structured miss cause; `NetSetup.notes`
+records the decisions (printed by the CLI, hence in the hook's log).
+
+**State-file precedence** (`state.resolve_state_path`): explicit `--state` >
+`~/.config/apollo-mavis-v2/nic_map.json` if it exists >
+`/etc/apollo-mavis-v2/nic_map.json` if it exists > the user path (write
+default). The hook and `install` always pass `--state /etc/…` (dir `0755`
+root, file `0644`), so every account's `verify()` — the runtime's
+session-start fast path — reads the root-written map with no plumbing. A user
+`match` that resolved to the read-only system map falls back to the user map
+(warning), which then shadows it.
+
+**Permissions.** NM profiles are keyfiles in
+`/etc/NetworkManager/system-connections/*.nmconnection` (root, `0600`), shared
+by **all accounts** and root services unless `connection.permissions` is set
+(`user:<name>:;`) — then only that user (not the root dispatcher) can activate
+them. `verify()` warns for a mapped profile that is user-restricted;
+`reconcile` clears the property. Both live MAVIS profiles are unrestricted.
 
 ## 8. Camera backends (`cameras/`)
 
@@ -429,13 +535,22 @@ stale), static `find_cameras() -> list[dict]`; `make_camera(cfg)` dispatches
 on the tagged-union `CameraConfig`; `find_all_cameras()` merges both
 backends with RS-first dedup and feeds `GET /api/cameras`.
 
-OpenCVCamera: open by **path**, never index — prefer
-`/dev/v4l/by-id/...-video-index0` (stable across reboots), fallback
-`/dev/v4l/by-path/...` (port identity, for serial-less cameras);
+OpenCVCamera: open by **path**, never index — `device_path` (an explicit
+node or a stable `/dev/v4l/by-path/...` / `by-id/...-video-index0` symlink)
+or, when `CameraConfig.serial` is set instead, resolved through sysfs
+(`v4l2_nodes_by_usb_serial`: `/sys/class/video4linux/videoN/device` → the USB
+interface directory whose parent holds `serial`; capture nodes only
+(`index == 0`), ordered by `bInterfaceNumber`, each tried until one honours
+the requested format). The serial route exists because a RealSense D435i
+exposes its depth (interface 0) and colour (interface 3) sensors as separate
+UVC interfaces that BOTH claim `...-video-index0`, so udev keeps one by-id
+symlink per name and the winner changes between plugs (observed 2026-09-04 on
+the MAVIS cell — never address the wrist cameras by by-id).
 `cv2.VideoCapture(path, cv2.CAP_V4L2)` with `cv2.setNumThreads(1)` first.
 Configure in order, **verifying each set() by read-back** (V4L2 silently
-clamps): `CAP_PROP_FOURCC="MJPG"` first (UVC cams reach 30 fps at 640×480+
-only in MJPG), then FPS, then W/H; mismatch → `CameraInitError` (core §16). Capture
+clamps): `CAP_PROP_FOURCC = cfg.fourcc` first (default `MJPG` — UVC webcams
+reach 30 fps at 640×480+ only in MJPG; the D435i colour stream is `YUYV`
+only), then FPS, then W/H; mismatch → `CameraInitError` (core §16). Capture
 thread: 5 consecutive `read()` failures → release + reopen once, then mark
 failed (UI greys the tile) — never crash the workcell. Enumeration: glob
 `/dev/v4l/by-id/*-video-index0` (fallback `/dev/video*`) + one test `read()`
@@ -541,13 +656,23 @@ scripted trajectory; fuzz (truncated/torn/garbage — resync or flag, never
 crash). One live capture pins `sdk_to_pose` against Studio ground truth.
 
 **netsetup**: everything runs through the injected `NmcliRunner`; tests use
-a `FixtureRunner` matching argv against transcripts in `fixtures/nmcli/`
-(unexpected command = failure), incl. the **actual polluted machine state**.
-Tests: `split_terse` escaped MACs; serialized probing with NIC release;
-`refused` = booting; denylisted devices never in any mutating argv (global
-call-log assert); reconcile plan on the polluted fixture = exactly dedupe +
-strip-gateways + pin-by-MAC + priorities; `apply` skips active-with-traffic
-profiles. `ping`/`ip`/socket faked at the `probe.py` seam.
+a `TranscriptRunner` matching argv against transcripts in `fixtures/nmcli/`
+(unexpected command = failure), incl. the **actual polluted machine state**
+(`machine_polluted.txt`) and the **pinned steady state** with the live MAVIS
+UUIDs (`machine_pinned.txt` + overlays: swap, unplugged NIC, foreign profile on
+the NIC, user-restricted permissions). Tests: `split_terse` escaped MACs;
+serialized probing with NIC release; both pins cleared before probing (none
+without a candidate); `refused` = booting; denylisted devices never in any
+mutating argv (global call-log assert); reconcile plan on the polluted fixture
+= exactly dedupe + strip-gateways + pin-by-MAC + priorities, nothing without a
+mapping, permissions cleared; `apply` skips active-with-traffic profiles;
+`repair()` with a `FakeClock`: healthy = zero mutations, unplugged = left to
+autoconnect, booting = polled, swap = re-matched after the deadline, holdoff,
+failed re-probe restores the profile; the rendered dispatcher script is
+**executed** (bash/setsid/flock) against a fake sysfs + stub python (events and
+device filter, argv contract, missing python, lock queueing); `install` plan /
+check / execution with a fake `sys_run`; state-path precedence + read-only
+fallback. `ping`/`ip`/socket faked at the `probe.py` seam.
 
 **cameras**: fake `cv2.VideoCapture` — FOURCC-first ordering, read-back
 mismatch error, BGR→RGB, reopen-once-then-fail; RS/V4L2 dedup with a fake

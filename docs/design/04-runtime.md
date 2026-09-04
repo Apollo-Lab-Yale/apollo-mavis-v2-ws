@@ -23,7 +23,7 @@ inside `hardware`.
 ## 2. Package layout
 
 ```
-src/apollo_mavis_v2_runtime/        # pyproject extras: [hardware] [sim] [trainer]
+src/apollo_mavis_v2_runtime/        # pyproject extras: [hardware] [sim] [trainer] [audio]
 ├── __main__.py                  # `python -m apollo_mavis_v2_runtime --config ...`
 ├── config.py                    # RuntimeConfig (§14)
 ├── runtime.py                   # Runtime: composition root, owns everything
@@ -39,7 +39,14 @@ src/apollo_mavis_v2_runtime/        # pyproject extras: [hardware] [sim] [traine
 │               the ONLY pysurvive import site, 13-tracker §2),
 │               tracker_calibration.py (TrackerCalibration: base-station + yaw
 │               calibration state machines behind /api/tracker/calibration,
-│               Runtime-owned, 13-tracker §4 "Calibration modes")
+│               Runtime-owned, 13-tracker §4 "Calibration modes"),
+│               microphone.py (MicrophoneReader thread: PulseAudio capture via
+│               sounddevice|parec, or fake|none → LatestSlot[MicFrame]; the ONLY
+│               sounddevice import site; feeds telemetry.microphone +
+│               GET /api/microphones, phase-11 §13.3),
+│               hardware_probe.py (HardwareProbe thread: TCP 502 connect-and-close
+│               per configured hardware arm → ArmStatusInfo.reachable /
+│               WorkcellStatus.hardware_ready, phase-11 §13.1)
 ├── safety/     gate.py (SafetyGate/NullGate §8), supervisor.py (twin gate §8),
 │               watchdog.py (InputWatchdog + ArmReportWatchdog §8)
 ├── profiles/   store.py (core ProfileStore re-export + save_from_snapshot §9)
@@ -748,8 +755,9 @@ generated from them — 05-ui §2). Errors: `{"detail": str}` with 4xx/5xx.
 | Route | Req → Resp | Notes |
 |---|---|---|
 | `GET /api/health` | → `{status, epoch, version}` | liveness; `epoch` = process UUID |
-| `GET /api/workcell` | → `WorkcellStatus{kind, available_kinds, arms: ArmStatusInfo[], cameras: CameraInfo[], policies_available: bool}` | per-arm connectivity/rail/gripper for the landing page |
-| `GET /api/cameras` | → `CameraInfo[]` | merged v4l2 + RealSense + sim enumeration; `live` flag |
+| `GET /api/workcell?kind=hardware\|sim` | → `WorkcellStatus{kind, available_kinds, arms: ArmStatusInfo[], cameras: CameraInfo[], policies_available: bool, hardware_ready: bool}` | per-arm connectivity/rail/gripper for the Welcome page (`reachable` / `hardware_ready`: core §12). `kind` optional (phase-11): omitted = the session's kind, else sim, cameras = everything previewed (legacy); `sim` = arms of the preview/session scene + sim cameras; `hardware` = arms from `workcells.hardware` (`ip` filled, `reachable: open\|refused\|unreachable\|unknown` from the `HardwareProbe`, `connected` keeps its "a hardware session exists" meaning, rail/joint limits from the digital-twin scene) + hardware cameras (`live` = preview opened). `hardware_ready` (every configured hardware arm `open`) is on every response and gates the Hardware-tab launchers (05-ui §8.1); a `kind` that is not configured returns empty `arms`/`cameras` (UI reads `available_kinds`); other values → 422 |
+| `GET /api/cameras` | → `CameraInfo[]` | sim preview/session cameras (kind `sim`, `live: true`) AND every configured hardware camera (kind `v4l2\|realsense`; `live` iff its pre-session preview opened, §13.4). The UI never opens `/ws/video/<id>` for `live: false` rows (draws a black "no signal" tile instead: an unknown stream id closes 1008 and would reconnect forever) |
+| `GET /api/microphones` | → `MicrophoneInfo[]{mic_id, label, kind: pulse\|fake\|none, source, sample_rate, channels, live, status: MicStatus, detail}` | phase-11 (`MicrophoneInfo` / `MicStatus`: core §12 `protocol/microphone.py`; `ArmConfig.microphone`: core §7): the configured microphone (`microphone.enabled`) is ALWAYS listed — `live: false` with `status: absent\|stalled\|error\|no_backend` and a human-readable `detail` when it is unplugged / silent / failing / disabled — so the Hardware tab can render the MicTile with nothing connected; `[]` when `microphone.enabled: false`. Same device status as `telemetry.microphone` (§13.3); levels ride telemetry |
 | `GET /api/scenes?kind=sim\|twin` | → `SceneInfo[]` | from the `sim` scene registry (id, #arms, rail flags, cameras) |
 | `GET /api/keymap` | → `KeymapEntry[]` | canonical, from `core.protocol.keymap`; UI builds its bound-key set from it |
 | `GET /api/profiles` | → `ProfileInfo[]` | incl. `is_initial_condition` |
@@ -828,6 +836,25 @@ additive, UI ignores unknown fields. `ee_pose` is m + **wxyz**;
 `rail_pos_m: null` for rail-less arms; `dagger: null` outside DAgger;
 `episode: null` in teleop/inference.
 
+**`microphone: MicrophoneTelemetry | null`** (additive, phase-11; core §11): the
+Runtime-owned `MicrophoneReader`'s newest frame + device status, present pre-
+session and `null` only when `microphone.enabled` is false. Fields: `mic_id`,
+`status: MicStatus` (`no_backend | starting | absent | live | stalled | error`,
+shared with `MicrophoneInfo`), `detail`, `seq`, `age_s`, `rate_hz`,
+`sample_rate`, `rms_dbfs` / `peak_dbfs` (0 dBFS = |1.0|, `null` before the
+first frame), `clipping` (`peak_dbfs >= -1`), `env_min[64]` / `env_max[64]`
+(time-ordered per-bin min/max of the frame as int8 −127..127 **relative to the
+frame peak** — the loudest sample maps to ±127 so a −58 dBFS room keeps its
+shape instead of rounding to zeros; absolute = env / 127 × 10^(peak_dbfs / 20))
+and `overruns`. The reader's frame rate is
+`telemetry_hz` (25 Hz → 1920 samples = 64 bins × 30, exact binning), so each
+telemetry tick carries exactly one new frame; the UI still de-duplicates on
+`seq` (a slow client sees the newest frame, never an invented one). `stalled` is
+derived like the tracker's `stale`: `status == live` and `age_s > stale_s`. One
+block is ≈0.5 kB (≈13 kB/s per client at 25 Hz). Raw PCM is never streamed on
+telemetry; a future listen/record feature would get its own `/ws/audio/<id>`
+binary channel with the §13.4 framing.
+
 ### 13.4 `/ws/video/{stream_id}` and MJPEG debug
 
 `VideoHub` (`streams/hub.py`) — one pipeline per stream id:
@@ -853,6 +880,20 @@ paced at stream fps) → encoded[stream_id]: LatestSlot[bytes(header+jpeg)]
   skips frames (client also drops while a decode is in flight, 05-ui §5.4).
 - 640×480@30 ⇒ 25–60 KB/frame, 6–15 Mbps/stream; encode 1–3 ms/frame
   (~0.36 core for 6×30) — measured envelope, no NVJPEG needed in v1.
+
+**Hardware camera previews (phase-11).** `SessionManager.start_previews()`
+also opens every `workcells.hardware.cameras[]` entry via
+`apollo_mavis_v2_hardware.cameras.make_camera(cfg).start()` and streams the ones
+that opened at `video.preview_fps` under their camera id. Each camera is
+failure-isolated: `CameraInitError` / any exception (device path absent, cv2 or
+the `[hardware]` extra missing, duplicate stream id) marks that camera
+`live: false` in `/api/cameras` and `/api/workcell?kind=hardware` and touches
+nothing else; failed cameras are retried on the next `start_previews()` (after
+every session). `stop_previews()` — called when a sim session starts — stops
+only the sim preview sources; hardware previews survive sim sessions and are
+torn down by `stop_hardware_previews()` at process exit (or handed over when a
+hardware session starts, phase-09). Hardware camera ids must not collide with
+sim scene camera names (one VideoHub namespace).
 
 ### 13.5 SPA serving & server startup
 
@@ -891,9 +932,26 @@ host: 127.0.0.1
 port: 8765
 ui_dist: null                # path to built SPA; null = API-only (Vite dev)
 workcells:                   # POST /api/session picks by requested kind
-  hardware: { <WorkcellConfig, core §3.2>: arms/ips/base_in_world/cameras,
-              digital_twin_scene, safety: {geom_inflation_m: 0.008,
-              min_clearance_m: 0.016, enabled: true} }
+  hardware:                  # phase-11: present even with no arm connected — it is what
+                             #   makes the Welcome page's Hardware tab exist (05-ui §8.1)
+    kind: hardware
+    digital_twin_scene: mavis_v2        # twin for planning/gating; ArmConfig.microphone: true
+                                        #   on the Perception Arm adds the mic collision body (03-sim §4)
+    arms:                               # exactly two control boxes (2026-09-04), one NIC each
+      - {id: grip, ip: 192.168.1.201, base_in_world: {}, gripper: xarm_g2}  # Manipulation Arm:
+                                                                            #   Gripper G2 + wrist
+                                                                            #   cam; default teleop arm
+      - {id: view, ip: 192.168.2.219, base_in_world: {}, gripper: none,     # Perception Arm: wrist
+         microphone: true}                                                  #   D435 + RØDE NT-USB Mini
+    cameras:                                # both wrist cams are RealSense D435i used as UVC
+                                            # colour cameras: by USB serial (by-id collides
+                                            # between the depth and colour interfaces), YUYV
+                                            # only; serial -> arm mapping provisional (2026-09-04)
+      - {id: grip_wrist, kind: v4l2, serial: "322143060792", fourcc: YUYV,
+         resolution: [640, 480], fps: 30}
+      - {id: view_wrist, kind: v4l2, serial: "349643062582", fourcc: YUYV,
+         resolution: [640, 480], fps: 30}
+    safety: {enabled: true, geom_inflation_m: 0.008, min_clearance_m: 0.016}
   sim:      { <WorkcellConfig>: sim_scene, cameras (kind sim),
               safety: {safety_debug: false} }
 profiles_dir: ~/apollo/profiles
@@ -945,8 +1003,52 @@ tracker: {backend: none,            # none | fake | libsurvive (13-tracker §4)
                         still_window_s: 0.5, still_threshold_mm: 3.0,
                         yaw_min_leg_m: 0.10, yaw_max_residual_deg: 15.0,
                         yaw_capture_average_s: 0.3}}
+microphone:                  # phase-11 (§13.3); Runtime-owned like tracker.*
+  enabled: true              # false (default) = not listed, telemetry.microphone null
+  mic_id: mic_view           # ids never change; only the labels are user-facing
+  label: Perception Arm microphone   # default "Perception Arm microphone"; landing page + telemetry
+  backend: auto              # auto | sounddevice | parec | fake | none
+                             #   auto = sounddevice (PortAudio ALSA `pulse` plugin, source
+                             #   pinned via PULSE_SOURCE) -> parec subprocess; NEVER hw:
+  source_match: NT-USB Mini  # substring of the Pulse source name/description
+                             #   (`pactl -f json list sources`; monitors ignored; `_`/`-`/space
+                             #   interchangeable — pactl blanks the Ø description to "(null)")
+  sample_rate: 48000         # the NT-USB Mini is 48 kHz mono only
+  bins: 64                   # int8 min/max envelope points per frame
+  stale_s: 0.5               # no frame for this long -> stalled
+                             # frame rate = telemetry_hz (25 Hz -> 1920 samples/frame)
+hardware_probe:              # phase-11 (§13.1 `reachable` / `hardware_ready`)
+  enabled: true
+  period_s: 2.0              # one connect-and-close round per configured hardware arm
+  timeout_s: 1.0
+  port: 502                  # xArm control port; 30001-30003 report streams are never probed
 egl_device_id: 0
 ```
+
+User-facing arm names (2026-09-04): arm id `grip` is the **Manipulation Arm**
+(xArm Gripper G2 + wrist camera, control box 192.168.1.201) and arm id `view`
+is the **Perception Arm** (wrist RealSense D435 + RØDE NT-USB Mini, control box
+192.168.2.219); the ids stay as they are in every config, spec and telemetry
+field. The Manipulation Arm is the initial `active_arm` of every session,
+hardware and sim, whatever its position in `SessionSpec.arms`
+(`control.loop.default_active_arm`: `grip` when present, else the first arm),
+and `GET /api/workcell` lists it first in `arms` for both kinds.
+
+`microphone.*` and `hardware_probe.*` are owned by `Runtime` for the process
+lifetime (phase-11): `MicrophoneReader` (`devices/microphone.py`) is started in
+`Runtime.__init__` when `enabled` and `backend != none`, publishes one
+`MicFrame` per telemetry tick into `bus.microphone` and is stopped in
+`Runtime.stop()`; `HardwareProbe` (`devices/hardware_probe.py`) exists when a
+`hardware` workcell is configured, is paused while a hardware session runs and
+is stopped in `Runtime.stop()`. Capture goes through PulseAudio only: the
+daemon owns the card, a direct `hw:CARD=Mini` open fails with EBUSY and stalls
+every other Pulse client. The `[audio]` extra (`sounddevice>=0.5`, apt
+`libportaudio2`) is optional — without it `auto` falls back to `parec`
+(`pulseaudio-utils`) and, with neither, reports `status: no_backend` instead of
+failing. Unplugging is detected by a 1 Hz Pulse source re-listing (Pulse
+migrates streams to the fallback source rather than erroring); open/read
+failures re-open with 0.5 → 5 s backoff. Placeholder arm IPs / camera paths
+only make the probe report `unreachable` and the previews `live: false`.
 
 `tracker.*` is owned by `Runtime` for the process lifetime (`TrackerReader`
 thread + live `TrackerSettings`); the `tracker_settings` action mutates

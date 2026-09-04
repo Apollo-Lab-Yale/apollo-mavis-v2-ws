@@ -56,6 +56,7 @@ phase-01-core ──┬─→ phase-02-sim-workcell ─→ phase-03-ik-twin ─�
 | 08 | `phase-08-dagger-inference.md` | apollo-mavis-v2-runtime (+ui) | 07 | [x] 2026-09-01 完成（145 tests，真实 trainer 进程集成） |
 | 09 | `phase-09-integration.md` | 全部（真机） | 01–08 | [ ] |
 | 10 | `phase-10-tracker-calibration.md` | apollo-mavis-v2-core / -runtime / -ui | 05, 06（13-tracker v0.1 真机路径可用） | [ ] 2026-09-03 设计定稿（基站标定 + 航向对齐向导，REST + telemetry），三层并行实现中；真机验收待用户在场 |
+| 11 | `phase-11-mavis-ui.md` | 全部五层（core / sim / runtime / ui / docs） | 06, 07, 08, 10 | [ ] 2026-09-03 设计定稿（Welcome 页 APOLLO MAVIS V2、Hardware 与 Sim 两页签、RØDE 麦克风实时声波、单场景 `mavis_v2`、页内 `<dialog>` 启动弹窗、§6 视觉与动效规范），五层并行实现中；真机验收（仅麦克风、无机械臂）待用户在场 |
 
 ## 每个 phase 文件的固定结构
 

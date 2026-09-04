@@ -1,7 +1,11 @@
 # 01 — apollo-mavis-v2-core (`apollo_mavis_v2_core`)
 
 Status: v1.0 (2026-09-01; amended 2026-09-03 — phase-10 tracker calibration:
-`protocol/tracker.py`, `TrackerTelemetry.charging`/`.calibration`, §10-§12, §14).
+`protocol/tracker.py`, `TrackerTelemetry.charging`/`.calibration`, §10-§12, §14;
+amended 2026-09-03 — phase-11 MAVIS UI: `protocol/microphone.py`
+(`MicrophoneInfo`, `MicStatus`), `MicrophoneTelemetry` / `TelemetryMsg.microphone`,
+`ArmStatusInfo.reachable`, `WorkcellStatus.hardware_ready`, `ArmConfig.microphone`;
+§7, §11, §12, §14 — all additive).
 Conforms to `00-overview.md` v0.3 (binding spine).
 Research ground truth: `docs/research/{dagger-online-training, lerobot-data,
 xarm-python-sdk, xarm7-ik}.md`. Message shapes mirror `05-ui.md` §2 exactly.
@@ -41,6 +45,7 @@ apollo-mavis-v2-core/
 │   ├── profiles/store.py      # ProfileStore (§8)
 │   ├── dagger/                # types.py interfaces.py (§9)
 │   └── protocol/              # control.py (§10) telemetry.py (§11) session.py (§12)
+│                              #   tracker.py microphone.py (§12)
 │                              #   video.py keymap.py (§13) export_schemas.py (§14)
 └── tests/                     # §18
 ```
@@ -351,6 +356,10 @@ class ArmConfig(BaseModel):
     gripper: Literal["xarm", "xarm_g2", "none"] = "xarm"
     tcp_load_kg: float = 0.82            # -> set_tcp_load (L3 collision detection)
     tcp_load_cog_mm: tuple[float, float, float] = (0.0, 0.0, 48.0)
+    microphone: bool = False             # microphone body mounted ahead of the wrist
+                                         #   camera (hardware view arm: true) -> the
+                                         #   digital twin adds its collision body
+                                         #   (03-sim §4); additive, phase-11
 
 class CameraIntrinsics(BaseModel):
     fx: float; fy: float; cx: float; cy: float
@@ -382,6 +391,9 @@ Cross-field validators (`model_validator(mode="after")`): sim ⇒ `sim_scene`;
 hardware ⇒ every arm has `ip`, `digital_twin_scene` set, `safety.enabled`
 True; ids unique; v4l2 ⇒ `device_path`, realsense ⇒ `serial`, sim cameras
 only in sim configs; `extrinsics_frame` parses and references a declared id.
+`ArmConfig.microphone` carries no core validator — the sim's `ArmSpec`
+after-validator (03-sim §4: requires `wrist_cam` and `gripper == "none"`)
+rejects it on a non-camera arm when the twin is built.
 Config files (`configs/hardware.yaml`, `configs/sim.yaml`) live in the runtime
 deployment dir; `POST /api/session` honors requested `kind` iff that config
 exists and validates (binding; else 409).
@@ -687,6 +699,21 @@ class TrackerTelemetry(BaseModel):       # additive block (13-tracker §3.5)
                                          #   §12) — same object as GET /api/tracker/calibration
                                          #   (additive; sub-models ride TelemetryMsg $defs)
 
+class MicrophoneTelemetry(BaseModel):    # additive block (phase-11; 04-runtime §13.3);
+    mic_id: str = "mic_view"             #   EVERY field defaults (no-mic producers validate)
+    status: MicStatus = "no_backend"     # MicStatus shared with MicrophoneInfo (§12)
+    detail: str = ""                     # reason for absent/error/no_backend
+    seq: int = 0; age_s: float | None = None; rate_hz: float = 0.0
+    sample_rate: int = 48000             # Hz; one frame per telemetry tick
+                                         #   (48000 / 25 Hz = 1920 samples = 64 x 30)
+    rms_dbfs: float | None = None        # frame RMS, 0 dBFS = |1.0|; None = no frame yet
+    peak_dbfs: float | None = None
+    clipping: bool = False               # peak >= -1 dBFS
+    env_min: list[int] = []              # 64 x int8 (-127..127) RELATIVE to the frame peak,
+    env_max: list[int] = []              #   time-ordered per-bin min / max envelope; absolute =
+                                         #   env / 127 * 10 ** (peak_dbfs / 20) (oscilloscope)
+    overruns: int = 0                    # backend overruns / dropped blocks since start
+
 class TelemetryMsg(BaseModel):
     t: Literal["telemetry"] = "telemetry"
     seq: int; ts: float; epoch: str      # ts = server monotonic, s
@@ -700,13 +727,16 @@ class TelemetryMsg(BaseModel):
     inference: InferenceStatus | None    # None outside inference
     session: SessionTelemetry | None = None     # additive
     tracker: TrackerTelemetry | None = None     # additive (13-tracker §3.5)
+    microphone: MicrophoneTelemetry | None = None   # additive (phase-11); the UI
+                                                #   de-duplicates frames on ``seq``
 ```
 
-## 12. Protocol: session & REST models (`protocol/session.py`, `protocol/tracker.py`)
+## 12. Protocol: session & REST models (`protocol/session.py`, `protocol/tracker.py`, `protocol/microphone.py`)
 
 Bodies for the `/api` surface (04-runtime §13.1); runtime defines no wire
 model of its own. Session models live in `protocol/session.py`; the phase-10
-tracker-calibration models in `protocol/tracker.py` (below).
+tracker-calibration models in `protocol/tracker.py` and the phase-11
+microphone row + `MicStatus` vocabulary in `protocol/microphone.py` (below).
 
 ```python
 Mode = Literal["teleop", "collect", "dagger", "inference"]
@@ -733,7 +763,15 @@ class SessionInfo(BaseModel):            # POST/GET /api/session response
     state: str                           # SessionState value
 
 class ArmStatusInfo(BaseModel):          # landing-page card
-    arm_id: str; ip: str | None; connected: bool; has_rail: bool
+    arm_id: str; ip: str | None
+    connected: bool                      # "a session exists" (unchanged semantics)
+    reachable: Literal["open", "refused", "unreachable", "unknown"] = "unknown"
+                                         # hardware probe, TCP 502 connect-and-close
+                                         #   (never writes): open = box up; refused =
+                                         #   box booting; unreachable = no route /
+                                         #   timeout; unknown = not probed (sim);
+                                         #   additive, phase-11
+    has_rail: bool
     gripper: Literal["xarm", "xarm_g2", "none"]; gripper_force_capable: bool
     error_code: int
     joint_limits: list[tuple[float, float]]  # 7 rad pairs; + [0.0, 0.65] m appended for
@@ -744,11 +782,14 @@ class CameraInfo(BaseModel):
     resolution: tuple[int, int]; fps: int
     live: bool                           # pre-session preview available (~15 fps)
 
-class WorkcellStatus(BaseModel):         # GET /api/workcell
+class WorkcellStatus(BaseModel):         # GET /api/workcell[?kind=hardware|sim]
     kind: Literal["hardware", "sim"]
     available_kinds: list[Literal["hardware", "sim"]]
     arms: list[ArmStatusInfo]; cameras: list[CameraInfo]
     policies_available: bool = False     # enables DAgger/Inference launch (05-ui §8.1)
+    hardware_ready: bool = False         # every configured hardware arm reachable ==
+                                         #   "open"; gates the Hardware-tab mode
+                                         #   launchers (05-ui §8.1); additive, phase-11
 
 class SceneInfo(BaseModel):              # GET /api/scenes?kind=sim|twin
     scene_id: str; label: str; num_arms: int
@@ -847,6 +888,38 @@ class TrackerCalibrationCommand(BaseModel):  # POST body
 State machines, INFO-line parsing, file layout and the yaw fit are runtime
 territory (04-runtime §6, 13-tracker §4); core only fixes the spellings above.
 
+**Microphone (`protocol/microphone.py`; phase-11, 05-ui §8.1).** The RØDE
+NT-USB Mini on the view arm is a session-less device like the tracker:
+`GET /api/microphones -> list[MicrophoneInfo]` always lists every configured
+microphone (`live: false` when absent), and the same `MicStatus` vocabulary
+rides `TelemetryMsg.microphone` (§11) so REST snapshot and telemetry never
+disagree on spelling. The module is a dependency-free leaf (pure pydantic);
+`telemetry.py` imports `MicStatus` from it, nothing imports `telemetry` back.
+
+```python
+MicStatus = Literal["no_backend", "starting", "absent", "live", "stalled", "error"]
+    # no_backend = disabled / no capture backend; starting = opening the source;
+    # absent = configured but unplugged; live = frames within stale_s;
+    # stalled = present, no frame for > stale_s; error = open/read failure
+    #   (runtime retries with backoff)
+
+class MicrophoneInfo(BaseModel):         # GET /api/microphones row
+    mic_id: str                          # e.g. "mic_view"
+    label: str                           # operator-facing name
+    kind: Literal["pulse", "fake", "none"]     # capture route in use (ALSA hw: is
+                                               #   never used — PulseAudio owns the card)
+    source: str | None                   # PulseAudio source name; None = unresolved /
+                                         #   fake / none
+    sample_rate: int                     # Hz (48000 for the NT-USB Mini)
+    channels: int = 1
+    live: bool                           # status == "live" (waveform preview available)
+    status: MicStatus
+    detail: str = ""                     # reason for absent/error/no_backend
+```
+
+Capture backends, source resolution, envelope binning and stall detection are
+runtime territory (04-runtime §13.1/§13.3/§14); core only fixes the spellings.
+
 ## 13. Protocol: video framing & keymap (`protocol/video.py`, `protocol/keymap.py`)
 
 **Video framing (binding).** `/ws/video/{stream_id}` frames = 12-byte
@@ -925,12 +998,14 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   #           SaveProfileArgs, SetInitialConditionArgs, TrackerSettingsArgs
   # telemetry: TelemetryMsg (embeds ArmTelemetry/CollisionReport/EpisodeStatus/
   #           DaggerStatus/TrainerStatus/InferenceStatus/TrackerTelemetry/ControllerTelemetry/
-  #           TrackerCalibrationStatus/LighthouseStatus/CalibrationValidation/YawGesturePoint
-  #           via $defs)
+  #           TrackerCalibrationStatus/LighthouseStatus/CalibrationValidation/YawGesturePoint/
+  #           MicrophoneTelemetry via $defs)
   # tracker:  TrackerCalibrationStatus, TrackerCalibrationCommand (REST
   #           /api/tracker/calibration; the other protocol.tracker models ride $defs only)
   # session:  SessionSpec, SessionInfo, WorkcellStatus, ArmStatusInfo,
   #           CameraInfo, SceneInfo, ProfileInfo, PolicyInfo
+  # microphone: MicrophoneInfo (REST /api/microphones; phase-11 — MicrophoneTelemetry
+  #           rides TelemetryMsg $defs only)
   # misc:     StateProfile, KeymapEntry, CollisionEvent
 }
 def export(out_dir: Path) -> list[Path]
@@ -1080,13 +1155,20 @@ All of core tests with no robot, no MuJoCo, no network.
 - **Protocol**: every wire model round-trips `model_dump_json →
   model_validate_json`; discriminated-union parse of a mixed control
   transcript; the literal JSON fixtures of 04-runtime §13.2 parse;
-  `JointTargetArgs` / `SessionSpec.start_from` accept/reject tables.
+  `JointTargetArgs` / `SessionSpec.start_from` accept/reject tables;
+  `model_fields` pinned per wire model (core is the spelling authority) and
+  legacy-dict additivity for every additive field (`TrackerTelemetry.*`,
+  `TelemetryMsg.microphone`, `ArmStatusInfo.reachable`,
+  `WorkcellStatus.hardware_ready`); `MicStatus` identical on
+  `MicrophoneTelemetry` and `MicrophoneInfo`.
 - **Keymap**: §13 invariants + literal table equality against spine §5 — any
   keymap edit is a conscious spine change.
 - **Video**: pack/unpack round trip; `struct.calcsize("<dI") == 12`;
   truncation/mismatch errors; reserved-id predicate.
 - **Schema export**: export twice → byte-identical; `--check` vs checked-in
-  `schemas/` (drift fails CI); no numpy leakage.
+  `schemas/` (drift fails CI); no numpy leakage; `EXPORTED_MODELS` pinned as
+  an exact set; per-model property/required/enum/default sets pinned for the
+  tracker, microphone and phase-11 workcell fields.
 - **Bus**: N producer threads × 1 drainer — every Future resolves exactly
   once, corr_ids match; bus-full immediate nack; handler exception →
   ok=False; `LatestSlot` overwrite + `wait_fresh` timeout semantics.

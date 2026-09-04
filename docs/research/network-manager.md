@@ -337,6 +337,63 @@ the wrong subnet), and pin each surviving profile to its NIC by MAC.
 Binding by MAC beats binding by ifname: `enp36s0f*` names shift if PCI topology
 changes, and the USB dongle already carries a MAC-derived name (`enx00e04c683d97`).
 
+### 8.1 Addendum 2026-09-04 — boot / hot-plug automation, pins vs. re-matching, permissions
+
+Verified on the target machine while wiring the NM dispatcher hook (implemented in
+`apollo_mavis_v2_hardware.netsetup.dispatcher`; design 02-hardware §7.4):
+
+1. **A MAC pin makes a cable swap un-matchable.** `802-3-ethernet.mac-address` is, like
+   `connection.interface-name`, a device-compatibility filter: `nmcli con up uuid U
+   ifname other` fails ("No suitable device") when the pin points elsewhere. The
+   matcher therefore clears BOTH pins in one `connection modify` before probing (and
+   only when a candidate NIC with carrier exists); the reconciler re-pins afterwards.
+2. **Dispatcher facts** (`man NetworkManager-dispatcher`, NM 1.36.6): scripts in
+   `/etc/NetworkManager/dispatcher.d/` must be root-owned, executable, not group/other
+   writable; they run as root, one at a time, with `$1` = interface, `$2` = action and
+   env `CONNECTION_UUID` / `CONNECTION_ID` / `DEVICE_IFACE` / `NM_DISPATCHER_ACTION`;
+   they "will be killed if they run for too long" — spawn a child and return. Queued
+   scripts always run even if a later event made them obsolete. There is NO device-type
+   variable: classify via sysfs — physical ethernet = `/sys/class/net/<if>/type == 1`
+   AND a `device` symlink (PCI/USB) AND none of `wireless`/`phy80211`/`bridge`. On this
+   machine that selects exactly `enp36s0f0`, `enp36s0f1`, `enx00e04c683d97` and rejects
+   `wlp38s0` (wireless), `docker0`/`br-*`/`virbr0` (bridge, no device), `tailscale0`
+   (type 65534), `lo` (type 772). `setsid`, `flock`, `logger` are all present.
+3. **Feedback loop.** Every `nmcli connection up/down` the hook issues is itself an
+   `up`/`down` dispatcher event. Running the plain matcher from the hook would
+   re-trigger it and would probe an arm on the *other* arm's NIC (kicking a healthy
+   profile off). The hook runs `match --repair`: verify first, freeze healthy NICs,
+   re-probe only arms that are unmapped / on a missing NIC / inactive-with-carrier /
+   moved to a free NIC; an arm that is active but silent is polled for 60 s (box
+   booting: link is up seconds before its IP stack answers) and then re-probed at most
+   every 10 min (`nic_map.holdoff` stamp). A converged system executes zero mutating
+   nmcli → no events → quiescence. Serialization: `flock -w 600
+   /run/lock/mavis-netsetup.lock`; detachment: `setsid -f`, stdio to
+   `/var/log/mavis-netsetup.log`; 2 s settle before acting.
+4. **Profiles are system-wide by default.** They are root-only keyfiles in
+   `/etc/NetworkManager/system-connections/<id>.nmconnection` (`0600`), usable by every
+   account and by root services unless `connection.permissions` is set
+   (`user:<name>:;`); `nmcli -g connection.permissions connection show uuid U` prints an
+   empty line when unrestricted. Both MAVIS profiles are unrestricted; the reconciler
+   clears the property if it ever appears and `verify` warns.
+5. **Root needs no polkit.** The dispatcher path therefore works before the `.pkla` /
+   `netdev` grant exists and with nobody logged in; the grant is still needed for the
+   user-level `verify`/`match` at runtime session start.
+6. **Live state 2026-09-04** (supersedes the arm-profile rows of the §2 audit):
+   `mavis_viewpoint_arm` (`6753457b-89fc-435a-a5a0-e94c728bc826`, 192.168.2.12/24,
+   active on `enp36s0f0` = `08:BF:B8:89:4F:3A`, **no** ifname/MAC pin, gateway
+   192.168.2.1) and `mavis_manipulation_arm` (`5a4846b2-2383-4f3f-8871-ce71a8f7f303`,
+   192.168.1.11/24, active on `enp36s0f1` = `08:BF:B8:89:4F:3B`, MAC-pinned to that
+   MAC — the pin is correct, not stale — gateway 192.168.1.1); both priority 0,
+   `never-default no`, hence two bogus default routes (metric 20101/20102) that the
+   reconciler strips. `ip -j route show default` still ranks `wlp38s0` (metric 600)
+   first, so the denylist is unaffected. Controllers: view = 192.168.2.219, grip =
+   192.168.1.201 (both answer TCP 502). No `nic_map.json` existed; the old reconcile
+   plan therefore wanted to *disable both* profiles as "duplicates" — fixed: dedupe only
+   inside a mapped arm's subnet.
+7. **State file**: `/etc/apollo-mavis-v2/nic_map.json` (root, world-readable) is the
+   system map written by the hook and by `install`; readers resolve explicit `--state`
+   > `~/.config/apollo-mavis-v2/nic_map.json` if present > the system map.
+
 ---
 
 ## 9. Not disrupting the internet NIC
@@ -450,4 +507,6 @@ TCP connect is unprivileged, and use `ip neigh show` instead of `arping`
   `report_type='rich'`, 503 passthrough)
 - Local machine audit: `nmcli device/connection show`, `pkaction --verbose`,
   `dpkg -l polkitd`, `/usr/libexec/polkitd` strings, `ip route`
+- `man 8 NetworkManager-dispatcher` (local, NM 1.36.6) and `/sys/class/net/*` on the
+  machine (2026-09-04 addendum)
 - https://github.com/python-sdbus/python-sdbus-networkmanager (evaluated, not chosen)
