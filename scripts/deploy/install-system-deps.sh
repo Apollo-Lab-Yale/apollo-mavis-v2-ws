@@ -57,6 +57,13 @@ else
   run bash "$WS/scripts/tracker/01-sudo-udev-and-deps.sh"
 fi
 # RealSense nodes come from librealsense2-udev-rules (0666, group plugdev) — nothing to add.
+# The runtime wakes the D435i colour streams after a cold boot with `rs-enumerate-devices -s`
+# (librealsense2-utils, Intel apt repo — not in APT_PKGS because it is not an Ubuntu package).
+if command -v rs-enumerate-devices >/dev/null 2>&1; then
+  note "rs-enumerate-devices present: $(command -v rs-enumerate-devices)"
+else
+  warn "rs-enumerate-devices missing: install librealsense2-utils (Intel apt repo); without it a cold-booted D435i colour stream stays silent (black wrist-cam tiles)"
+fi
 
 log "NVIDIA driver / EGL"
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=driver_version,name --format=csv,noheader >/dev/null 2>&1; then

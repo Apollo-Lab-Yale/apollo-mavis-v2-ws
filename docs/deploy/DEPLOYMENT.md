@@ -315,7 +315,11 @@ tiles; if they are crossed, swap the two serials in `configs/mavis_v2.yaml` (dev
 commit + push, then S9 re-render) or use the `CAMERA_SERIALS` stop-gap above until then. The
 script exits with an error for a camera id that is not in the repo config, so a rename
 there cannot be ignored silently. An unplugged camera shows a black tile with `live: false`
-and has no other effect.
+and has no other effect. **Cold boot**: a D435i's colour stream stays silent after a reboot
+until librealsense has opened the device once; the driver runs `rs-enumerate-devices -s`
+(librealsense2-utils, from Intel's apt repo — present on apollo-pc-1, keep it installed) once
+per process before the first RealSense open, so no manual step is needed as long as that
+tool exists (S11 has the manual fallback).
 
 ### libsurvive lighthouse calibration (per account!)
 
@@ -499,6 +503,7 @@ timeout 2 bash -c 'echo > /dev/tcp/192.168.2.219/502' && echo view-open
 curl -s 127.0.0.1:8765/api/health                                  # {"status":"ok",...}
 curl -s '127.0.0.1:8765/api/workcell?kind=hardware' | python3 -m json.tool | grep -E '"arm_id"|"reachable"|hardware_ready'
 curl -s 127.0.0.1:8765/api/microphones | python3 -m json.tool | grep -E '"status"|"live"'
+curl -s 127.0.0.1:8765/api/cameras | python3 -c 'import json,sys; [print(c["camera_id"], c["live"]) for c in json.load(sys.stdin) if c["kind"] != "sim"]'   # grip_wrist True / view_wrist True
 curl -s 127.0.0.1:8765/api/tracker/calibration | python3 -m json.tool | grep -E 'yaw_valid|yaw_calibrated_at|applied_yaw'
 curl -s -o /dev/null -w '%{http_code} %{content_type}\n' 127.0.0.1:8765/     # 200 text/html (UI)
 ```
@@ -660,6 +665,7 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 | tracker `error`: permission / cannot open device | mavis lacks `plugdev` or the udev rule is missing: `id mavis`, `ls -la /dev/bus/usb/…` should be `root plugdev 0660`; `sudo udevadm trigger --subsystem-match=usb`; restart `user@<uid>` after group changes. |
 | tracker `searching` forever | controller off/asleep, or stations off; `--lighthousecount 3` must match the powered stations. Yaw/base-station: Devices page wizard. |
 | microphone `absent` / `error: pactl…` | mavis's PulseAudio does not see the card: (a) `XDG_RUNTIME_DIR` unset → service must run under the user manager (it does) — from shells export it; (b) mavis not in `audio` (`/dev/snd/* root:audio 0660`); (c) the developer's PA has a stream open on the RØDE (S8.3, set its card profile off); (d) `pactl info` fails → `systemctl --user status pulseaudio.socket pulseaudio.service` as mavis (**verify on first deploy**: module-udev-detect for a seatless user). Never open `hw:CARD=Mini` directly: EBUSY and it stalls every Pulse recorder. |
+| both wrist-cam tiles black after a reboot (`/api/cameras` `live: false`, log: `select() timeout` / `cannot open`) | cold-boot quirk of the D435i colour UVC stream: it delivers nothing until librealsense has opened the device once. The driver runs `rs-enumerate-devices -s` automatically before the first RealSense open — check `command -v rs-enumerate-devices` (librealsense2-utils, Intel apt repo) and the runtime log for `RealSense wake`; manual fallback: run `rs-enumerate-devices -s`, then restart the service. `rs-enumerate-devices` prints ASIC serials (243522071002 / 327122074467), not the USB serials in the config. |
 | sim previews black / `stream died` in the log, EGL errors | render node permission: mavis needs `render` (`/dev/dri/renderD* root:render 0660`); `/dev/nvidia*` are 0666. Check `MUJOCO_GL=egl` in `systemctl --user show mavis-runtime -p Environment`; `egl_device_id: 0` = PCI 41:00.0. An EGL failure kills only the preview streams, not the runtime. |
 | `POST /api/session` kind=hardware → 409 "hardware sessions land with phase-09 integration" | expected until phase-09; use sim sessions. |
 | arms `unreachable` | boxes off (1-2 min after power-on), or the NIC lost its profile: `nmcli -t -f NAME,DEVICE con show --active \| grep mavis_`, `tail /var/log/mavis-netsetup.log` (dispatcher repairs on link events), `$PY -m apollo_mavis_v2_hardware.netsetup verify --arm grip=192.168.1.201 --arm view=192.168.2.219`, `… match --repair` (needs `netdev` + the `.pkla`, S5). Also `ip route get 192.168.2.219` must leave via `enp36s0f0`. |

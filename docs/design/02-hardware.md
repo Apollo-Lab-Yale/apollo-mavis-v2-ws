@@ -545,7 +545,15 @@ the requested format). The serial route exists because a RealSense D435i
 exposes its depth (interface 0) and colour (interface 3) sensors as separate
 UVC interfaces that BOTH claim `...-video-index0`, so udev keeps one by-id
 symlink per name and the winner changes between plugs (observed 2026-09-04 on
-the MAVIS cell — never address the wrist cameras by by-id).
+the MAVIS cell — never address the wrist cameras by by-id). **Cold-boot wake**: after a
+reboot a D435i's colour UVC interface delivers no frames at all (`select() timeout` on
+every read; observed 2026-09-04, kernel 7.0.11, firmware 5.15.1 / 5.17.0.10) until
+librealsense has opened the device once. Before the first RealSense node (USB
+`idVendor` 8086, read from sysfs) is opened, `OpenCVCamera` calls `wake_realsense()`,
+which runs `rs-enumerate-devices -s` (librealsense2-utils) once per process — the tool
+queries and releases the devices in about a second and the colour streams work
+afterwards. A missing tool is logged once and the open proceeds (a cold-booted D435i
+then ends in `failed` = black tile, nothing crashes).
 `cv2.VideoCapture(path, cv2.CAP_V4L2)` with `cv2.setNumThreads(1)` first.
 Configure in order, **verifying each set() by read-back** (V4L2 silently
 clamps): `CAP_PROP_FOURCC = cfg.fourcc` first (default `MJPG` — UVC webcams

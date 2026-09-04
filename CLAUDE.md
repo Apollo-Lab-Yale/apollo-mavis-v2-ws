@@ -110,8 +110,14 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   config if the Hardware tab shows the tiles crossed. Address them by USB serial (sysfs
   lookup in `OpenCVCamera`), NEVER by `/dev/v4l/by-id`: the depth and colour UVC
   interfaces both claim `...-video-index0`, so only one symlink survives and which one
-  changes between plugs. The hardware camera ids differ from the twin's
-  `grip_wrist_cam` / `view_wrist_cam` on purpose (both coexist in the VideoHub).
+  changes between plugs. COLD-BOOT QUIRK (2026-09-04): after a reboot the colour UVC stream
+  delivers no frames (`select() timeout`) until librealsense has opened the device once;
+  `OpenCVCamera` therefore runs `rs-enumerate-devices -s` (librealsense2-utils, Intel apt
+  repo, installed) once per process before opening a RealSense node — keep that tool
+  installed. `rs-enumerate-devices` prints the ASIC serials (243522071002 fw 5.15.1,
+  327122074467 fw 5.17.0.10), NOT the USB serials the config uses. The hardware camera ids
+  differ from the twin's `grip_wrist_cam` / `view_wrist_cam` on purpose (both coexist in the
+  VideoHub).
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
   hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
   NVIDIA driver 580.173.02 (upgraded 2026-09-01); NVENC works. lerobot's
