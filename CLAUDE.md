@@ -13,8 +13,14 @@ general. Five repos: `apollo-mavis-v2-core` (interfaces/schemas/protocols) ←
 collection / DAgger / inference) ← `apollo-mavis-v2-ui` (web UI). Renamed from
 `apollo-xarm7-*` on 2026-09-03 (GitHub keeps redirects from the old names).
 
-The five sub-repos live side by side in this directory as independent git
-clones (gitignored by the ws repo until converted to submodules).
+The five sub-repos are **git submodules** of this workspace (since 2026-09-03),
+each tracking its own `main`. A ws commit therefore pins a known-good
+combination of the five. Rules: work inside a sub-repo on `main` (never on a
+detached HEAD — run `git -C <sub> switch main` if `git submodule status` shows
+one), commit + push there first, then bump the pointer in the ws
+(`git add <sub> && git commit`); `git submodule update --remote --merge`
+advances every pointer to the latest pushed `main`. Fresh checkout:
+`git clone --recurse-submodules <ws-url>`.
 
 ## Where truth lives
 

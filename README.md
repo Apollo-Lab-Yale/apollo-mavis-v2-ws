@@ -32,8 +32,12 @@ apollo-mavis-v2-hardware        apollo-mavis-v2-sim
 
 ## Layout
 
-- `apollo-mavis-v2-*/` — the five sub-repos, cloned side by side (gitignored
-  here until they have initial commits and are converted to submodules).
+- `apollo-mavis-v2-*/` — the five sub-repos as git submodules (each tracks
+  its own `main`; a ws commit pins one consistent combination). Clone with
+  `git clone --recurse-submodules`, or run `git submodule update --init` in an
+  existing checkout; `git submodule update --remote --merge` moves every
+  pointer to the latest pushed `main`. Commit and push inside a sub-repo first,
+  then commit the updated pointer here.
 - `docs/architecture.md` — topology sketch.
 - `docs/research/` — research notes on reference repos and tech choices.
 - `docs/design/` — detailed design documents per repo + cross-cutting protocols.

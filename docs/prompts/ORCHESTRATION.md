@@ -66,7 +66,8 @@ commit + push、推进下一波。已于 2026-09-01 由本模式启动。
 - 每个 phase 在其子 repo 一个 commit（信息含 phase 编号与验收摘要），
   commit footer: `Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>`；
 - ws repo 在每波结束后 commit（状态表 + 文档修订）；
-- phase-09 完成前不做 submodule 转换（各 repo 独立开发更顺）。
+- ~~phase-09 完成前不做 submodule 转换（各 repo 独立开发更顺）。~~ 2026-09-03 已转为
+  submodules（五个子仓库均已有提交并推送；ws 的每个 commit 钉住一组一致的版本）。
 
 ## 大 phase 的拆分先例
 

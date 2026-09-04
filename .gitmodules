@@ -1,0 +1,20 @@
+[submodule "apollo-mavis-v2-core"]
+	path = apollo-mavis-v2-core
+	url = https://github.com/Apollo-Lab-Yale/apollo-mavis-v2-core
+	branch = main
+[submodule "apollo-mavis-v2-sim"]
+	path = apollo-mavis-v2-sim
+	url = https://github.com/Apollo-Lab-Yale/apollo-mavis-v2-sim
+	branch = main
+[submodule "apollo-mavis-v2-hardware"]
+	path = apollo-mavis-v2-hardware
+	url = https://github.com/Apollo-Lab-Yale/apollo-mavis-v2-hardware
+	branch = main
+[submodule "apollo-mavis-v2-runtime"]
+	path = apollo-mavis-v2-runtime
+	url = https://github.com/Apollo-Lab-Yale/apollo-mavis-v2-runtime
+	branch = main
+[submodule "apollo-mavis-v2-ui"]
+	path = apollo-mavis-v2-ui
+	url = https://github.com/Apollo-Lab-Yale/apollo-mavis-v2-ui
+	branch = main
