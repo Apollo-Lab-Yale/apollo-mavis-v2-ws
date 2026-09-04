@@ -55,6 +55,7 @@ phase-01-core ──┬─→ phase-02-sim-workcell ─→ phase-03-ik-twin ─�
 | 07 | `phase-07-data-collection.md` | apollo-xarm7-runtime (+ui) | 05, 06 | [x] 2026-09-01 完成（105 tests，e2e 录/弃/回读；runtime 需 Py3.12） |
 | 08 | `phase-08-dagger-inference.md` | apollo-xarm7-runtime (+ui) | 07 | [x] 2026-09-01 完成（145 tests，真实 trainer 进程集成） |
 | 09 | `phase-09-integration.md` | 全部（真机） | 01–08 | [ ] |
+| 10 | `phase-10-tracker-calibration.md` | apollo-xarm7-core / -runtime / -ui | 05, 06（13-tracker v0.1 真机路径可用） | [ ] 2026-09-03 设计定稿（基站标定 + 航向对齐向导，REST + telemetry），三层并行实现中；真机验收待用户在场 |
 
 ## 每个 phase 文件的固定结构
 

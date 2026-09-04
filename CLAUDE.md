@@ -38,11 +38,21 @@ clones (gitignored by the ws repo until converted to submodules).
   Presence must be auto-detected via the xArm SDK.
 - Lab cell geometry (tape-measured 2026-09-02): 1.215 × 0.62 × 0.03 m table, top
   0.735 m above the floor; two identical rails 39.5 cm apart along the long axis
-  (camera-only arm on the outer rail, 2.6 cm from the edge the arms face; gripper +
-  wrist-cam arm inward), zero at the right end flush with the table edge; 0.16 × 0.16 ×
-  0.24 m untouchable obstacle flush against the LEFT end in the channel. Encoded in
-  apollo-xarm7-sim `scenes/mavis_v2.yaml` (header lists every measurement and the
-  assumptions to confirm in phase-09); docs/design/03-sim.md §4.3 has the arithmetic.
+  (camera-only arm on the outer rail, nearest the operator, 2.6 cm from the edge the
+  operator stands at; gripper + wrist-cam arm inward). Frame is the OPERATOR's view
+  (they are the authority on left/right): +Y = outer edge (operator side), operator
+  faces −Y so their right = −X, left = +X. The arms REST at the operator's right (−X),
+  flush with the table edge. Each linear rail is a chiral part, so making its thin
+  plate face the interior (−Y, away from the operator) is a true 180° rotation about z,
+  NOT a mirror (a mirror would flip the mesh handedness): base_quat yaw +90, which
+  reverses travel — rail zero (q=0) is now at the operator's LEFT (+X) and qpos
+  increases toward −X, so the arms rest at rail q ≈ 0.597 and the keyframe adds π to
+  joint 1 to re-face the workspace. 0.16 × 0.16 × 0.24 m untouchable obstacle flush
+  against the operator's-left (+X) end in the channel. (Earlier the scene was mirrored
+  in X from an inner-side viewpoint, then fixed to yaw −90 which left the plate facing
+  the operator; turned each rail 180° to yaw +90 on 2026-09-03.) Encoded in apollo-xarm7-sim
+  `scenes/mavis_v2.yaml` (header lists every measurement and the assumptions to
+  confirm in phase-09); docs/design/03-sim.md §4.3 has the arithmetic.
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
   hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
   NVIDIA driver 580.173.02 (upgraded 2026-09-01); NVENC works. lerobot's

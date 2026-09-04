@@ -1,7 +1,10 @@
 # 13 — Vive-tracker + gamepad teleop (binding)
 
-Status: v0.1, 2026-09-02. Extends 04-runtime §6 (teleop path), 01-core §13
-(keymap), 05-ui §6 (input). Everything here is additive to the existing
+Status: v0.2, 2026-09-03 (v0.1 2026-09-02; amended 2026-09-03 — phase-10
+tracker calibration: §3 items 7–8, §4 "Calibration modes", §5 "Calibration"
+wizard, §6 rewritten around the wizard, §7). Extends 04-runtime §6 (teleop
+path), 01-core §13 (keymap), 05-ui §6 (input) and, since v0.2, 01-core §12 /
+04-runtime §13.1 (`/api/tracker/calibration`). Everything here is additive to the existing
 keyboard teleop; the keyboard path keeps working unchanged, with one revised
 semantic shared by every rail input: a rail-only tick holds the joint posture
 and lets the TCP ride the rail (§1.1, 04-runtime §6 "Rail"; 2026-09-02).
@@ -88,8 +91,11 @@ input is held the arm keeps its joint posture and the TCP rides the rail — the
 IK is not run against the frozen world-frame target — and the teleop seed is
 invalidated so that the next translate key or clutch engage re-seeds from the
 measured TCP (§4 re-seed rule (d)); a rail input held together with translate
-keys or a live clutch keeps the world-frame target and the IK compensates the
-rail within the leash. Details: 04-runtime §6 "Rail".
+keys or a live clutch slides the whole arm as well — the integrator target and
+the clutch anchors ride along by the rail step, so the hand<->arm offset is kept
+and the joints never fold to hold the TCP in place (2026-09-03). The rail is not
+an IK degree of freedom (`control.rail_in_ik: false`): the trackpad / arrow keys
+are the only way the rail moves. Details: 04-runtime §6 "Rail".
 
 The default **active arm is the gripper arm**: sessions started from the
 devices page list `grip` first (`arms: [grip, view]`); operators can still
@@ -160,6 +166,51 @@ injected codes (`TrackerTelemetry.controller`, `.device_held`).
    (device fields), session fields `None` otherwise.
 6. `CommandSource` is unchanged: tracker motion is `TELEOP` (datasets record
    `action_source = teleop`).
+7. **Tracker calibration models (phase-10, 2026-09-03)** — new core module
+   `protocol/tracker.py` (01-core §12 is the spelling authority):
+   `CalibrationKind = "none"|"base_station"|"yaw"`, `CalibrationPhase =
+   "idle"|"starting"|"capturing"|"validating"|"fitting"|"installing"|"done"|
+   "failed"|"aborted"`, `CalibrationOp = "start"|"capture"|"validate"|
+   "install"|"apply"|"abort"`, `YawPointLabel = "start"|"left"|"forward"|
+   "right"|"back"|"up"|"down"`; models `LighthouseStatus {index, channel,
+   serial, pose (lighthouse world, m + wxyz), scenes, reference}`,
+   `CalibrationValidation {samples, std_mm[3], max_step_mm, threshold_std_mm
+   = 5.0, threshold_step_mm = 20.0, passed}`, `YawGesturePoint {label, pose
+   (RAW lighthouse-world pose at the click)}`, `TrackerCalibrationStatus
+   {kind, phase, detail, started_at, elapsed_s; scenes (max over stations),
+   lighthouses, stations_visible, controller_still, validation,
+   installed_path, backup_path; yaw_points, next_point, fitted_yaw_deg,
+   fit_residual_deg, fit_checks (failed checks, empty = ok), applied_yaw_deg;
+   yaw_valid, yaw_calibrated_at, base_station_installed_at (persisted state,
+   always filled)}` and `TrackerCalibrationCommand {kind: "base_station"|
+   "yaw", op, point: YawPointLabel|None (yaw capture label; None =
+   next_point)}`. Telemetry, additive: `TrackerTelemetry.calibration:
+   TrackerCalibrationStatus | None` — the very object `GET
+   /api/tracker/calibration` returns; the sub-models ride `TelemetryMsg.json`'s
+   `$defs`, so the UI generator gets same-named interfaces — and, pinned in
+   the same pass because it was already in code, `TrackerTelemetry.charging:
+   bool | None` (controller on external USB power; `None` = not reported).
+   `EXPORTED_MODELS` gains `TrackerCalibrationStatus` and
+   `TrackerCalibrationCommand` (REST bodies; the other new models are `$defs`
+   only); `protocol/__init__.py`, `__all__`, `tests/test_schema_export.py`'s
+   exact set, `tests/test_protocol.py::_WIRE_MODELS` and the `TrackerTelemetry`
+   attribute-set assertion move together. Class names are unique across the
+   protocol (no json-schema-to-typescript alias renumbering); no keymap row.
+8. **Transport (binding, 2026-09-03):** calibration adds **no** `ActionName`
+   and **no** keymap row (item 2's 23-entry invariant holds). Commands ride
+   REST — `GET /api/tracker/calibration -> TrackerCalibrationStatus`, `POST
+   /api/tracker/calibration (TrackerCalibrationCommand) ->
+   TrackerCalibrationStatus`, illegal transitions 409 `{detail}` — and
+   progress rides telemetry (`TrackerTelemetry.calibration`). Rationale: the
+   Devices page has no session, `/ws/control` nacks every action without one
+   (`ws_control.py` "no session") and `AckMsg` carries no payload. This is a
+   binding *addition* to 04-runtime §13.1 "REST = management CRUD":
+   session-less device management is REST, progress is broadcast via
+   telemetry. Both calibrations require that **no session is active** (409
+   `"stop the session first"`: base-station calibration restarts the reader,
+   and the yaw gesture's trigger clicks would clutch inside a session); while
+   a calibration is active `POST /api/session` is 409 `"tracker calibration
+   in progress"`.
 
 Schema export (`export_schemas --out schemas/`), UI `gen:sync`/`gen:types`,
 the spine table in 00-overview §5 and 01-core §13 ("exactly these 23 entries")
@@ -171,12 +222,16 @@ move together.
   "none", object_name: "WM0", libsurvive_args: ["--lighthousecount", "2"],
   yaw_deg: 0.0, pos_scale: 1.0, follow_rotation: True, stale_s: 0.2,
   max_jump_m: 0.10}`. `tracker_settings` mutates yaw/scale/rotation at runtime
-  (process lifetime; config is the default).
+  (process lifetime; the YAML is the boot default — since phase-10 a valid
+  persisted `tracker_calibration.json` overrides `yaw_deg` at start, see
+  "Calibration modes" below).
 - `devices/tracker.py`: `TrackerSample(pose: Pose, vel_lin, vel_ang, t_dev,
   rx_mono, seq)`; `TrackerReader(backend, slot)` thread; libsurvive poses are
   meters + **wxyz** (same as core `Pose`), stamped with `time.monotonic()` on
   receipt (device time is run-time seconds, not wall clock). Only objects of
-  type OBJECT whose name equals `object_name` are used; lighthouses are ignored.
+  type OBJECT whose name equals `object_name` are used for poses; lighthouses
+  are ignored by the pose path (since phase-10 LIGHTHOUSE-type objects are
+  snapshotted for the calibration status only, "Calibration modes" below).
   A jump > `max_jump_m` between consecutive samples marks the sample invalid
   (occlusion/reflection glitch) — the loop holds. Import of `pysurvive` is lazy
   and confined to this module (ruff banned-api elsewhere); missing module ⇒
@@ -266,6 +321,156 @@ move together.
   `rate_hz` decays to 0 when samples stop; libsurvive warnings are rate-limited
   (≤ 1 line/s per message class) and the runtime entry point configures Python
   logging.
+- **Calibration modes (phase-10, 2026-09-03; 04-runtime §6 / §14).** Two
+  calibrations, one controller: `devices/tracker_calibration.py` holds
+  `TrackerCalibration(reader, settings, cfg: RuntimeConfig, slot:
+  LatestSlot[TrackerSample], session_active: Callable[[], bool],
+  clock=time.monotonic, wall=time.time)`, owned by `Runtime` (never by the
+  `ControlLoop` or the `SessionManager`); `status() ->
+  TrackerCalibrationStatus` is cheap and lock-protected (the telemetry
+  builder calls it at 25 Hz), `command(cmd: TrackerCalibrationCommand) ->
+  TrackerCalibrationStatus` raises `CalibrationError(detail)` on an illegal
+  transition (REST → 409), `active` is a property, and `close()` restores the
+  normal libsurvive arguments before the reader stops at process exit when a
+  calibration is still running. A worker thread runs the timed phases.
+  `pysurvive` stays confined to `devices/tracker.py`.
+  - **Reader extensions** (`devices/tracker.py`): `TrackerReader.restart(
+    libsurvive_args: list[str])` = `stop()` (join; `simple_close` releases
+    the dongle — a second `simple_init` before that close completes fails
+    with `LIBUSB_ERROR_BUSY`) → `self.cfg = self.cfg.model_copy(update=
+    {"libsurvive_args": args})` (the shared `TrackerConfig` is **never**
+    mutated in place) → `start()`. During a restart `status()` reports
+    `starting` / `searching` and the loop holds by sample expiry as usual.
+    libsurvive INFO lines (level ≥ 2 in `_on_survive_log`, ANSI escapes
+    stripped first) are queued in `reader.info_lines: deque[tuple[float,
+    str]]` (maxlen 256) and handed to an optional `on_info` callback that runs
+    on the C thread and must never raise — until phase-10 the reader only
+    forwarded warnings. `TrackerReader.lighthouses() ->
+    list[LighthouseSnapshot]`: every 0.5 s the reader thread walks
+    `simple_get_first_object` / `simple_next_object` inside
+    `_libsurvive_events`, keeps the objects whose `simple_object_get_type ==
+    ps.SurviveSimpleObject_LIGHTHOUSE` (always compare against
+    `ps.<constant>`; the test stub's enum values differ) and records name,
+    `simple_serial_number` and `simple_object_get_latest_pose` under a lock.
+  - **Argument sets.** *Normal* = `cfg.tracker.libsurvive_args` (lab:
+    `["--lighthousecount", "3", "--globalscenesolver", "0",
+    "--disable-calibrate", "1"]`, §6). *Stripped* = normal minus the pairs
+    `--globalscenesolver X`, `--disable-calibrate X`, `--configfile X`,
+    `--force-calibrate X`, `--use-stationary-sensor-window X`. libsurvive
+    rewrites the file `--configfile` points at, so a calibration always runs
+    on a **temporary config** `calibration_dir/base_station-<ts>.json` (a byte
+    copy of `tracker.libsurvive_config_path`, default
+    `~/.config/libsurvive/config.json`); the real file is replaced only by
+    `install`. The runtime always passes `--configfile` explicitly
+    (`--record` without it silently switches the config to `<rec>.json`) and
+    never relies on `--run-time` (inert in this build).
+  - **`base_station` state machine.** `start`: requires backend `libsurvive`
+    (409 `"backend is not libsurvive"`), no session, no calibration running;
+    copies the config to the temp file; `reader.restart(stripped +
+    ["--configfile", tmp, "--force-calibrate", "1", "--globalscenesolver",
+    "1"])`; phase `starting`, then `capturing` on the first `Force calibrate
+    flag set` INFO line or the first pose. While `capturing` the worker parses
+    INFO lines: `Global solve with (\d+) scenes for (\d+)` → per-station
+    `scenes` (`status.scenes` = max over stations); `Using LH (\d+) \((\w+)\)
+    as reference lighthouse` → `reference`; `OOTX not set for LH in channel
+    (\d+)` plus the lighthouse snapshots → `channel`, `stations_visible`;
+    `controller_still` = position std of the samples in the last
+    `still_window_s` below `still_threshold_mm`; `detail` is operator prose,
+    e.g. `"scenes 3/6 — park the controller still ≥ 3 s at another spot"`
+    (the GSS only takes a scene when the controller has been still ≥ 0.54 s,
+    with scenes > 3 s apart). `capture` (continue after `done` /
+    `validating`): `reader.restart(stripped + ["--configfile", tmp,
+    "--globalscenesolver", "1"])` — **without** `--force-calibrate`, so the
+    existing solution is refined, not discarded. `validate`: requires
+    `scenes ≥ calibration.min_scenes` (409 saying how many are missing);
+    `reader.restart(stripped + ["--configfile", tmp, "--globalscenesolver",
+    "0", "--disable-calibrate", "1", "--use-stationary-sensor-window", "0"])`
+    — the moving-mode 33.6 ms sensor window, so an inconsistent calibration
+    cannot hide behind the 1 s stationary window (the CLI ancestor is
+    `scripts/tracker/03-lh-consistency-check.sh`, §6); wait for tracking,
+    drop the first `validation_skip_seconds`, collect `validation_seconds` of
+    valid samples, compute the per-axis position std (mm) and the largest
+    step between adjacent samples (mm); `passed = all(std) <
+    validation_std_mm and max_step < validation_step_mm`; phase `done` with
+    `validation` filled and `detail` = `"validation passed — install"` or
+    `"validation failed — capture more spots"`. `install`: requires
+    `validation.passed`; backs the real file up as `<path>.bak-YYYYMMDD-HHMMSS`
+    (the naming already used by hand) → copies the temp file's bytes over the
+    real path → keeps a copy as `calibration_dir/base_station-<ts>-installed.
+    json` → writes `base_station_installed_at`, `lighthouse_config_sha256` and
+    `yaw_valid=false` to the persisted file → `reader.restart(normal)` →
+    phase `done`, `detail = "installed — run Yaw alignment"`. `abort` (any
+    phase): `reader.restart(normal)`, phase `aborted`; the temp file stays in
+    `calibration_dir` for forensics.
+  - **`yaw` state machine.** `start`: no session, no calibration running;
+    `yaw_points = []`, `next_point = "start"`, phase `capturing`. Two
+    equivalent capture triggers: the worker reads the `slot` at ~50 Hz and
+    takes the **rising edge** of `controller.trigger_pressed` on a fresh valid
+    sample, or REST `op: capture` (the wizard's button — the only route with
+    the button-less `fake` backend). A recorded point = the mean raw position
+    of the valid samples of the last `yaw_capture_average_s` (latest
+    orientation). After the seventh point the phase is `fitting`, the fit
+    completes at once and the phase returns to `done`, waiting for `apply`.
+    `fit_yaw(points, cfg) -> (yaw_deg, residual_deg, checks)` is a pure,
+    separately unit-tested function: the four horizontal legs `left = P1−P0,
+    forward = P2−P1, right = P3−P2, back = P4−P3` must land on the operator
+    axes (CLAUDE.md "Hardware facts", §6.2): `left→+X, forward→−Y, right→−X,
+    back→+Y`; with xy-normalised leg vectors `u_i` and expected `e_i`, `θ =
+    atan2(Σ(u_x e_y − u_y e_x), Σ(u_x e_x + u_y e_y))`, i.e. `Rz(θ)·u_i ≈
+    e_i`, consistent with `align_pose(raw, yaw_deg)` (`p_world =
+    Rz(yaw)·p_raw`); `residual` = mean angle (deg) between `Rz(θ)u_i` and
+    `e_i`. Checks (any failure → `fit_checks` non-empty; `fitted_yaw_deg` is
+    still reported but `apply` is 409): every horizontal leg ≥
+    `yaw_min_leg_m`; horizontal legs `|dz| ≤ 0.5|d|`; `up = P5−P4` has `dz >
+    0` and `dz ≥ 0.5|d|`, `down = P6−P5` has `dz < 0` (confirms that
+    lighthouse-world z is up and the gesture was not mirrored); `residual ≤
+    yaw_max_residual_deg`. Fitting all four horizontal legs against the stated
+    viewpoint removes the 180° ambiguity that produced −77.9° vs 102.1° on
+    2026-09-02. `apply`: `settings.update(yaw_deg=fitted)` → persist
+    `yaw_deg`, `yaw_valid=true`, `yaw_calibrated_at` → phase `done`,
+    `applied_yaw_deg`. `capture` in `done` (all seven taken) is 409; `start`
+    restarts the gesture; `abort` clears it.
+  - **Persistence and boot override.** `calibration_dir/tracker_calibration.
+    json` = `{"yaw_deg": float|null, "yaw_valid": bool, "yaw_calibrated_at":
+    float|null, "base_station_installed_at": float|null,
+    "lighthouse_config_sha256": str|null}`. `Runtime.__init__` reads it
+    before `TrackerSettings.from_config`: if it exists with `yaw_valid` and a
+    non-null `yaw_deg`, that value overrides `cfg.tracker.yaw_deg` (the YAML
+    is only the boot default). With `yaw_valid=false` telemetry reports the
+    fact and the UI shows "yaw alignment needed". Config keys (04-runtime
+    §14): `RuntimeConfig.calibration_dir = ~/apollo/calibration`,
+    `TrackerConfig.libsurvive_config_path = ~/.config/libsurvive/config.json`,
+    `TrackerConfig.calibration = TrackerCalibrationConfig {min_scenes: 6,
+    validation_seconds: 10.0, validation_skip_seconds: 3.0,
+    validation_std_mm: 5.0, validation_step_mm: 20.0, still_window_s: 0.5,
+    still_threshold_mm: 3.0, yaw_min_leg_m: 0.10, yaw_max_residual_deg: 15.0,
+    yaw_capture_average_s: 0.3}`.
+  - **The INFO-line contract is version-fragile:** the regexes above match
+    the libsurvive commit pinned by `scripts/tracker/02-build-pysurvive.sh`
+    (`f1e6eddb669320f2a30760f4b42936bdb4306da0`, 2026-08-27, v1.01-204).
+    Bumping the pin means re-checking `Force calibrate flag set`, `Global
+    solve with N scenes for M`, `Using LH i (serial) as reference lighthouse`
+    and `OOTX not set for LH in channel c` against the new build.
+  - **Wiring and tests.** `Runtime.__init__` creates
+    `self.tracker_calibration` and `Runtime.stop()` calls `close()` first;
+    `server/rest.py` serves `GET` / `POST /api/tracker/calibration`
+    (`CalibrationError` → 409 `{detail}`) and `post_session` is 409 while a
+    calibration is active; `ws_telemetry.build_tracker_telemetry` fills
+    `calibration = runtime.tracker_calibration.status()`. Tests: `fit_yaw`
+    unit tests (synthetic gestures, the +180° trap, short legs, up/down
+    reversed, noise); state-machine tests with a duck-typed fake reader
+    (records every `restart` argument list, injects INFO lines and lighthouse
+    snapshots) plus hand-fed `LatestSlot` samples covering the whole
+    `base_station` flow (per-phase argument assertions, scene counting,
+    validation pass / fail, install backup + byte copy in `tmp_path`,
+    `yaw_valid` cleared, abort restores the normal arguments) and the whole
+    `yaw` flow (trigger rising edge and REST capture, apply persistence, boot
+    override); `test_tracker_controller.py`'s `StubPS` grows LIGHTHOUSE
+    objects and INFO lines to cover `restart` / `lighthouses()` / the INFO
+    queue; e2e (`LiveServer`, backend `fake`): initial `GET`, `base_station
+    start` → 409 `"backend is not libsurvive"`, the full yaw flow over REST,
+    telemetry carrying the `calibration` block, 409 while a session exists.
+    Hardware tests are gated by `APOLLO_TRACKER_HW=1`.
 - `_op_switch_arm_prev` mirrors `_op_switch_arm` with `(i − 1) mod n`; the
   DAgger override nacks it while a takeover is engaged, like `switch_arm`.
 - `_op_tracker_settings` updates the live settings and echoes them in telemetry.
@@ -306,6 +511,46 @@ move together.
   `teleop`/`sim`/`mavis_v2` session with arms `grip`,`view` if none) and the
   session's video streams (`sim`, cameras; `twin` only under `safety_debug`).
 - `KeymapOverlay`: new `tracker` group and a gamepad glyph column.
+- **Calibration (phase-10, 2026-09-03; 05-ui §8.4 / §9 / §10).** The Devices
+  side column gains a `CalibrationPanel`: a status row (`yaw_valid` → green
+  chip `yaw aligned <date>` from `yaw_calibrated_at`, otherwise an amber chip
+  `yaw alignment needed`; the last base-station install date from
+  `base_station_installed_at`) and two buttons, **Base-station calibration**
+  and **Yaw alignment**, each disabled with a reason line when
+  `telemetry.tracker` is null, when the backend is `none`, or when a session
+  exists (`Stop the session first`); the base-station button is also disabled
+  when the backend is not `libsurvive` (the yaw wizard works on the `fake`
+  backend through its Capture button). `Devices.tsx` holds `wizard: null |
+  kind`. Both flows run in one in-page modal, `TrackerCalibrationWizard`
+  (props `{kind: "base_station" | "yaw"; onClose(): void}`), on the existing
+  `.modal-backdrop/.modal` styling — never a native browser dialog:
+  `.modal[role=dialog][aria-modal][aria-labelledby]`, the primary button is
+  focused on open, `Escape` and a backdrop click mean Close, and while a phase
+  is in progress (`starting` / `capturing` / `validating` / `installing`)
+  Close first shows an inline "Abort calibration?" confirmation. All wizard
+  state comes from `useStore(selectTracker)?.calibration` (nothing is held
+  locally, so a page reload resumes where the runtime is); every button is
+  one `postTrackerCalibration({kind, op[, point]})`, a 409 becomes a toast
+  carrying the `detail`. Step bar `.wizard-steps` / `.wizard-step.is-active`,
+  stations table `.stations-table`; otherwise the existing tokens, chips and
+  `.analog` bars.
+  - Base-station steps: **Intro** (requirements: controller on, three
+    stations visible, no session; Start) → **Capture** (large `scenes N /
+    min_scenes` counter, stations table index / channel / serial / scenes /
+    reference, `controller_still` indicator, the `detail` hint; Validate —
+    enabled once `scenes ≥ min_scenes` — and Abort) → **Validate** (`.analog`
+    progress, result table std / max step against the thresholds, pass / fail
+    badge; Install — enabled only when `validation.passed` — Capture more,
+    Abort) → **Done** (`installed_path` / `backup_path`, amber "Yaw alignment
+    required", Start yaw alignment (switches `kind`), Close).
+  - Yaw steps: **Intro** (where the operator stands and what the four
+    directions mean: left = +X, forward = −Y, right = −X, back = +Y; Start) →
+    **Points** (large `next_point` label with the instruction "Move LEFT 20–30
+    cm, hold still, pull the trigger or click Capture", list of captured
+    points; Capture, Restart, Abort) → **Fit** (`fitted_yaw_deg`,
+    `fit_residual_deg`, `fit_checks`; Apply — enabled only when `fit_checks`
+    is empty — Redo, Cancel) → **Done** (`applied_yaw_deg`).
+  - `failed` / `aborted` show `detail` with Retry / Close.
 
 ## 6. Installation and calibration (operator)
 
@@ -334,34 +579,148 @@ holder). The runtime's reader must close on shutdown and on SIGTERM.
 
 Scripts under `scripts/tracker/`: `01-sudo-udev-and-deps.sh` (apt deps, udev
 rule `/etc/udev/rules.d/60-apollo-teleop-input.rules` for 28de:2101 usb+hidraw
-and the gamepad, groups) and `02-build-pysurvive.sh` (full clone of libsurvive
-at a pinned commit, `uv build --wheel`, `uv pip install --no-deps` into the
-runtime venv, optional `survive-cli`). First run with the tracker on and still,
-both base stations visible, ~10–20 s: libsurvive writes
-`~/.config/libsurvive/config.json`; delete it after moving a base station.
-Runtime config: `tracker: {backend: libsurvive, libsurvive_args: ["--lighthousecount", "3"], yaw_deg: 102.1}`.
-Yaw calibration gesture (used 2026-09-02): click the trigger at a start point,
-then after each of six moves — left, forward, right, back, up, down (20–30 cm
-each, hand still at each click); record `pose_raw` at every click via telemetry
-and fit the yaw that maps the operator's left/right/forward/back onto world
-axes. **The mapping depends on where the operator stands.** The lab operator
-stands at the OUTER edge facing the arms (facing −Y, camera-only arm nearest,
-the same side the mavis_v2 overview cameras look from since 2026-09-02), so
-forward = −Y and left = +X. The first fit (−77.9°) wrongly assumed the
-arm's viewpoint (forward = +Y) and produced the classic symptoms — hand forward
-moved the EE backward, pitch/yaw felt inverted, while left/right looked right on
-screen only because the old cameras looked from the opposite side; the correct
-value is the fit + 180° = **102.1°**. Verify with landmarks, not body words:
-move the controller toward the arm bases → the EE moves toward the bases; toward
-the right end of the rails (rail zero) → the EE moves to +X. Redo the gesture
-after any libsurvive recalibration (the lighthouse world frame is re-anchored
-then).
+and the gamepad, groups), `02-build-pysurvive.sh` (full clone of libsurvive
+at a pinned commit — `f1e6eddb669320f2a30760f4b42936bdb4306da0`, 2026-08-27,
+v1.01-204 — `uv build --wheel`, `uv pip install --no-deps` into the runtime
+venv, optional `survive-cli` under `~/opt/libsurvive`) and
+`03-lh-consistency-check.sh` (2026-09-03: records ~20 s of a STILL controller
+through `survive-cli` on a temp copy of the config with `--globalscenesolver 0
+--disable-calibrate 1`, replays it with the moving-mode sensor window forced
+on (`--use-stationary-sensor-window 0`) for all lighthouses and leave-one-out
+(`--disable-lighthouse i`), and prints the scatter of the fixes; consistent =
+a few mm std in every column and near-zero offsets between columns. It never
+touches `~/.config/libsurvive/config.json`; the runtime must not be running
+while it holds the dongle). It is the command-line ancestor of the wizard's
+Validate step (§4 "Calibration modes").
+
+Lab runtime config (2026-09-03): `tracker: {backend: libsurvive,
+libsurvive_args: ["--lighthousecount", "3", "--globalscenesolver", "0",
+"--disable-calibrate", "1"], yaw_deg: <boot default — the persisted
+tracker_calibration.json wins, §4>}`. `--lighthousecount` is 3 in the live
+config (three working stations); the repo `configs/mavis_v2.yaml` still says
+4 — reconcile when the channel-7 station is repaired or written off (§7).
+`--globalscenesolver 0 --disable-calibrate 1` **freeze the lighthouse
+calibration during teleop**: on 2026-09-03 the online global scene solver
+moved a base station's solution 32 cm in the middle of a session. Calibration
+is therefore an explicit, operator-driven mode (below), never a side effect of
+running the arm.
+
+### 6.1 Base-station calibration (wizard first, CLI as fallback)
+
+**Why (root cause, 2026-09-03; evidence under `~/apollo/calib/`).** libsurvive's
+first-run "keep the tracker still for 10–20 s" calibration solves every base
+station from a single spot, and the resulting station poses were mutually
+inconsistent: the same physical point resolved 26 cm apart through two
+different stations. A still controller hides this (after 1 s of stillness
+MPFIT switches to a 1 s sensor window that averages the stations); a moving
+controller uses a 33.6 ms window, so whichever station swept last decides the
+fix and the pose snaps between the per-station solutions — the "walk in one
+direction for a while and it jumps back" symptom. Measured with the
+moving-mode window at a spot away from the calibration spot: position std
+61 / 62 / 53 mm (x/y/z), max step 248 mm, single-station offset 259 mm. A
+**multi-position** calibration (global scene solver, GSS, collecting still
+"scenes" at ≥ 6 spots; the 2026-09-03 run used 14 scenes, optical residual
+RMS 0.22 mrad) brought this to std ≤ 0.1 mm, max step 0.1 mm and a
+leave-one-out offset ≤ 3.1 mm. The wizard's acceptance thresholds come from
+these two data points: **std < 5 mm on every axis and max step < 20 mm**.
+
+**Procedure (Devices page → Calibration panel → "Base-station calibration";
+requires: controller on and paired, all working stations powered, no
+session).** Start (the runtime restarts libsurvive on a temp copy of the
+config with `--force-calibrate 1 --globalscenesolver 1`, §4) → **Capture**:
+park the controller still for ≥ 3 s at one spot, move to another spot, repeat,
+spreading the spots over the working volume (both rail ends, near and far from
+the operator, high and low); the counter shows `scenes N / 6` and the stations
+table shows which station is the reference and how many scenes each has
+solved (the GSS only takes a scene after ≥ 0.54 s of stillness and > 3 s
+after the previous one, so walking around does not count) → **Validate** once
+`scenes ≥ 6`: hold the controller still for ~13 s (3 s skipped + 10 s
+measured with the moving-mode window, scene solver off); pass = std < 5 mm
+and max step < 20 mm on the result table; fail → "Capture more" at further
+spots → **Install**: the runtime backs `~/.config/libsurvive/config.json` up
+as `config.json.bak-YYYYMMDD-HHMMSS`, copies the validated temp config over
+it, keeps `~/apollo/calibration/base_station-<ts>-installed.json`, marks the
+yaw **invalid** and restarts libsurvive with the normal (frozen) arguments →
+**Yaw alignment** (§6.2) is mandatory after every install: the lighthouse
+world frame is re-anchored by a recalibration (the 2026-09-03 install rotated
+it by −14.2° relative to the previous frame). Abort at any time restores the
+normal arguments; temp configs stay under `~/apollo/calibration/`.
+
+**Files.** Installed config: `~/.config/libsurvive/config.json` (three
+lighthouse blocks with a 7-vector `pose` and a 6-vector `variance`,
+`"poser": "MPFIT"`, `"configed-lighthouse-gen": "2"`). A copy of the cell's
+reference calibration lives in the runtime repo as
+`apollo-xarm7-runtime/configs/libsurvive/<cell>-lighthouses-<date>.json`
+(currently `mavis_v2-lighthouses-20260903.json`) so a fresh machine or a
+corrupted config can be restored by copying it back; update the copy after
+every accepted install.
+
+**CLI fallback (runtime stopped — the dongle is exclusive, `LIBUSB_ERROR_BUSY`
+otherwise).** Capture with `survive-cli --configfile <tmp copy>
+--lighthousecount 3 --force-calibrate 1 --globalscenesolver 1` and the same
+still-at-many-spots discipline (watch for `Global solve with N scenes for M`
+in the INFO output); validate with `scripts/tracker/03-lh-consistency-check.sh`
+(set `LIBSURVIVE_CONFIG` to the temp copy); then back up and copy the temp
+config over `~/.config/libsurvive/config.json` by hand and redo the yaw
+gesture. Deleting `config.json` and letting libsurvive recalibrate from a
+single spot on the next start — the v0.1 procedure — is exactly what produced
+the inconsistent solutions and is no longer recommended.
+
+### 6.2 Yaw alignment (lighthouse world → MJCF world)
+
+Only the yaw between the two z-up frames is calibrated (`align(pose)` =
+`R_z(yaw_deg)`, §4). **The mapping depends on where the operator stands** and
+the operator is the authority on left/right (CLAUDE.md "Hardware facts"): the
+lab operator stands at the OUTER edge of the table (+Y) facing the arms
+(facing −Y; the camera-only arm is nearest, the same side the mavis_v2
+overview cameras look from since 2026-09-02), so **left = +X, forward = −Y,
+right = −X, back = +Y**.
+
+**Procedure (Devices page → Calibration panel → "Yaw alignment"; no
+session).** Start → the wizard names the next point: pull the trigger (or
+click Capture — the only way on the `fake` backend) at a **start** point with
+the hand still, then after each of six moves of 20–30 cm — **left, forward,
+right, back, up, down** — again with the hand still at the click (each point
+is the 0.3 s mean of the raw lighthouse-world position). After the seventh
+click the runtime fits the yaw over the four horizontal legs against the
+operator axes above and shows yaw, residual and the checks (legs ≥ 10 cm,
+horizontal legs flat, up/down truly vertical and in the right order, residual
+≤ 15°); **Apply** installs it live (`tracker_settings` path) and persists it
+to `~/apollo/calibration/tracker_calibration.json`, which overrides the YAML
+`yaw_deg` on every later start. Redo the gesture after **any** base-station
+recalibration — the wizard enforces this by clearing `yaw_valid` on install
+and showing "yaw alignment needed" until a new yaw is applied.
+
+**Verify with landmarks, not body words:** move the controller toward the arm
+bases (away from you) → the EE moves toward the bases (−Y); move it toward
+your LEFT, i.e. toward rail zero at the +X end where the obstacle sits → the
+EE moves to +X; toward your RIGHT, where the arms rest flush with the table
+edge (−X) → the EE moves to −X. (Since the 2026-09-03 rail flip rail zero is
+at the operator's LEFT and rail q increases toward −X; earlier revisions of
+this section called it "the right end of the rails".)
+
+**History.** 2026-09-02: the first fit (−77.9°) assumed the arm's viewpoint
+(forward = +Y) and produced the classic symptoms — hand forward moved the EE
+backward, pitch/yaw felt inverted, while left/right looked right on screen
+only because the old cameras looked from the opposite side; the correct value
+was the fit + 180° = **102.1°**. Fitting all four horizontal legs against the
+stated viewpoint (§4) removes that ambiguity. 2026-09-03: the base-station
+recalibration rotated the lighthouse frame by −14.2°, giving an *estimate* of
+**116.3°** that the live config carried until the gesture was redone through
+the wizard — treat any yaw typed into `TrackerSettingsForm` as
+process-lifetime only; the persisted, wizard-applied value is authoritative.
 
 ## 7. Open items (phase-09 / after first hardware test)
 
-Yaw calibration gesture instead of a numeric field; tracker mount → tool
-rotation; recording tracker poses into datasets; pairing (`--pair-device`) if
-the tracker is not paired to this dongle; base-station generation; confirm the
-rail-only semantics (§1.1: posture held, TCP rides the rail) with the operator
-on the real rail — the alternative (IK keeps the TCP fixed in the world while
-the base slides) is what the loop did before 2026-09-02.
+Tracker mount → tool rotation; recording tracker poses into datasets; pairing
+(`--pair-device`) if the tracker is not paired to this dongle; base-station
+generation; confirm the rail-only semantics (§1.1: posture held, TCP rides the
+rail) with the operator on the real rail — the alternative (IK keeps the TCP
+fixed in the world while the base slides) is what the loop did before
+2026-09-02. (The v0.1 item "yaw calibration gesture instead of a numeric
+field" was closed by the phase-10 wizard, §4/§5/§6.2, on 2026-09-03.)
+Deferred by phase-10 (out of its scope): re-flashing / RMA of the channel-7
+station E9BFDF83 and then reconciling `--lighthousecount` (3 live vs 4 in the
+repo YAML, §6); base-station placement advice; a second controller; writing
+the applied yaw back into the YAML (the persisted `tracker_calibration.json`
+is authoritative, §4); SteamVR.

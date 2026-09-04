@@ -360,3 +360,6 @@ blur/visibilitychange.
 - `10-frames-and-data.md` — frame conventions + dataset format.
 - `11-safety-collision.md` — twin sync, checking, planning, inflation.
 - `12-dagger-protocol.md` — takeover, aggregation, async training, hot-reload.
+- `13-tracker-teleop.md` — Vive tracker/controller teleop (clutch model,
+  controller buttons, pose filter) and the tracker calibration wizard
+  (base stations + yaw, `/api/tracker/calibration`; phase-10).

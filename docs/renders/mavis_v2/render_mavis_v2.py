@@ -7,10 +7,11 @@ Usage (from the workspace root, sim repo's uv env)::
 
 Writes the scene cameras (cam_front, cam_top, view_wrist_cam, grip_wrist_cam), a
 2x2 contact sheet, and ``operator_view.png`` from MuJoCo's free camera using the
-scene's default ``view`` (azimuth +90 / elevation -30: camera at -Y looking +Y),
-which frames the red obstacle (the -X end) on the LEFT, matching the operator's
-real view of the cell (the gripper arm renders nearer, the camera-only arm far).
-The older ``facing_outer_edge*.png`` in this directory are NOT regenerated.
+scene's default ``view`` (azimuth -90 / elevation -30: camera at +Y looking -Y),
+which frames the red obstacle (the +X end, operator's left) on the LEFT and the
+arms/rail-zero on the RIGHT, matching the operator's real view of the cell (the
+camera-only arm renders nearest). The older ``facing_outer_edge*.png`` in this
+directory are NOT regenerated.
 """
 
 from __future__ import annotations

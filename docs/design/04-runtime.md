@@ -1,7 +1,10 @@
 # 04 — apollo-xarm7-runtime (`apollo_xarm7_runtime`)
 
-Status: v0.1 (2026-09-01). Conforms to `00-overview.md` (spine, v0.3) and mirrors
-`05-ui.md` protocol shapes exactly. Research ground truth: `web-teleop-stack.md`,
+Status: v0.1 (2026-09-01; amended 2026-09-03 — phase-10 tracker calibration:
+§2 `devices/tracker_calibration.py`, §6 "Tracker calibration modes", §13.1
+`/api/tracker/calibration` + "Not REST" addendum, §14 `calibration_dir` /
+`tracker.libsurvive_config_path` / `tracker.calibration`). Conforms to
+`00-overview.md` (spine, v0.3) and mirrors `05-ui.md` protocol shapes exactly. Research ground truth: `web-teleop-stack.md`,
 `lerobot-data.md`, `dagger-online-training.md`, `xarm-python-sdk.md`.
 
 ## 1. Scope & dependencies
@@ -33,7 +36,10 @@ src/apollo_xarm7_runtime/        # pyproject extras: [hardware] [sim] [trainer]
 │               joint_panel.py (jog/goto §7), arm_sender.py (per-arm senders §3),
 │               snapshot.py (StateSnapshot + publisher)
 ├── devices/    tracker.py (TrackerReader thread: libsurvive|fake|none → LatestSlot;
-│               the ONLY pysurvive import site, 13-tracker §2)
+│               the ONLY pysurvive import site, 13-tracker §2),
+│               tracker_calibration.py (TrackerCalibration: base-station + yaw
+│               calibration state machines behind /api/tracker/calibration,
+│               Runtime-owned, 13-tracker §4 "Calibration modes")
 ├── safety/     gate.py (SafetyGate/NullGate §8), supervisor.py (twin gate §8),
 │               watchdog.py (InputWatchdog + ArmReportWatchdog §8)
 ├── profiles/   store.py (core ProfileStore re-export + save_from_snapshot §9)
@@ -252,9 +258,19 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   (`_teleop_seeded.discard`; 13-tracker §4 re-seed rule (d)): the next
   translate key or clutch engage re-seeds the integrator from the measured TCP
   and moves by one twist step / zero, never by a leash-sized (25 mm) step
-  toward the stale target. Translate/rotate keys or a live clutch held
-  *together with* a rail code keep the world-frame target: the IK compensates
-  the rail (TCP fixed in the world within the leash).
+  toward the stale target. **Rail inputs slide the whole arm (2026-09-03):**
+  translate/rotate keys or a live clutch held *together with* a rail code no
+  longer keep the world-frame target fixed — the integrator target and the
+  tracker anchors ride along by the base displacement of the tick's rail step
+  (`_ride_rail`), the IK is seeded with the new rail value, and the joints keep
+  tracking the hand / keys (before 2026-09-03 the IK compensated the rail and
+  the arm folded to hold the TCP in place). **The rail is out of the IK**
+  (`control.rail_in_ik: false`, default → `IKParams.lock_rail`, 03-sim §9): the
+  differential solve moves the 7 joints only and adopts the rail slot from its
+  seed each tick, so a TCP target is never reached by sliding the base — the
+  operator moves the rail explicitly (arrow keys / controller trackpad
+  left-right), which also stops the IK from fighting those inputs. `rail_in_ik:
+  true` restores the pre-2026-09-03 behaviour (rail = expensive IK dof).
 - **Gripper**: F/H integrate `open_frac ∈ [0,1]` → `GripperCommand` at
   ≤ 10 Hz (modbus is slow; `wait=False`).
 - **Tab / switch_arm**: server-authoritative — the Command cycles
@@ -347,6 +363,70 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   forwarded libsurvive warnings are rate-limited to ≤ 1 line/s per message
   class; `python -m apollo_xarm7_runtime` configures Python logging (INFO to
   stderr) unless the root logger already has handlers.
+- **Tracker calibration modes** (13-tracker §3 items 7–8, §4 "Calibration
+  modes"; phase-10, 2026-09-03): `devices/tracker_calibration.py` —
+  `TrackerCalibration(reader, settings, cfg, slot, session_active,
+  clock=time.monotonic, wall=time.time)`, owned by `Runtime` (created in
+  `Runtime.__init__`, `close()`d first in `Runtime.stop()`), never by the
+  `ControlLoop` or the `SessionManager`. A worker thread runs the timed
+  phases; `status()` is a cheap lock-protected `TrackerCalibrationStatus`
+  (core §12) that `ws_telemetry.build_tracker_telemetry` copies into
+  `tracker.calibration` at 25 Hz; `command(TrackerCalibrationCommand)` raises
+  `CalibrationError(detail)` on an illegal transition (REST 409, §13.1). Both
+  kinds require no active session (409 `"stop the session first"`) and
+  `post_session` answers 409 `"tracker calibration in progress"` while one
+  runs. **`base_station`** drives libsurvive through `TrackerReader.restart(
+  args)` — `stop()` + join (`simple_close` frees the dongle; a premature
+  re-`simple_init` is `LIBUSB_ERROR_BUSY`) → `self.cfg = cfg.model_copy(
+  update={"libsurvive_args": args})` (the shared `TrackerConfig` is never
+  mutated) → `start()`; `status()` reads `starting`/`searching` meanwhile —
+  with the argument sets of 13-tracker §4: the normal `tracker.libsurvive_args`
+  stripped of the `--globalscenesolver / --disable-calibrate / --configfile /
+  --force-calibrate / --use-stationary-sensor-window` pairs, plus
+  `--configfile <calibration_dir>/base_station-<ts>.json` (a temp copy of
+  `tracker.libsurvive_config_path` — libsurvive rewrites whatever file it is
+  pointed at) and `--force-calibrate 1 --globalscenesolver 1` (`start`),
+  `--globalscenesolver 1` (`capture` = refine, keep the solution),
+  `--globalscenesolver 0 --disable-calibrate 1 --use-stationary-sensor-window
+  0` (`validate`, moving-mode sensor window). Progress comes from the reader's
+  new INFO-line queue (`TrackerReader.info_lines`, level ≥ 2, ANSI stripped,
+  optional `on_info` callback on the C thread that must never raise — the
+  reader used to forward warnings only): `Force calibrate flag set`
+  (`starting` → `capturing`), `Global solve with N scenes for M` (per-station
+  `scenes`, status = max), `Using LH i (serial) as reference lighthouse`,
+  `OOTX not set for LH in channel c`; plus `TrackerReader.lighthouses()`
+  snapshots (0.5 s poll of `ps.SurviveSimpleObject_LIGHTHOUSE` objects: name,
+  serial, latest pose) for `channel` / `stations_visible`, and
+  `controller_still` from the `slot` (`still_window_s`, `still_threshold_mm`).
+  The regexes are pinned to the libsurvive commit built by
+  `scripts/tracker/02-build-pysurvive.sh`. `validate` gates on `scenes ≥
+  tracker.calibration.min_scenes` (409 with the missing count), then after
+  `validation_skip_seconds` collects `validation_seconds` of valid samples and
+  passes when every per-axis std < `validation_std_mm` and the max adjacent
+  step < `validation_step_mm` (`CalibrationValidation`); `install` requires
+  `validation.passed`, backs the real config up as `<path>.bak-YYYYMMDD-HHMMSS`,
+  copies the temp bytes over it, keeps `<calibration_dir>/base_station-<ts>-
+  installed.json`, writes `base_station_installed_at` /
+  `lighthouse_config_sha256` / `yaw_valid=false` to the persisted file and
+  restarts the reader with the normal args (`detail = "installed — run Yaw
+  alignment"`); `abort` restarts with the normal args from any phase and
+  leaves the temp file for forensics. **`yaw`** collects seven raw
+  lighthouse-world points — rising edge of `controller.trigger_pressed` on a
+  fresh valid sample (worker polls the `slot` at ~50 Hz) or REST `op:
+  capture`; a point = mean raw position over `yaw_capture_average_s` — then
+  `fit_yaw(points, cfg)` (pure function, 13-tracker §4) fits `θ` over the four
+  horizontal legs against the operator axes (left +X, forward −Y, right −X,
+  back +Y; `p_world = Rz(yaw)·p_raw` like `align_pose`) with the
+  `yaw_min_leg_m` / flatness / up-down sign / `yaw_max_residual_deg` checks;
+  `apply` (409 while `fit_checks` is non-empty) calls
+  `settings.update(yaw_deg=fitted)` and persists `yaw_deg`, `yaw_valid=true`,
+  `yaw_calibrated_at`. Persistence: `<calibration_dir>/tracker_calibration.json
+  {yaw_deg, yaw_valid, yaw_calibrated_at, base_station_installed_at,
+  lighthouse_config_sha256}`, read in `Runtime.__init__` before
+  `TrackerSettings.from_config` — a valid persisted `yaw_deg` overrides
+  `tracker.yaw_deg` (the YAML is the boot default, §14). No handler does motion
+  work and nothing here touches the control loop: calibration is refused while
+  a session exists, and a reader restart is otherwise just a stale-sample hold.
 
 `StateSnapshot` (published every tick, consumed at lower rates):
 
@@ -678,13 +758,21 @@ generated from them — 05-ui §2). Errors: `{"detail": str}` with 4xx/5xx.
 | `DELETE /api/profiles/{id}` | → 204 | 409 if it is the designated initial condition |
 | `GET /api/policies` | → `PolicyInfo[]{policy_id, path, action_space, action_frame, policy_version, promoted}` | checkpoint registry for dagger/inference (core §12 model) |
 | `GET /api/session` | → `SessionInfo` \| 404 | reconnect resync |
-| `POST /api/session` | `SessionSpec` → `SessionInfo{session_id, epoch, mode, arms, streams, state}` | 409 if a session exists, requested `kind` unavailable, scene/arm mismatch, dagger without a policy, or inference with no promoted deploy checkpoint (`policy=None` resolves to latest for dagger, promoted deploy for inference — 12-dagger §9). Returns after BRINGUP; START_FROM progress via telemetry. `streams` = camera ids + `"sim"` and/or `"twin"` |
+| `POST /api/session` | `SessionSpec` → `SessionInfo{session_id, epoch, mode, arms, streams, state}` | 409 if a session exists, a tracker calibration is in progress (`"tracker calibration in progress"`, phase-10), requested `kind` unavailable, scene/arm mismatch, dagger without a policy, or inference with no promoted deploy checkpoint (`policy=None` resolves to latest for dagger, promoted deploy for inference — 12-dagger §9). Returns after BRINGUP; START_FROM progress via telemetry. `streams` = camera ids + `"sim"` and/or `"twin"` |
 | `DELETE /api/session` | → 204 | TEARDOWN (idempotent) |
 | `GET /api/episodes` | → `{repo_id, total_episodes, total_frames}` | current dataset counters (collect/dagger) |
+| `GET /api/tracker/calibration` | → `TrackerCalibrationStatus` | phase-10 (13-tracker §3 item 8); idle snapshot (`kind: none, phase: idle` + persisted `yaw_valid` / dates) when nothing runs; the same object rides `telemetry.tracker.calibration` |
+| `POST /api/tracker/calibration` | `TrackerCalibrationCommand{kind: base_station\|yaw, op: start\|capture\|validate\|install\|apply\|abort, point?}` → `TrackerCalibrationStatus` | 409 `{detail}` on an illegal transition (`CalibrationError`): `"stop the session first"`, `"backend is not libsurvive"`, too few scenes for `validate`, `install` without `validation.passed`, `apply` with non-empty `fit_checks`, `capture` after all seven points, a second `start` while one runs. Returns the post-command snapshot; progress via telemetry (§6 "Tracker calibration modes") |
 
 **Not REST** (binding decision, 05-ui §4): episode new/save/discard, profile
 save / set-as-initial, joint targets, switch_arm, takeover — all ride
-`/ws/control` as `ActionMsg` and are answered by `AckMsg`.
+`/ws/control` as `ActionMsg` and are answered by `AckMsg`. **Addendum
+(binding, 2026-09-03, phase-10):** session-less *device management* is REST
+with progress broadcast via telemetry — `/api/tracker/calibration` is the
+first instance. The Devices page has no session, `/ws/control` nacks every
+action without one ("no session") and `AckMsg` carries no payload, so
+calibration adds no `ActionName` and no keymap row; the rule above still
+covers every discrete op that acts on a session.
 
 ### 13.2 `/ws/control`
 
@@ -811,12 +899,15 @@ workcells:                   # POST /api/session picks by requested kind
 profiles_dir: ~/apollo/profiles
 datasets_root: ~/apollo/datasets
 checkpoints_root: ~/apollo/checkpoints
+calibration_dir: ~/apollo/calibration   # tracker_calibration.json + libsurvive temp/installed
+                                        #   copies (phase-10, 13-tracker §4); expanduser'd
 control:
   rate_hz: 100
   teleop: {linear_mps: 0.12, angular_rps: 0.6, rail_mps: 0.10, gripper_frac_ps: 1.2}
   leash: {pos_m: 0.025, rot_rad: 0.2}
   target_rate: {v_mps: 1.0, w_radps: 2.0}   # tracker target approach rate (§6)
   dq_max_rad: 0.04           # per tick
+  rail_in_ik: false          # rail excluded from the IK; rail inputs slide the whole arm (§6 "Rail")
   jog: {slew_rad_per_tick: 0.02, rail_m_per_tick: 0.002, goto_threshold_rad: 0.15}
   watchdog: {stale_s: 0.2, ramp_s: 0.1}   # = SafetyConfig input_deadman_s/input_ramp_s
 recorder: {fps: 25, vcodec: auto, jpeg_quality: 80,
@@ -829,7 +920,12 @@ dagger: {policy_hz: 15, t_blend_s: 0.3, pause_others_on_takeover: true,
                    port: 5757}}                                     # tcp://127.0.0.1
 tracker: {backend: none,            # none | fake | libsurvive (13-tracker §4)
           object_name: WM0, libsurvive_args: ["--lighthousecount", "2"],
-          yaw_deg: 0.0, pos_scale: 1.0, follow_rotation: true,       # live defaults
+                                              # lab adds --globalscenesolver 0 --disable-calibrate 1
+                                              #   (frozen calibration, 13-tracker §6); these are the
+                                              #   NORMAL args the reader returns to after a calibration
+          yaw_deg: 0.0, pos_scale: 1.0, follow_rotation: true,       # live defaults; yaw_deg is
+                                                                     #   overridden by a valid
+                                                                     #   tracker_calibration.json
           stale_s: 0.2, max_jump_m: 0.10,
           controller_map: {clutch: trigger_click,                    # 13-tracker §1.1;
                            gripper_open: trackpad_up,                #   trackpad_* classified
@@ -841,7 +937,14 @@ tracker: {backend: none,            # none | fake | libsurvive (13-tracker §4)
           trackpad_deadzone: 0.3,             # |x|,|y| both within -> click ignored
           filter: {enabled: true, min_cutoff_hz: 1.0, beta: 0.05,    # One Euro (live: enabled/
                    d_cutoff_hz: 1.0, deadband_m: 0.002,              #   min_cutoff/beta via
-                   deadband_rad: 0.005}}                             #   tracker_settings)
+                   deadband_rad: 0.005},                             #   tracker_settings)
+          libsurvive_config_path: ~/.config/libsurvive/config.json,  # replaced only by `install`
+          calibration: {min_scenes: 6,                               # phase-10 (13-tracker §4)
+                        validation_seconds: 10.0, validation_skip_seconds: 3.0,
+                        validation_std_mm: 5.0, validation_step_mm: 20.0,
+                        still_window_s: 0.5, still_threshold_mm: 3.0,
+                        yaw_min_leg_m: 0.10, yaw_max_residual_deg: 15.0,
+                        yaw_capture_average_s: 0.3}}
 egl_device_id: 0
 ```
 
@@ -851,7 +954,14 @@ yaw/scale/rotation and the live filter fields at runtime and telemetry echoes
 them (13-tracker §4). `ControllerMapConfig` rejects an input bound to more
 than one action and the held-only `trigger_click` on `arm_next` / `arm_prev`
 (the discrete actions accept `trackpad_*`, `menu_click`, `grip_click` or
-`none`).
+`none`). Since phase-10 (2026-09-03) `tracker.yaw_deg` is only the **boot
+default**: `Runtime.__init__` overrides it from
+`<calibration_dir>/tracker_calibration.json` when that file has `yaw_valid:
+true` and a non-null `yaw_deg`; the yaw wizard's `apply` writes the file and a
+base-station `install` clears `yaw_valid`. `tracker.libsurvive_args` are the
+*normal* arguments the reader returns to after every calibration (§6 "Tracker
+calibration modes"); `tracker.libsurvive_config_path` and
+`tracker.calibration.*` are read by `TrackerCalibration` only.
 
 Version pins carried by the workspace (overview §9): MuJoCo 3.12.0,
 mink 1.3.0, lerobot ≥0.6 pinned, xArm-Python-SDK 1.18.5.

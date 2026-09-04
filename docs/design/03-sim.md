@@ -205,34 +205,43 @@ the debug inflation of 0.025 m. The scene author therefore declares them:
 | **`mavis_v2`** | 2 | **the lab cell**: digital-twin reference for the real arms and a sim scenario |
 
 **`mavis_v2`** (Apollo lab, tape-measured 2026-09-02; the YAML header carries
-the same numbers — edit there). World frame follows the lab's own definitions:
-z-up, origin on the floor under the table centre; **+Y = the outer edge**, i.e.
-the long edge the arms' end effectors face at rail zero (the camera rail runs
-along it); standing on the inner side and *facing the outer edge*, **+X is to
-the right** — the end where both arms sit at rail zero and where the obstacle
-is. Both rails are mounted the same way (arm base +X toward the outer edge,
-thin cable-tray plate toward the interior, zero at the right end, travel toward
-−X). The workspace is the channel between the rails.
+the same numbers — edit there). World frame follows the **operator's own view**
+(the authority on left/right): z-up, origin on the floor under the table centre;
+**+Y = the outer edge**, where the operator stands (the camera rail runs along it,
+so the camera-only arm is nearest). The operator faces the arms (−Y); their
+**right is −X** (both arms REST flush with the −X edge) and their **left
+is +X** (the obstacle). Both rails are mounted the same way. The linear rail is a
+**chiral** part: getting its thin cable-tray plate to face the interior (−Y, away
+from the operator) is a genuine 180° rotation about z (`base_quat` yaw +90°), NOT a
+mirror — a mirror would change the mesh handedness. The price of that rotation is
+**reversed travel**: rail zero (q=0) sits at the operator's LEFT (+X) and a qpos
+increase drives the carriage toward −X, so the arms rest at rail **q ≈ 0.597** (the
+−X/right end) and the keyframe adds **π to joint 1** to re-face the workspace (the
+180° base flip is otherwise undone, so the arms reach the identical world poses).
+The workspace is the channel between the rails. (An earlier version encoded this
+cell mirrored in X — rail zero at +X, obstacle at −X — from an inner-side viewpoint;
+a fix to yaw −90° put the arms/obstacle on the operator-correct sides but left the
+plate facing the operator; corrected 2026-09-03 by turning each rail 180° to yaw +90°.)
 
 | element | measurement | descriptor value |
 |---|---|---|
 | table | 1.215 × 0.62 × 0.03 m, top at 0.735 m | box half `[0.6075, 0.31, 0.015]` at z 0.72 |
-| rails | identical, same orientation; zero at the right end, travel toward −X | `base_quat` yaw +90° `[0.7071, 0, 0, 0.7071]`; z = 0.735 + 0.107188 |
+| rails | identical, same orientation; plate faces −Y (interior, away from operator); arms rest at −X (operator's right), travel reversed (qpos↑ → −X) | `base_quat` yaw +90° `[0.7071, 0, 0, +0.7071]`; z = 0.735 + 0.107188 |
 | camera rail (`view`, camera-only) | outer edge 2.6 cm from the table's outer edge | y0 = 0.31 − 0.026 − 0.0724 = **0.2116** |
 | gripper rail (`grip`, gripper + wrist cam) | 39.5 cm inward (base lines) | y0 = 0.2116 − 0.395 = **−0.1834**; plate edge 0.66 cm from the inner table edge |
 | channel | between the rail bodies | y ∈ [−0.111, 0.0916] (20.3 cm with the 19.2 cm mavis mesh) |
-| rail zero | the rails' zero end is flush with the table's right edge; the arms' carriage ~14 cm from it | x0 = 0.6075 − 0.2476 = **0.3599** (base centre; mesh zero-end overhang 0.2476); carriage right edge 15.0 cm, base cylinder 18.5 cm from the edge |
-| obstacle | 0.16 × 0.16 × 0.24 m untouchable block, flush against the **left** edge (the empty end) in the channel; near face 27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(−0.5275, −0.045, 0.855)`, y ∈ [−0.125, 0.035]; its inner face is 1.4 cm past the mesh gripper-rail inner edge and the 1.0926 m mesh rail reaches 3.8 cm into its x-span — a static corner overlap (mesh vs real track), harmless to twin and physics |
-| keyframe | rails at zero (right end); gripper elbow-up in the channel, tool down, TCP 4.5 cm below the obstacle top; camera arm turned round (j1 ≈ π) looking down the channel | audit-clean at δ = 0.008 and 0.025 |
+| rail placement | the rail's −X (arm-rest) end is flush with the table's −X edge (operator's right); the arms' carriage ~14 cm from it at rest | base centre x0 = **+0.2375** (= −0.6075 + 0.845; mesh: 0.845 m from the base to the −X/arm-rest end, 0.2476 m to the +X/zero end at +0.4851); carriage near edge 15.0 cm, base cylinder 18.5 cm from the −X edge at rest |
+| obstacle | 0.16 × 0.16 × 0.24 m untouchable block, flush against the **+X** edge (operator's left, the empty end) in the channel; near face 27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(**0.5275**, −0.045, 0.855)`, y ∈ [−0.125, 0.035]; its inner face is 1.4 cm past the mesh gripper-rail inner edge and the 1.0926 m mesh rail reaches 3.8 cm into its x-span — a static corner overlap (mesh vs real track), harmless to twin and physics |
+| keyframe | rails at rest q ≈ 0.597 (the −X/right end); gripper elbow-up in the channel, tool down, TCP 4.5 cm below the obstacle top; camera arm parked ~1.3 m up over the workspace, D435 looking down toward +X. Each arm's joint 1 = its old value + π (the yaw +90 base flip) | audit-clean at δ = 0.008 and 0.025 |
 | `allowed_pairs` | carriages ↔ table (24 mm by construction) | two pairs |
-| cameras / `view` | **operator convention**: every overview is framed so the red obstacle (the −X / empty end) is on the LEFT of the image, matching the operator's real view of the cell; all three look from the −Y side toward +Y, so image right = +X. From this side the gripper arm (−Y) renders nearer and the camera-only arm (+Y) far | `cam_front` at `(0, -2.0, 1.9)`, `xyaxes [1,0,0, 0,0.55,1]` (looks +Y and down); `cam_top` at `(0, 0, 2.6)`, `xyaxes [1,0,0, 0,1,0]` (image up = +Y: outer edge at the top); `view: {azimuth: 90, elevation: -30}` (free camera at −Y looking +Y — the runtime `sim` stream default) |
+| cameras / `view` | **operator convention**: every overview is framed as the operator sees the cell — the red obstacle (the +X / empty end, operator's left) on the LEFT, the arms (at rest, −X) on the RIGHT, the camera-only arm nearest; all three look from the +Y (operator) side toward −Y, so image right = −X | `cam_front` at `(0, 2.0, 1.9)`, `xyaxes [-1,0,0, 0,-0.55,1]` (looks −Y and down); `cam_top` at `(0, 0, 2.6)`, `xyaxes [-1,0,0, 0,-1,0]` (image up = −Y: near +Y edge at the bottom); `view: {azimuth: -90, elevation: -30}` (free camera at +Y looking −Y — the runtime `sim` stream default) |
 
 Reference renders live in `docs/renders/mavis_v2/` (`render_mavis_v2.py`
-regenerates them): `cam_front.png`, `cam_top.png`, the two wrist cams, the 2×2
-contact sheet and `operator_view.png` (free camera, azimuth +90 / elevation −30,
-lookat the table centre) all follow the operator convention above (obstacle on
-the LEFT); the older `facing_outer_edge*.png` predate the convention and are kept
-for comparison.
+regenerates them — rerun after the 2026-09-03 rail-flip correction): `cam_front.png`,
+`cam_top.png`, the two wrist cams, the 2×2 contact sheet and `operator_view.png`
+(free camera, azimuth −90 / elevation −30, lookat the table centre) all follow the
+operator convention above (obstacle on the LEFT, arms on the RIGHT, camera-only
+arm nearest).
 
 Rail mesh facts used (mavis asset, unverified vs hardware — phase-09 item):
 across-axis extent `[−0.120, +0.0724]` m about the base line (the −0.120 side is
@@ -240,9 +249,9 @@ a 3 mm cable-tray plate; main body 14.2 cm), carriage `[−0.080, +0.090]` acros
 `[−0.098, +0.088]` along, 1.0926 m long with 0.2476 m beyond the carriage at
 q = 0. Open items for the phase-09 calibration: the mesh rail length/width vs
 the real track (the obstacle's inner face at 43.5 cm depth is 1.4 cm past the
-mesh gripper-rail edge, and the mesh rail's left end reaches 3.8 cm into the
+mesh gripper-rail edge, and the mesh rail's far +X end reaches 3.8 cm into the
 obstacle's x-span) and the mesh's zero-end overhang (sets x0 from the flush
-right end).
+−X / operator's-right end).
 
 ## 5. Scene composition via `mujoco.MjSpec`
 
@@ -508,6 +517,10 @@ class IKParams:
     orientation_cost: float = 0.5            # base; refinement 2 adapts it
     posture_cost_joint: float = 5e-2
     posture_cost_rail: float = 5.0           # rail expensive → prefer joints
+    lock_rail: bool = False                  # servo path: rail EXCLUDED from the QP —
+                                             #   pinned, adopted from q_seed each tick
+                                             #   (runtime control.rail_in_ik false sets it);
+                                             #   one-shot solves still place the rail
     collision_gain: float = 0.85
     max_collision_rows: int = 12             # = safety.max_active_constraint_rows
                                              #   (11-safety §8); refinement 4

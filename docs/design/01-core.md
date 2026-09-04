@@ -1,6 +1,8 @@
 # 01 — apollo-xarm7-core (`apollo_xarm7_core`)
 
-Status: v1.0 (2026-09-01). Conforms to `00-overview.md` v0.3 (binding spine).
+Status: v1.0 (2026-09-01; amended 2026-09-03 — phase-10 tracker calibration:
+`protocol/tracker.py`, `TrackerTelemetry.charging`/`.calibration`, §10-§12, §14).
+Conforms to `00-overview.md` v0.3 (binding spine).
 Research ground truth: `docs/research/{dagger-online-training, lerobot-data,
 xarm-python-sdk, xarm7-ik}.md`. Message shapes mirror `05-ui.md` §2 exactly.
 Sibling design docs defer exact spellings of core symbols to THIS document.
@@ -589,6 +591,14 @@ runtime owns the defaults (`min_cutoff_hz 1.0`, `beta 0.05`) via
 the runtime re-anchor (13-tracker §4 "Anchor and re-seed rules"); it never
 moves the arm.
 
+Tracker calibration (phase-10; 13-tracker §3/§4) adds **no** `ActionName`: the
+Devices page has no session and `/ws/control` nacks actions without one, and
+`AckMsg` carries no payload. Calibration commands ride REST
+(`TrackerCalibrationCommand`, §12) and progress rides telemetry
+(`TrackerTelemetry.calibration`, §11). `_ARGS_MODELS` and the 23-row keymap
+(§13) are unchanged — the controller trigger is re-purposed by the runtime as
+the yaw-gesture capture click while a yaw calibration is active.
+
 ## 11. Protocol: telemetry (`protocol/telemetry.py`)
 
 Server → all `/ws/telemetry` clients at 25 Hz (20–30 band). Shapes match
@@ -670,6 +680,12 @@ class TrackerTelemetry(BaseModel):       # additive block (13-tracker §3.5)
                                          #   table, e.g. ["KeyC", "KeyH"]); [] when stale
     device_action: str | None = None     # last device-sourced discrete action ("switch_arm"
                                          #   / "switch_arm_prev"); runtime clears it ~1 s later
+    charging: bool | None = None         # controller on external (USB) power; None = not
+                                         #   reported (additive)
+    calibration: TrackerCalibrationStatus | None = None
+                                         # phase-10 calibration snapshot (protocol.tracker,
+                                         #   §12) — same object as GET /api/tracker/calibration
+                                         #   (additive; sub-models ride TelemetryMsg $defs)
 
 class TelemetryMsg(BaseModel):
     t: Literal["telemetry"] = "telemetry"
@@ -686,10 +702,11 @@ class TelemetryMsg(BaseModel):
     tracker: TrackerTelemetry | None = None     # additive (13-tracker §3.5)
 ```
 
-## 12. Protocol: session & REST models (`protocol/session.py`)
+## 12. Protocol: session & REST models (`protocol/session.py`, `protocol/tracker.py`)
 
 Bodies for the `/api` surface (04-runtime §13.1); runtime defines no wire
-model of its own.
+model of its own. Session models live in `protocol/session.py`; the phase-10
+tracker-calibration models in `protocol/tracker.py` (below).
 
 ```python
 Mode = Literal["teleop", "collect", "dagger", "inference"]
@@ -755,6 +772,80 @@ class PolicyInfo(BaseModel):             # GET /api/policies rows (04-runtime §
 
 `SessionSpec` validators: `start_from` matches the regex; `frames` keys ⊆
 `arms`; each value `parse_frame()`s and is not `ee:`; collect/dagger ⇒ `task`.
+
+**Tracker calibration (`protocol/tracker.py`; phase-10, 13-tracker §3/§4).**
+Two calibrations share one REST endpoint — `GET /api/tracker/calibration ->
+TrackerCalibrationStatus`, `POST /api/tracker/calibration
+(TrackerCalibrationCommand) -> TrackerCalibrationStatus`; illegal transitions
+are 409 `{detail}` — and the same status object rides
+`TrackerTelemetry.calibration` (§11). `PoseMsg` is imported from
+`protocol/telemetry.py`; `telemetry.py` in turn imports
+`TrackerCalibrationStatus` right after `PoseMsg` is defined (the package
+`__init__` loads `telemetry` before `tracker`). Session-less REST for device
+management is a binding addition to 04-runtime §13.1 ("REST = management
+CRUD").
+
+```python
+CalibrationKind  = Literal["none", "base_station", "yaw"]
+CalibrationPhase = Literal["idle", "starting", "capturing", "validating", "fitting",
+                           "installing", "done", "failed", "aborted"]
+CalibrationOp    = Literal["start", "capture", "validate", "install", "apply", "abort"]
+YawPointLabel    = Literal["start", "left", "forward", "right", "back", "up", "down"]
+
+class LighthouseStatus(BaseModel):       # one base station during base_station capture
+    index: int                           # libsurvive LH index
+    channel: int | None = None           # OOTX channel; None until reported
+    serial: str | None = None
+    pose: PoseMsg | None = None          # lighthouse-world pose (m, wxyz)
+    scenes: int = 0                      # GSS scenes solved for this station
+    reference: bool = False              # "Using LH i as reference lighthouse"
+
+class CalibrationValidation(BaseModel):  # stationary-controller check (13-tracker §4)
+    samples: int = 0
+    std_mm: tuple[float, float, float] = (0.0, 0.0, 0.0)   # per-axis position std
+    max_step_mm: float = 0.0             # largest jump between adjacent samples
+    threshold_std_mm: float = 5.0        # acceptance: all(std) < 5 mm and
+    threshold_step_mm: float = 20.0      #   max_step < 20 mm (2026-09-03 measurements)
+    passed: bool = False
+
+class YawGesturePoint(BaseModel):
+    label: YawPointLabel
+    pose: PoseMsg                        # RAW lighthouse-world pose at the click
+
+class TrackerCalibrationStatus(BaseModel):   # GET response; TrackerTelemetry.calibration
+    kind: CalibrationKind = "none"       # every field defaults: {} = idle snapshot
+    phase: CalibrationPhase = "idle"
+    detail: str = ""                     # operator-facing progress / failure reason
+    started_at: float | None = None      # unix s
+    elapsed_s: float | None = None
+    # base-station
+    scenes: int = 0                      # max over stations
+    lighthouses: list[LighthouseStatus] = []
+    stations_visible: int = 0
+    controller_still: bool | None = None # None = no fresh samples
+    validation: CalibrationValidation | None = None
+    installed_path: str | None = None    # libsurvive config replaced on install
+    backup_path: str | None = None       # <installed_path>.bak-YYYYMMDD-HHMMSS
+    # yaw
+    yaw_points: list[YawGesturePoint] = []
+    next_point: YawPointLabel | None = None     # None once all seven are captured
+    fitted_yaw_deg: float | None = None
+    fit_residual_deg: float | None = None
+    fit_checks: list[str] = []           # failed checks; empty = ok (apply allowed)
+    applied_yaw_deg: float | None = None
+    # persisted calibration state (always filled from tracker_calibration.json)
+    yaw_valid: bool = True               # False after a base-station install until yaw redone
+    yaw_calibrated_at: float | None = None
+    base_station_installed_at: float | None = None
+
+class TrackerCalibrationCommand(BaseModel):  # POST body
+    kind: Literal["base_station", "yaw"] # "none" is a status kind only
+    op: CalibrationOp
+    point: YawPointLabel | None = None   # yaw 'capture' label; None = next_point
+```
+
+State machines, INFO-line parsing, file layout and the yaw fit are runtime
+territory (04-runtime §6, 13-tracker §4); core only fixes the spellings above.
 
 ## 13. Protocol: video framing & keymap (`protocol/video.py`, `protocol/keymap.py`)
 
@@ -833,7 +924,11 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   # control:  HelloMsg, KeysMsg, ActionMsg, AckMsg, JointTargetArgs,
   #           SaveProfileArgs, SetInitialConditionArgs, TrackerSettingsArgs
   # telemetry: TelemetryMsg (embeds ArmTelemetry/CollisionReport/EpisodeStatus/
-  #           DaggerStatus/TrainerStatus/InferenceStatus/TrackerTelemetry/ControllerTelemetry via $defs)
+  #           DaggerStatus/TrainerStatus/InferenceStatus/TrackerTelemetry/ControllerTelemetry/
+  #           TrackerCalibrationStatus/LighthouseStatus/CalibrationValidation/YawGesturePoint
+  #           via $defs)
+  # tracker:  TrackerCalibrationStatus, TrackerCalibrationCommand (REST
+  #           /api/tracker/calibration; the other protocol.tracker models ride $defs only)
   # session:  SessionSpec, SessionInfo, WorkcellStatus, ArmStatusInfo,
   #           CameraInfo, SceneInfo, ProfileInfo, PolicyInfo
   # misc:     StateProfile, KeymapEntry, CollisionEvent
