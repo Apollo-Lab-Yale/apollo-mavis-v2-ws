@@ -104,10 +104,10 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   the view wrist-cam image is occluded by the mic — that is expected.
 - Wrist cameras (2026-09-04): BOTH arms carry an Intel RealSense D435i (USB 8086:0b3a),
   used as plain UVC colour cameras (`kind: v4l2`, colour stream is YUYV only, 640×480@30;
-  no depth is recorded, pyrealsense2 is not installed). Serial 322143060792 (PCI bus
-  29:00.1) → `grip_wrist` (Manipulation Arm); serial 349643062582 (29:00.3) →
-  `view_wrist` (Perception Arm) — this mapping is PROVISIONAL: swap the serials in the
-  config if the Hardware tab shows the tiles crossed. Address them by USB serial (sysfs
+  no depth is recorded, pyrealsense2 is not installed). USB serial 349643062582 (PCI bus
+  29:00.3, USB bus 6) → `grip_wrist` (Manipulation Arm); USB serial 322143060792 (29:00.1,
+  USB bus 4) → `view_wrist` (Perception Arm) — CONFIRMED by the user 2026-09-04 from the
+  Hardware-tab tiles (an earlier guess had them swapped). Address them by USB serial (sysfs
   lookup in `OpenCVCamera`), NEVER by `/dev/v4l/by-id`: the depth and colour UVC
   interfaces both claim `...-video-index0`, so only one symlink survives and which one
   changes between plugs. COLD-BOOT QUIRK (2026-09-04): after a reboot the colour UVC stream

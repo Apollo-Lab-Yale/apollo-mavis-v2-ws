@@ -17,7 +17,7 @@
 # Knobs (env): TRACKER_BACKEND=libsurvive LIGHTHOUSE_COUNT=3 TRACKER_YAW_DEG=116.3
 #   RAIL_IN_IK=false MIC_ENABLED=true EGL_DEVICE_ID=0 RUNTIME_HOST RUNTIME_PORT UI_DIST
 #   LIBSURVIVE_CONFIG=$DATA_ROOT/libsurvive/config.json GRIP_IP VIEW_IP
-#   CAMERA_SERIALS="grip_wrist=322143060792,view_wrist=349643062582"
+#   CAMERA_SERIALS="grip_wrist=349643062582,view_wrist=322143060792"
 #                       override workcells.hardware.cameras[].serial by camera id (the repo
 #                       maps the two RealSense USB serials to the arms; swap here as a
 #                       stop-gap if the Hardware-tab tiles are crossed). Unknown id = error.

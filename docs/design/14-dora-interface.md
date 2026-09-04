@@ -1103,8 +1103,9 @@ Manipulation Arm `grip` 192.168.1.201), no F/T sensor.
 Still open:
 
 1. **Camera encoding for remote consumers** — raw rgb8 at 30 Hz is fine on
-   one host; do you want a JPEG/downscaled variant in v1, and which RealSense
-   (serial `322143060792` or `349643062582`) is the Perception Arm's camera?
+   one host; do you want a JPEG/downscaled variant in v1? (Resolved 2026-09-04:
+   the Perception Arm's camera is USB serial `322143060792` = `view_wrist`, the
+   Manipulation Arm's is `349643062582` = `grip_wrist`.)
 2. **Upstream bug report** — file the coordinator 1 MiB WebSocket-cap /
    leaked-subscription / `dora down` false-success issue with the
    `/tmp/dora-bench` repro before we rely on any `dora topic`/`record` tooling?

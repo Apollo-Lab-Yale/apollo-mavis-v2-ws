@@ -284,8 +284,8 @@ Exact diff versus the repo config (values, comments stripped):
 
 Unchanged because the repo already has the lab values: `host: 127.0.0.1`, `port: 8765`,
 arm IPs `grip` 192.168.1.201 / `view` 192.168.2.219 (gripper `xarm_g2`, `view`
-`microphone: true`), the two wrist cameras (`grip_wrist` serial `322143060792`,
-`view_wrist` serial `349643062582`; `kind: v4l2`, `fourcc: YUYV`, 640×480 @ 30 — see
+`microphone: true`), the two wrist cameras (`grip_wrist` serial `349643062582`,
+`view_wrist` serial `322143060792`; `kind: v4l2`, `fourcc: YUYV`, 640×480 @ 30 — see
 "Cameras" below), `microphone.enabled: true` with `source_match: NT-USB Mini`,
 `hardware_probe` on 502, `egl_device_id: 0`, `control.target_rate`, `tracker.controller_map`,
 `filter`, `calibration` blocks (these newer keys are **missing** from the developer's
@@ -300,7 +300,7 @@ place they lived; `/tmp` is wiped at reboot): `tracker.backend: libsurvive`,
 ```bash
 bash /opt/apollo-mavis-v2/scripts/deploy/render-lab-config.sh          # -> /var/lib/apollo-mavis-v2/mavis_v2_lab.yaml
 # stop-gap if the two camera tiles turn out crossed (see below): swap the serials without touching the repo
-CAMERA_SERIALS="grip_wrist=349643062582,view_wrist=322143060792" bash /opt/apollo-mavis-v2/scripts/deploy/render-lab-config.sh
+CAMERA_SERIALS="grip_wrist=322143060792,view_wrist=349643062582" bash /opt/apollo-mavis-v2/scripts/deploy/render-lab-config.sh
 ```
 
 Cameras (**verify on first deploy**): the runtime opens each RealSense's colour stream as a
@@ -308,13 +308,15 @@ plain v4l2 device that it finds by **USB serial** (core `CameraConfig.serial`, s
 no by-id path, no `pyrealsense2`, `fourcc: YUYV` because the RS colour node offers no MJPG),
 so `/dev/video*` numbering and plug order do not matter. Two D435i are attached, serials
 `322143060792` and `349643062582` (`lsusb -d 8086: -v 2>/dev/null | grep iSerial`, or
-`v4l2-ctl --list-devices`). The repo maps `322143060792 → grip_wrist` (Manipulation Arm) and
-`349643062582 → view_wrist` (Perception Arm) — **PROVISIONAL**: which physical camera sits on
-which arm was never confirmed. Cover one lens and watch the Welcome page → Hardware tab
-tiles; if they are crossed, swap the two serials in `configs/mavis_v2.yaml` (developer:
-commit + push, then S9 re-render) or use the `CAMERA_SERIALS` stop-gap above until then. The
-script exits with an error for a camera id that is not in the repo config, so a rename
-there cannot be ignored silently. An unplugged camera shows a black tile with `live: false`
+`v4l2-ctl --list-devices`). The repo maps `349643062582 → grip_wrist` (Manipulation Arm) and
+`322143060792 → view_wrist` (Perception Arm) — **confirmed by the operator on 2026-09-04**
+from the Hardware-tab tiles. If a camera is ever replaced or moved: cover one lens and watch
+the Welcome page → Hardware tab tiles; if they are crossed, swap the two serials in
+`configs/mavis_v2.yaml` (developer: commit + push, then S9 re-render) or use the
+`CAMERA_SERIALS` stop-gap above until then (note that `rs-enumerate-devices` prints the
+ASIC serials, not these USB serials — read them with `lsusb -v`). The script exits with an
+error for a camera id that is not in the repo config, so a rename there cannot be ignored
+silently. An unplugged camera shows a black tile with `live: false`
 and has no other effect. **Cold boot**: a D435i's colour stream stays silent after a reboot
 until librealsense has opened the device once; the driver runs `rs-enumerate-devices -s`
 (librealsense2-utils, from Intel's apt repo — present on apollo-pc-1, keep it installed) once

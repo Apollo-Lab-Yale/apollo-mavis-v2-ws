@@ -946,10 +946,10 @@ workcells:                   # POST /api/session picks by requested kind
     cameras:                                # both wrist cams are RealSense D435i used as UVC
                                             # colour cameras: by USB serial (by-id collides
                                             # between the depth and colour interfaces), YUYV
-                                            # only; serial -> arm mapping provisional (2026-09-04)
-      - {id: grip_wrist, kind: v4l2, serial: "322143060792", fourcc: YUYV,
+                                            # only; serial -> arm mapping confirmed 2026-09-04
+      - {id: grip_wrist, kind: v4l2, serial: "349643062582", fourcc: YUYV,
          resolution: [640, 480], fps: 30}
-      - {id: view_wrist, kind: v4l2, serial: "349643062582", fourcc: YUYV,
+      - {id: view_wrist, kind: v4l2, serial: "322143060792", fourcc: YUYV,
          resolution: [640, 480], fps: 30}
     safety: {enabled: true, geom_inflation_m: 0.008, min_clearance_m: 0.016}
   sim:      { <WorkcellConfig>: sim_scene, cameras (kind sim),
