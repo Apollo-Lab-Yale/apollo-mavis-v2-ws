@@ -1,14 +1,17 @@
+MAVIS v2 (two xArm7 arms on linear tracks: grip arm with gripper + wrist camera,
+view arm with wrist camera only) — repository topology:
+
                interface definitions
                       │
-                apollo-xarm7-core
+                apollo-mavis-v2-core
                  /          \
                 /            \
        implementation     implementation
               │                │
-apollo-xarm7-hardware        apollo-xarm7-sim
+apollo-mavis-v2-hardware        apollo-mavis-v2-sim
                 \            /
                  \          /
                   ▼        ▼
-               apollo-xarm7-runtime
+               apollo-mavis-v2-runtime
                       │
-                apollo-xarm7-ui
+                apollo-mavis-v2-ui

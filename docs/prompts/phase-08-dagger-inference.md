@@ -51,7 +51,7 @@ AsyncTrainer（GPU 1，checkpoint 版本化 + episode 边界热换）、PolicyRu
   `apollo/xarm7_{task}_{n}arm_{conv}_dagger_{run_id}`，永不改动 seed 数据集；
   episode sidecar 存 `gate_events` 与 `EpisodeSummary`。
 - **AsyncTrainer**（`dagger/trainer/` 包，**独立进程** `python -m
-  apollo_xarm7_runtime.dagger.trainer --config <json>`，`CUDA_VISIBLE_DEVICES=1`
+  apollo_mavis_v2_runtime.dagger.trainer --config <json>`，`CUDA_VISIBLE_DEVICES=1`
   — GPU 1；渲染/推理占 GPU 0）：通道 = dataset 目录（只读）+ checkpoint 目录 +
   ZMQ REP 控制端点 **`tcp://127.0.0.1:5757`**（`dagger.trainer.port` 默认值；
   status/submit_episode/train_now/rollback/stop，client 1 Hz 轮询、2 s 超时）。
@@ -99,9 +99,9 @@ Out of scope：具体策略架构/训练超参调优（AsyncTrainer 用简单 BC
 
 ## 交付物
 
-- `src/apollo_xarm7_runtime/dagger/{gate,loop,policy_runner,recorder,reloader,
+- `src/apollo_mavis_v2_runtime/dagger/{gate,loop,policy_runner,recorder,reloader,
   client}.py` + `dagger/trainer/{trainer,sampling,checkpoints,control}.py`
-  （12-dagger §1 精确布局；trainer 以 `python -m apollo_xarm7_runtime.dagger.trainer`
+  （12-dagger §1 精确布局；trainer 以 `python -m apollo_mavis_v2_runtime.dagger.trainer`
   独立启动；InferenceSession 在 `dagger/loop.py`，无独立 inference 包）。
 - 一个可在 sim 上端到端跑的玩具 policy（2 层 MLP delta-EE），用于测试与验收。
 - UI：Dagger/Inference 页接线（DaggerPanel、InferencePanel）+ 测试。
@@ -130,7 +130,7 @@ Out of scope：具体策略架构/训练超参调优（AsyncTrainer 用简单 BC
       NaN）；`policy_version` 仅在热换后变化；repo 名带 `_dagger_{run_id}` 后缀；
       sidecar 有 `gate_events`。
 - [ ] AsyncTrainer e2e：spawn 真 trainer 进程（`python -m
-      apollo_xarm7_runtime.dagger.trainer`，控制端点 `tcp://127.0.0.1:5757`）；
+      apollo_mavis_v2_runtime.dagger.trainer`，控制端点 `tcp://127.0.0.1:5757`）；
       <100 新标签帧不触发 burst；喂 ≥100 → episode 边界触发 → 产出
       `checkpoints/{run}/v000001/{state_dict.pt, trainer_state.pt, manifest.json}`、
       manifest sha256 与文件一致、`LATEST` 推进 → runtime 在**下一个** episode 边界

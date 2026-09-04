@@ -1,32 +1,38 @@
-# apollo-xarm7-ws
+# apollo-mavis-v2-ws
 
-Development workspace for the Apollo Lab xArm7 stack: teleoperation, data
-collection, DAgger, and policy inference for 1–3 UFACTORY xArm7 arms
-(optionally on linear rails), against real hardware or MuJoCo simulation.
+Development workspace for **MAVIS v2** (Manipulation And Viewpoint Selection,
+version 2), the Apollo Lab (Yale) dual-arm cell: two UFACTORY xArm7 arms, each
+mounted on a linear track, facing a shared tabletop. One arm carries the xArm
+gripper plus a wrist camera (the *grip* arm); the other carries only a wrist
+camera and acts as the *perception* / viewpoint arm (the *view* arm). The
+software stack does teleoperation, data collection, DAgger and policy
+inference for exactly this cell, against the real hardware or its MuJoCo
+digital twin (scene `mavis_v2` in `apollo-mavis-v2-sim`, which is the
+authoritative description of the cell's geometry).
 
 ## Topology
 
 ```
                interface definitions
                       │
-                apollo-xarm7-core          ← interfaces, schemas, protocols
+                apollo-mavis-v2-core          ← interfaces, schemas, protocols
                  /          \
                 /            \
        implementation     implementation
               │                │
-apollo-xarm7-hardware        apollo-xarm7-sim
+apollo-mavis-v2-hardware        apollo-mavis-v2-sim
    (real xArm7 drivers)      (MuJoCo scenes + digital twin)
                 \            /
                  \          /
                   ▼        ▼
-               apollo-xarm7-runtime        ← teleop / data collection / DAgger / inference
+               apollo-mavis-v2-runtime        ← teleop / data collection / DAgger / inference
                       │
-                apollo-xarm7-ui            ← web UI, orchestration
+                apollo-mavis-v2-ui            ← web UI, orchestration
 ```
 
 ## Layout
 
-- `apollo-xarm7-*/` — the five sub-repos, cloned side by side (gitignored
+- `apollo-mavis-v2-*/` — the five sub-repos, cloned side by side (gitignored
   here until they have initial commits and are converted to submodules).
 - `docs/architecture.md` — topology sketch.
 - `docs/research/` — research notes on reference repos and tech choices.

@@ -1,6 +1,6 @@
 # Programmatic NetworkManager control for the 3-NIC / 3-arm setup (Ubuntu 22.04)
 
-Research note for the apollo-xarm7 stack. Everything below was **verified on the actual
+Research note for the apollo-mavis-v2 stack. Everything below was **verified on the actual
 target machine** (NetworkManager 1.36.6, polkitd 0.105-33ubuntu0.1, libnm GIR 1.36.6
 installed) and against the **xArm-Python-SDK source** (`xarm/core/config/x_config.py`),
 not just docs.
@@ -212,7 +212,7 @@ event push, which we don't need (we re-verify before each session anyway).
 ## 7. Auto-matching algorithm (arm IP → profile → NIC)
 
 Inputs: user config `[{name: "arm1", ip: "192.168.1.235", prefix: 24}, ...]`,
-state file `~/.config/apollo-xarm7/nic_map.json`.
+state file `~/.config/apollo-mavis-v2/nic_map.json`.
 
 ```text
 0. SAFETY: internet_devs = devices of all current default routes with the lowest

@@ -1,4 +1,4 @@
-# DAgger-family interactive imitation learning — protocol design for the apollo-xarm7 runtime
+# DAgger-family interactive imitation learning — protocol design for the apollo-mavis-v2 runtime
 
 Research note, 2026-09-01.
 Sources: Ross et al. 2011 (DAgger, arXiv 1011.0686), Kelly et al. 2019 (HG-DAgger, arXiv 1810.02890, full PDF read),
@@ -246,7 +246,7 @@ gamepad env are `["delta_x", "delta_y", "delta_z", "gripper"]` — same delta sp
 
 ---
 
-## 4. Answers for the apollo-xarm7 stack
+## 4. Answers for the apollo-mavis-v2 stack
 
 ### 4.1 WHEN and HOW to retrain
 
@@ -317,10 +317,10 @@ of ~1–2k human-labeled frames each.
 
 ### 4.4 Concrete minimal v1 protocol
 
-**Core repo (`apollo-xarm7-core`)** — pure types + `typing.Protocol` interfaces, no I/O:
+**Core repo (`apollo-mavis-v2-core`)** — pure types + `typing.Protocol` interfaces, no I/O:
 
 ```python
-# apollo_xarm7_core/dagger/types.py
+# apollo_mavis_v2_core/dagger/types.py
 from dataclasses import dataclass, field
 from enum import Enum
 import numpy as np
@@ -371,7 +371,7 @@ class EpisodeSummary:                 # sent trainer-ward at episode end
 ```
 
 ```python
-# apollo_xarm7_core/dagger/interfaces.py
+# apollo_mavis_v2_core/dagger/interfaces.py
 from typing import Protocol
 from .types import *
 
@@ -399,7 +399,7 @@ class AsyncTrainerClient(Protocol):
     def request_stop(self) -> None: ...
 ```
 
-**Runtime repo (`apollo-xarm7-runtime`)** — implementations and wiring:
+**Runtime repo (`apollo-mavis-v2-runtime`)** — implementations and wiring:
 
 - `TakeoverGate` impl: **explicit engage** (dedicated key/gamepad trigger *press* engages HUMAN; matches
   lerobot UX) with optional activity-engage (any teleop motion key, spacemouse-style deadband) as config;

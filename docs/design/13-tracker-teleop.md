@@ -125,7 +125,7 @@ injected codes (`TrackerTelemetry.controller`, `.device_held`).
         └──────────────── TelemetryMsg ◄────────────────┘
 ```
 
-- **Tracker poses are read by the runtime process** (`apollo_xarm7_runtime/
+- **Tracker poses are read by the runtime process** (`apollo_mavis_v2_runtime/
   devices/tracker.py`, a daemon thread around libsurvive's blocking event API)
   and published to a process-wide `LatestSlot[TrackerSample]`. The browser never
   sees raw device data except through telemetry. Backends: `libsurvive` (real),
@@ -650,7 +650,7 @@ normal arguments; temp configs stay under `~/apollo/calibration/`.
 lighthouse blocks with a 7-vector `pose` and a 6-vector `variance`,
 `"poser": "MPFIT"`, `"configed-lighthouse-gen": "2"`). A copy of the cell's
 reference calibration lives in the runtime repo as
-`apollo-xarm7-runtime/configs/libsurvive/<cell>-lighthouses-<date>.json`
+`apollo-mavis-v2-runtime/configs/libsurvive/<cell>-lighthouses-<date>.json`
 (currently `mavis_v2-lighthouses-20260903.json`) so a fresh machine or a
 corrupted config can be restored by copying it back; update the copy after
 every accepted install.

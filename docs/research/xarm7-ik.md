@@ -262,7 +262,7 @@ Benchmarked `mink 1.3.0` (`pip install mink`, uses `qpsolvers`+`daqp`) with
   (exact hard constraints on arbitrary nonlinear expressions, e.g. look-at as a hard
   constraint).
 
-## 7. Recommendation for the apollo-xarm7 stack
+## 7. Recommendation for the apollo-mavis-v2 stack
 
 Adopt **path (b): mink-based differential IK on the MuJoCo digital twin** as the
 primary Cartesian-servo IK for all modes (teleop, DAgger take-over, policy inference).

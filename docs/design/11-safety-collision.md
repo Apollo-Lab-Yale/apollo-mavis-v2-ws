@@ -132,7 +132,7 @@ IK avoidance rows, watchdogs, full event/telemetry/banner path; twin sync consum
 sim state stream exactly like the 100 Hz hardware report. The only way to exercise the
 gate end-to-end without arms.
 
-### 5.1 Guardrail debugging script (`apollo_xarm7_sim/tools/guardrail_check.py`)
+### 5.1 Guardrail debugging script (`apollo_mavis_v2_sim/tools/guardrail_check.py`)
 
 The CI regression test for the safety layer: headless, virtual-tick paced (no
 sleeps/wall-clock), fixed seeds ⇒ deterministic.
@@ -175,7 +175,7 @@ holding the twist, and steps the control loop tick-by-tick. **Ground truth** = t
   (`--no-ik-avoidance`: L1 alone must satisfy A1–A4), IK-on main, and the IK-on
   graze variant, which must produce **0 blocked events** (L2 glides).
 
-CI wiring: `uv run python -m apollo_xarm7_sim.tools.guardrail_check --all` in sim CI +
+CI wiring: `uv run python -m apollo_mavis_v2_sim.tools.guardrail_check --all` in sim CI +
 runtime CI (integration job, both extras); < 30 s total (virtual ticks, 0.75 ms/tick max).
 
 ## 6. Digital twin: sync loop, staleness, inflation, pair management
@@ -456,7 +456,7 @@ after a *hardware* e-stop the operator must also ack in the UI before `motion_en
 ## 11. Controller backstops (per-arm, xArm SDK)
 
 Applied at every session bring-up by
-`apollo_xarm7_hardware.backstops.apply_backstops(api, cfg)` (02-hardware §6); values are
+`apollo_mavis_v2_hardware.backstops.apply_backstops(api, cfg)` (02-hardware §6); values are
 volatile by design — never call `save_conf()` (don't mutate controller persistent state).
 
 Field mapping onto `XArmDriverConfig` (02-hardware §3.1, the actual schema):

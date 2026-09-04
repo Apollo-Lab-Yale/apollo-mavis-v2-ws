@@ -20,7 +20,7 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
 
 ## 范围
 
-- **网络 reconcile（一次性，真机）**：`python -m apollo_xarm7_hardware.netsetup
+- **网络 reconcile（一次性，真机）**：`python -m apollo_mavis_v2_hardware.netsetup
   install`（polkit `.pkla` + `netdev` 组）→ `match` 自动匹配三臂 →
   `reconcile --apply` 清理目标机已知污染 — 去重两个同名 `xarm7_1` profile、剥离
   `xarm7_1`/`xarm7_2` 的 gateway（xarm7_2 的 gateway `192.168.1.1` 甚至在错误子网）、
@@ -51,13 +51,13 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
   恢复序列 + 流重播种，臂不跳变；物理急停中途按下 ⇒ 恢复后首个下发步距测量位
   < 1 mm + UI ack 流程。
 - **submodule 化**：五个子仓各自打 tag / 推远端后，在 ws 仓
-  `git submodule add <url> apollo-xarm7-<name>` × 5，更新 `.gitignore`
+  `git submodule add <url> apollo-mavis-v2-<name>` × 5，更新 `.gitignore`
   （移除子仓忽略项）、`README.md`、`CLAUDE.md`（克隆说明改为
   `git clone --recurse-submodules`）。
 - **CI 接线**（每仓 + ws 聚合）：core = ruff → pytest → schema `--check`；
   sim/hardware/runtime = `uv sync && uv run pytest`（sim 仓额外跑
   `test_mujoco_semantics.py` 膨胀语义哨兵；硬件相关测试全部 fake-SDK，CI 无真机）；
-  guardrail 回归 `python -m apollo_xarm7_sim.tools.guardrail_check --all` 同时挂在
+  guardrail 回归 `python -m apollo_mavis_v2_sim.tools.guardrail_check --all` 同时挂在
   sim CI 与 runtime CI（integration job，<30 s）；ui = `pnpm lint && pnpm gen:check
   && pnpm test && pnpm build`；需要 GPU/EGL 的 job 标注 self-hosted runner。
 

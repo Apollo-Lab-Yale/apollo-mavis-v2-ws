@@ -1,8 +1,8 @@
-# Phase 06 — apollo-xarm7-ui：SPA、Landing + teleop 座舱、WS 客户端、视频、键盘捕获
+# Phase 06 — apollo-mavis-v2-ui：SPA、Landing + teleop 座舱、WS 客户端、视频、键盘捕获
 
 ## 目标
 
-实现 `apollo-xarm7-ui`（React 18 + Vite 5 + TypeScript strict SPA）：类型生成管线、
+实现 `apollo-mavis-v2-ui`（React 18 + Vite 5 + TypeScript strict SPA）：类型生成管线、
 三类 WS 客户端（control/telemetry/video）、Landing 页与共享 Cockpit 布局、teleop 页
 （含直接关节控制面板）、键盘捕获，以及全套 jsdom 测试。本 phase 交付 teleop 可用的
 座舱；Collect/DAgger/Inference 页面只出骨架（面板在 07/08 激活）。
@@ -22,7 +22,7 @@
 `noUncheckedIndexedAccess`、ESLint 9 flat + Prettier 3、Vitest + @testing-library/react +
 mock-socket、zustand v5、react-router-dom v6 `createHashRouter`、CSS modules）：
 
-- **类型生成管线**：`pnpm gen:sync`（从 `../apollo-xarm7-core/schemas` 拷贝到
+- **类型生成管线**：`pnpm gen:sync`（从 `../apollo-mavis-v2-core/schemas` 拷贝到
   `./schemas/`，缺 sibling 即报错）→ `pnpm gen:types`（json-schema-to-typescript →
   `src/gen/`，全部入库）→ `pnpm gen:check`（重生成 + `git diff --no-index`，CI 防漂移）。
 - **路由**：hash 路由 `#/`、`#/teleop`、`#/collect`、`#/dagger`、`#/inference`；
@@ -77,7 +77,7 @@ InferencePanel 真实接线（phase-08）；WebRTC、MuJoCo-WASM、SSR（明确�
 
 ## 交付物
 
-- `apollo-xarm7-ui/` 完整工程：`package.json`（scripts：dev/build/preview/lint/format/
+- `apollo-mavis-v2-ui/` 完整工程：`package.json`（scripts：dev/build/preview/lint/format/
   test/gen:sync/gen:types/gen:check）、`vite.config.ts`（dev 代理 `/api` `/ws` `/video`
   → `APOLLO_RUNTIME_URL ?? http://localhost:8765`）、`schemas/`（vendored）、`src/gen/`
   （生成并入库）。
@@ -87,7 +87,7 @@ InferencePanel 真实接线（phase-08）；WebRTC、MuJoCo-WASM、SSR（明确�
 
 ## 验收标准
 
-在 `apollo-xarm7-ui/` 内执行：
+在 `apollo-mavis-v2-ui/` 内执行：
 
 - [ ] `pnpm install && pnpm lint && pnpm gen:check && pnpm test && pnpm build` 全过
       （即 CI 全链）。

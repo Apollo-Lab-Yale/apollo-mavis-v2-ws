@@ -1,4 +1,4 @@
-# 01 — apollo-xarm7-core (`apollo_xarm7_core`)
+# 01 — apollo-mavis-v2-core (`apollo_mavis_v2_core`)
 
 Status: v1.0 (2026-09-01; amended 2026-09-03 — phase-10 tracker calibration:
 `protocol/tracker.py`, `TrackerTelemetry.charging`/`.calibration`, §10-§12, §14).
@@ -21,17 +21,17 @@ wire protocol (canonical keymap + JSON-schema export for TS), the
   `export_schemas` CLI. No sockets; no threads started by core (bus/slot are
   thread-*safe*, not thread-*owning*); no work at import time.
 - Units: **m, rad**, quaternions **(w,x,y,z)** canonical `w >= 0`.
-  mm/deg/pulses exist only inside `apollo_xarm7_hardware`.
+  mm/deg/pulses exist only inside `apollo_mavis_v2_hardware`.
 - Wire-visible/persisted ⇒ pydantic `BaseModel`; hot-path (100 Hz, numpy) ⇒
   frozen `dataclass`. Python ≥ 3.10, managed with `uv`.
 
 ## 2. Package layout
 
 ```
-apollo-xarm7-core/
+apollo-mavis-v2-core/
 ├── pyproject.toml             # §17
 ├── schemas/                   # CHECKED-IN JSON Schema output of §14 (UI vendors these)
-├── src/apollo_xarm7_core/
+├── src/apollo_mavis_v2_core/
 │   ├── __init__.py            # re-exports public API + __version__
 │   ├── types.py se3.py        # §3      state.py                 # §4
 │   ├── errors.py bus.py       # §16 §15 testing.py               # fakes, §18
@@ -45,7 +45,7 @@ apollo-xarm7-core/
 └── tests/                     # §18
 ```
 
-`__init__.py` re-exports stable names (`from apollo_xarm7_core import
+`__init__.py` re-exports stable names (`from apollo_mavis_v2_core import
 ArmState, Pose, ArmInterface, ...`). Adding fields to wire models is allowed
 (UI ignores unknowns); rename/removal requires a §14 `--check` schema diff.
 
@@ -916,7 +916,7 @@ modes without a recorder.
 ## 14. JSON-schema export for TS generation (`protocol/export_schemas.py`)
 
 UI pipeline (05-ui §2): core exports JSON Schema → UI `pnpm gen:sync` copies
-`../apollo-xarm7-core/schemas/*.json` → `json-schema-to-typescript` emits
+`../apollo-mavis-v2-core/schemas/*.json` → `json-schema-to-typescript` emits
 `src/gen/*.ts`. Root `schemas/` is checked in, regenerated in CI.
 
 ```python
@@ -939,7 +939,7 @@ def export(out_dir: Path) -> list[Path]
     # => byte-deterministic. Also writes keymap.json (the KEYMAP table) and
     # index.json (exported names + core __version__).
 def main(argv: list[str] | None = None) -> int
-# CLI: python -m apollo_xarm7_core.protocol.export_schemas --out schemas/
+# CLI: python -m apollo_mavis_v2_core.protocol.export_schemas --out schemas/
 #      --check -> exit 1 if regeneration would change any file (CI drift guard)
 ```
 
@@ -1030,7 +1030,7 @@ Event-like models set `model_config = ConfigDict(frozen=True)`.
 
 ```toml
 [project]
-name = "apollo-xarm7-core"
+name = "apollo-mavis-v2-core"
 version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24,<3", "pydantic>=2.5,<3", "PyYAML>=6.0"]
@@ -1053,16 +1053,16 @@ testpaths = ["tests"]; addopts = "-q --strict-markers"
 ```
 
 Workflow: `uv sync` → `uv run pytest` → `uv run ruff check src tests` →
-`uv run python -m apollo_xarm7_core.protocol.export_schemas --out schemas/`.
+`uv run python -m apollo_mavis_v2_core.protocol.export_schemas --out schemas/`.
 Siblings use an editable path dep in dev (`uv add --editable
-../apollo-xarm7-core`), pin `apollo-xarm7-core==x.y.*` when published.
+../apollo-mavis-v2-core`), pin `apollo-mavis-v2-core==x.y.*` when published.
 CI order: ruff → pytest → schema `--check`.
 
 ## 18. Test strategy (hardware-free)
 
 All of core tests with no robot, no MuJoCo, no network.
 
-- **Import guard**: subprocess imports `apollo_xarm7_core` (+ `.protocol`,
+- **Import guard**: subprocess imports `apollo_mavis_v2_core` (+ `.protocol`,
   `.dagger.types`), prints `sorted(sys.modules)`; assert intersection with
   `{mujoco, xarm, fastapi, torch, lerobot, cv2, mink, zmq, websockets}` is
   empty and import time < 500 ms.
@@ -1090,7 +1090,7 @@ All of core tests with no robot, no MuJoCo, no network.
 - **Bus**: N producer threads × 1 drainer — every Future resolves exactly
   once, corr_ids match; bus-full immediate nack; handler exception →
   ok=False; `LatestSlot` overwrite + `wait_fresh` timeout semantics.
-- **`apollo_xarm7_core.testing`**: `FakeArm`/`FakeCamera`/`FakeWorkcell` —
+- **`apollo_mavis_v2_core.testing`**: `FakeArm`/`FakeCamera`/`FakeWorkcell` —
   deterministic pure-python stubs (`command_joints` slews q toward target at a
   configurable rate); the one canonical fake set for hardware/sim/runtime
   suites instead of four ad-hoc mocks.

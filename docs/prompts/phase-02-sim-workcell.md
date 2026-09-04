@@ -1,8 +1,8 @@
-# Phase 02 — apollo-xarm7-sim（一）：资产、场景注册表、MjSpec 组合、SimWorkcell、离屏渲染
+# Phase 02 — apollo-mavis-v2-sim（一）：资产、场景注册表、MjSpec 组合、SimWorkcell、离屏渲染
 
 ## 目标
 
-搭建 `apollo-xarm7-sim` 仓库的地基：vendor 菜单库资产、编写 `xarm7_on_rail.xml` 子模型、
+搭建 `apollo-mavis-v2-sim` 仓库的地基：vendor 菜单库资产、编写 `xarm7_on_rail.xml` 子模型、
 实现 scene registry 与 `MjSpec` 运行时组合器（1–3 臂）、实现把 sim 当机器人用的
 `SimWorkcell`（实现 core 的 `WorkcellInterface`，独立 monotonic 步进线程），以及 EGL
 离屏渲染线程。IK/twin/planner 留给 phase-03。
@@ -18,7 +18,7 @@
 
 ## 范围
 
-包内（`apollo_xarm7_sim`，依赖 core + mujoco==3.12.0）：
+包内（`apollo_mavis_v2_sim`，依赖 core + mujoco==3.12.0）：
 
 - **Vendored 资产**（`assets/`，保留 BSD-3 LICENSE + 仓库根 `THIRD_PARTY_LICENSES.md`；
   每个上游目录写 `UPSTREAM` 记录 commit hash；`asset_path(*parts)` 统一访问器；
@@ -70,9 +70,9 @@ Out of scope：`MinkIKSolver`、`DigitalTwin`、`ResetPlanner`、碰撞膨胀、
 
 ## 交付物
 
-- `apollo-xarm7-sim/pyproject.toml`（依赖 `apollo-xarm7-core`、`mujoco==3.12.0`、
+- `apollo-mavis-v2-sim/pyproject.toml`（依赖 `apollo-mavis-v2-core`、`mujoco==3.12.0`、
   `mink==1.3.0`（phase-03 用，锁死在此）、numpy、pyyaml、pydantic）。
-- `src/apollo_xarm7_sim/`：`assets/`（含 `scenes/*.yaml`）、`scenes/{descriptor,registry,
+- `src/apollo_mavis_v2_sim/`：`assets/`（含 `scenes/*.yaml`）、`scenes/{descriptor,registry,
   builder,addressing}.py`、`workcell.py`、`cameras.py`、`rendering.py`、`gripper.py`
   按 `03-sim.md` §1 布局；`xarm7_on_rail.xml`/`xarm7_fixed.xml` + vendored 资产 +
   LICENSE/UPSTREAM/`THIRD_PARTY_LICENSES.md`/`ASSET_MANIFEST.json`。
@@ -85,10 +85,10 @@ Out of scope：`MinkIKSolver`、`DigitalTwin`、`ResetPlanner`、碰撞膨胀、
 
 ## 验收标准
 
-在 `apollo-xarm7-sim/` 内执行（机器：RTX 4090 + EGL headless）：
+在 `apollo-mavis-v2-sim/` 内执行（机器：RTX 4090 + EGL headless）：
 
 - [ ] `uv sync && uv run pytest` 全绿。
-- [ ] `uv run python -c "from apollo_xarm7_sim.scenes.registry import REGISTRY; b=REGISTRY.build('<3臂场景id>'); print(b.model.nq)"`
+- [ ] `uv run python -c "from apollo_mavis_v2_sim.scenes.registry import REGISTRY; b=REGISTRY.build('<3臂场景id>'); print(b.model.nq)"`
       成功编译 3 臂场景；断言 actuator 名如 `<arm_id>_act1 ... <arm_id>_gripper`、
       keyframe 0 为合并的 `initial` 且 `model.key(0).qpos.shape == (nq,)`（per-arm
       `<arm_id>_home` key 亦存在于全 nq 索引）。
@@ -106,7 +106,7 @@ Out of scope：`MinkIKSolver`、`DigitalTwin`、`ResetPlanner`、碰撞膨胀、
 - [ ] gripper 方向测试：ctrl ∈ {0, 255} 下实测指尖间隙，断言 **ctrl 0 = 开、255 = 闭**、
       `open_frac_to_ctrl(1.0) == 0`，开度与 ctrl 单调（绝不凭记忆信方向）。
 - [ ] `spec.to_xml()` 输出重新 `MjSpec.from_string` + compile 成功（episode 归档可复现）。
-- [ ] `uv run python -c "import apollo_xarm7_sim"` 在未设 `MUJOCO_GL` 时不崩（渲染惰性初始化）。
+- [ ] `uv run python -c "import apollo_mavis_v2_sim"` 在未设 `MUJOCO_GL` 时不崩（渲染惰性初始化）。
 
 ## 注意事项
 

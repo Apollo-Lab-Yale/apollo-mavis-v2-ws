@@ -1,8 +1,8 @@
-# Web UI + Transport Stack for Teleop/Inference (apollo-xarm7-ui + runtime server)
+# Web UI + Transport Stack for Teleop/Inference (apollo-mavis-v2-ui + runtime server)
 
 Research note, 2026-09-01. Scope: control plane (keyboard streaming), video transport,
 MuJoCo-to-browser rendering, frontend patterns, camera abstraction, and overall server
-architecture for the apollo-xarm7 stack (1–3 real xArm7 + MuJoCo sim/digital twin,
+architecture for the apollo-mavis-v2 stack (1–3 real xArm7 + MuJoCo sim/digital twin,
 localhost/LAN, single operator, Ubuntu 22.04, 2x RTX 4090).
 
 Sources read: FastAPI WebSocket docs, uvicorn `Config` source, aiortc source +
@@ -564,7 +564,7 @@ RGB ndarray) so the JPEG/WS streamer is backend-agnostic.
 
 ### 6.1 Recommended shape (confirmed sane)
 
-One FastAPI app in apollo-xarm7-runtime, one port:
+One FastAPI app in apollo-mavis-v2-runtime, one port:
 
 ```
 /api/...                REST: profiles, scenes, camera enumeration, session lifecycle
@@ -626,7 +626,7 @@ Process/concurrency layout inside the runtime:
 
 - **Watchdog semantics need a spec**: exact timeout, decel profile on trip, and the
   "must see empty held-set before resuming" rule should be written into the runtime
-  interface (apollo-xarm7-core), not left to the web layer.
+  interface (apollo-mavis-v2-core), not left to the web layer.
 - **UVC camera latency dominates** (~30–60 ms exposure/USB); if end-to-end teleop feel
   is poor, the fix is camera config (MJPG mode, exposure), not transport.
 - **`createImageBitmap` + canvas at 6×30 fps** is normally fine but should be profiled

@@ -1,8 +1,8 @@
-# 03 — apollo-xarm7-sim (`apollo_xarm7_sim`)
+# 03 — apollo-mavis-v2-sim (`apollo_mavis_v2_sim`)
 
 Status: v0.1 (2026-09-01). Conforms to `00-overview.md` (spine, v0.3). Ground
 truth for numbers: `docs/research/{mujoco-xarm7-sim,xarm7-ik,collision-ik}.md`
-(benchmarked on this machine, 2026-09-01). Depends only on `apollo_xarm7_core`
+(benchmarked on this machine, 2026-09-01). Depends only on `apollo_mavis_v2_core`
 (+ mujoco, mink, numpy); never imports `hardware`, `runtime`, or FastAPI.
 
 ---
@@ -10,10 +10,10 @@ truth for numbers: `docs/research/{mujoco-xarm7-sim,xarm7-ik,collision-ik}.md`
 ## 1. Package layout & dependencies
 
 ```
-apollo-xarm7-sim/
-├── pyproject.toml                  # deps: apollo-xarm7-core, mujoco==3.12.0,
+apollo-mavis-v2-sim/
+├── pyproject.toml                  # deps: apollo-mavis-v2-core, mujoco==3.12.0,
 │                                   #   mink==1.3.0, numpy>=1.24, pyyaml, pydantic>=2
-├── src/apollo_xarm7_sim/
+├── src/apollo_mavis_v2_sim/
 │   ├── __init__.py                 # re-exports the public classes below
 │   ├── assets/                     # package data: ufactory_xarm7/ (§2),
 │   │                               #   xarm7_on_rail.xml + xarm7_fixed.xml (§3),
@@ -31,7 +31,7 @@ apollo-xarm7-sim/
 └── tests/                          # §14
 ```
 
-Rules (overview §1): imports from `apollo_xarm7_core` only. Public classes
+Rules (overview §1): imports from `apollo_mavis_v2_core` only. Public classes
 implement the core interfaces and schemas (`WorkcellInterface`, `ArmInterface`,
 `CameraInterface`, `IKSolver`, `DigitalTwinInterface`; `Pose`, `ArmState`,
 `CameraFrame`, `CollisionReport`, `CollisionEvent` — exact spellings in
@@ -48,7 +48,7 @@ implement the core interfaces and schemas (`WorkcellInterface`, `ArmInterface`,
 
 Repo root: `THIRD_PARTY_LICENSES.md` with the BSD-3 texts; no GPL assets.
 Canonical path accessor: `asset_path(*parts) -> Path` over
-`importlib.resources.files("apollo_xarm7_sim") / "assets"`.
+`importlib.resources.files("apollo_mavis_v2_sim") / "assets"`.
 
 ## 3. The `xarm7_on_rail.xml` child model
 
@@ -650,7 +650,7 @@ sequential order. Goal configs for pose-level requests come from
 failure=..., failing_pair=...)`: runtime refuses the profile load and
 reports to the UI — never unplanned motion, never xArm native gohome.
 
-## 11. `safety_debug` guardrail script (`apollo_xarm7_sim/tools/guardrail_check.py`)
+## 11. `safety_debug` guardrail script (`apollo_mavis_v2_sim/tools/guardrail_check.py`)
 
 The CI regression test for the safety layer — spec is **11-safety §5.1
 (binding)**, restated here. A **SimWorkcell plays the real robot** while the
@@ -702,7 +702,7 @@ scenario):
   (`--no-ik-avoidance`: L1 alone must satisfy A1–A4), IK-on main, and the
   IK-on graze variant, which must produce **0 blocked events** (L2 glides).
 
-CI wiring: `uv run python -m apollo_xarm7_sim.tools.guardrail_check --all` in
+CI wiring: `uv run python -m apollo_mavis_v2_sim.tools.guardrail_check --all` in
 sim CI + runtime CI (integration job, both extras); < 30 s total (virtual
 ticks, 0.75 ms/tick max).
 

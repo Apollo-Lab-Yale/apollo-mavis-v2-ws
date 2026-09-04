@@ -14,21 +14,21 @@ conventions + base schema: `10-frames-and-data.md`; twin gate:
 `11-safety-collision.md`; session engine: `04-runtime.md`. Layout (exact):
 
 ```
-apollo_xarm7_core/dagger/types.py        # ControlMode, GateEvent, FrameAnnotations,
+apollo_mavis_v2_core/dagger/types.py        # ControlMode, GateEvent, FrameAnnotations,
                                          # CheckpointInfo, EpisodeSummary, TrainerStatus
-apollo_xarm7_core/dagger/interfaces.py   # TakeoverGate, InterventionRecorder,
+apollo_mavis_v2_core/dagger/interfaces.py   # TakeoverGate, InterventionRecorder,
                                          # PolicyReloader, AsyncTrainerClient (Protocols)
-apollo_xarm7_runtime/dagger/gate.py      # TakeoverGateImpl (per-arm state machines)
-apollo_xarm7_runtime/dagger/loop.py      # GatedPolicyExecutor (shared), DaggerSession,
+apollo_mavis_v2_runtime/dagger/gate.py      # TakeoverGateImpl (per-arm state machines)
+apollo_mavis_v2_runtime/dagger/loop.py      # GatedPolicyExecutor (shared), DaggerSession,
                                          # InferenceSession
-apollo_xarm7_runtime/dagger/recorder.py  # DaggerRecorder (LeRobotDataset wrapper)
-apollo_xarm7_runtime/dagger/reloader.py  # PolicyReloaderImpl
-apollo_xarm7_runtime/dagger/trainer/     # AsyncTrainer process (python -m ...runtime.dagger.trainer)
+apollo_mavis_v2_runtime/dagger/recorder.py  # DaggerRecorder (LeRobotDataset wrapper)
+apollo_mavis_v2_runtime/dagger/reloader.py  # PolicyReloaderImpl
+apollo_mavis_v2_runtime/dagger/trainer/     # AsyncTrainer process (python -m ...runtime.dagger.trainer)
     trainer.py                           #   TrainerMain, BCFineTuner
     sampling.py                          #   FiftyFiftySampler, LabelIndex
     checkpoints.py                       #   CheckpointStore (also imported by reloader)
     control.py                           #   ZMQ REP control endpoint
-apollo_xarm7_runtime/dagger/client.py    # AsyncTrainerClientImpl (spawn/monitor/submit)
+apollo_mavis_v2_runtime/dagger/client.py    # AsyncTrainerClientImpl (spawn/monitor/submit)
 ```
 
 Process topology (single machine, 2× RTX 4090):
@@ -270,7 +270,7 @@ runtime-local; 10-frames §5.3).
 
 Separate OS process on **GPU 1**, crash-isolated from the servo loop.
 **Spawn / monitor** (`runtime/dagger/client.py::AsyncTrainerClientImpl`):
-`Popen([sys.executable, "-m", "apollo_xarm7_runtime.dagger.trainer",
+`Popen([sys.executable, "-m", "apollo_mavis_v2_runtime.dagger.trainer",
 "--config", cfg_path], env={**os.environ, "CUDA_VISIBLE_DEVICES": "1"})`; the
 config JSON carries run_id, dataset roots, seed checkpoint, port, knobs below.
 The client polls `proc.poll()` + the control socket (`{"cmd": "status"}`

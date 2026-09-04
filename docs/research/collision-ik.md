@@ -276,7 +276,7 @@ CollisionIK offers nothing here — it is per-instant and explicitly gets stuck 
 - Track the planned path by streaming waypoints through the *same* teleop-time constrained differential IK, so even during resets the runtime safety layer is identical.
 - The one CollisionIK idea that helps: seed/warm-start and smoothness costs when shortcutting the planned path (velocity/accel/jerk trio again).
 
-### Suggested concrete next steps for apollo-xarm7
+### Suggested concrete next steps for apollo-mavis-v2
 
 1. Build the workcell MJCF: 1–3 xArm7 (MuJoCo Menagerie `ufactory_xarm7`, also vendored in mink examples) + prismatic rail joint (`range="0 0.65"`) per railed arm + environment meshes; add slightly inflated collision capsules on links (or rely on `minimum_distance_from_collisions`).
 2. Wrap mink: one `Configuration` per workcell, `FrameTask` per arm EE, `PostureTask`, `ConfigurationLimit`, `VelocityLimit`, one `CollisionAvoidanceLimit` with self + cross-arm + env pairs. Target: solve+integrate < 5 ms worst case.

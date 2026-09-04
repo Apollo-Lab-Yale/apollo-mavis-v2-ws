@@ -1,8 +1,8 @@
-# Phase 01 — apollo-xarm7-core：接口、schema、协议（完整实现 + 测试）
+# Phase 01 — apollo-mavis-v2-core：接口、schema、协议（完整实现 + 测试）
 
 ## 目标
 
-完整实现 `apollo-xarm7-core` 仓库：栈内所有共享类型（几何/SE3、配置、状态、命令）、
+完整实现 `apollo-mavis-v2-core` 仓库：栈内所有共享类型（几何/SE3、配置、状态、命令）、
 抽象接口（arm/camera/workcell/IK/twin/policy/recorder/teleop）、runtime↔UI 协议的
 pydantic 模型、canonical keymap、DAgger 协议类型、`CommandBus`/`LatestSlot` 并发原语，
 以及 JSON Schema 导出管线。
@@ -20,7 +20,7 @@ core 是整个栈的契约层，本 phase 结束后其公共 API 视为冻结（
 
 ## 范围
 
-包内（Python 包名 `apollo_xarm7_core`，仓库 `apollo-xarm7-core/`，`uv` 管理）：
+包内（Python 包名 `apollo_mavis_v2_core`，仓库 `apollo-mavis-v2-core/`，`uv` 管理）：
 
 - **几何**（`types.py`/`se3.py`）：`Pose{position: vec3, orientation: quat}`、
   `Transform`（SE3 别名）、`Twist{v, w, rail_v, grip_v}` 及 `quat_*`/`pose_*`/
@@ -43,7 +43,7 @@ core 是整个栈的契约层，本 phase 结束后其公共 API 视为冻结（
   max_active_constraint_rows: 12, twin_staleness_s: 0.15, input_deadman_s: 0.2,
   input_ramp_s: 0.1, ...}`；`load_workcell_config`（YAML）+ 全部交叉字段校验
   （hardware ⇒ 每臂有 ip 且 `digital_twin_scene` 且 `safety.enabled`；sim ⇒ `sim_scene`）。
-- **接口**（`apollo_xarm7_core.interfaces`，按 01-core.md §5 的签名）：`ArmInterface`
+- **接口**（`apollo_mavis_v2_core.interfaces`，按 01-core.md §5 的签名）：`ArmInterface`
   （`connect/disconnect`、`get_state() -> ArmState`、`command_joints(q)`（len==dof，
   rail 在 `q[7]`）、`command_gripper(GripperCommand)`、`command_rail(pos_m)`
   （0–0.65 m 绝对值）、`clear_errors()`、`stop()`；属性 `dof`/`has_rail`/
@@ -61,7 +61,7 @@ core 是整个栈的契约层，本 phase 结束后其公共 API 视为冻结（
   profile_id, name, notes, workcell_kind, arms, created_at, is_initial_condition}`；
   `ProfileStore`：每 profile 一个 `<id>.json`，原子写（`.tmp` + `os.replace`），
   `set_initial` 保证同 kind 至多一个 initial（目标最后写入），拒绝删除 initial。
-- **协议**（`apollo_xarm7_core.protocol`）：control（`HelloMsg{epoch, session_id,
+- **协议**（`apollo_mavis_v2_core.protocol`）：control（`HelloMsg{epoch, session_id,
   role: "controller"|"observer"}`、`KeysMsg{seq, ts, held}`、`ActionMsg{name, args}`、
   `AckMsg`、`JointTargetArgs{arm_id, positions（完整 q 含 rail 槽）, mode:
   "jog"|"goto"}`、`SaveProfileArgs`、`SetInitialConditionArgs{profile_id?}`）；
@@ -75,7 +75,7 @@ core 是整个栈的契约层，本 phase 结束后其公共 API 视为冻结（
   W/S、A/D、E/Q 平移，I/K roll、J/L pitch、U/O yaw、F/H gripper、←/→ rail
   （`requires_rail: true`）、Tab/Space/N/Enter/Backspace discrete；每条含
   `code/action/kind/label/group/requires_rail`；派生 `HELD_CODES/DISCRETE_CODES/axis_map()`）。
-- **DAgger 类型**（`apollo_xarm7_core.dagger`）：`ControlMode{policy|human|
+- **DAgger 类型**（`apollo_mavis_v2_core.dagger`）：`ControlMode{policy|human|
   takeover_transition}`（`to_int8()` → 0/1/2）、`GateEvent`、`FrameAnnotations{control_mode,
   executed_action, policy_action, policy_version, action_frame: 完整 FrameRef
   （`arm_base:<id>`|`world`|`camera:<id>`）}`、`CheckpointInfo`、`EpisodeSummary`、
@@ -86,7 +86,7 @@ core 是整个栈的契约层，本 phase 结束后其公共 API 视为冻结（
   （深度 1 最新值槽，`put/get/wait_fresh`）— runtime 的 Dora 迁移接缝。
 - **错误层级**（`errors.py`）与 **测试 fakes**（`testing.py`：`FakeArm/FakeCamera/
   FakeWorkcell`，全栈复用的唯一 fake 集）。
-- **Schema 导出**：`python -m apollo_xarm7_core.protocol.export_schemas --out schemas/
+- **Schema 导出**：`python -m apollo_mavis_v2_core.protocol.export_schemas --out schemas/
   [--check]`，用 pydantic `model_json_schema()` 输出 draft 2020-12 JSON Schema 至仓内
   `schemas/`（每个导出模型一个 `<Name>.json` + `keymap.json` + `index.json`，
   `sort_keys` + 定长缩进保证字节级确定），文件入库；`--check` 在再生成有 diff 时退出 1。
@@ -101,9 +101,9 @@ numpy + pydantic v2 + PyYAML）；接口的具体实现；网络 I/O（除 Profi
 
 ## 交付物
 
-- `apollo-xarm7-core/pyproject.toml`（`uv` 可安装，依赖仅 numpy + pydantic v2 + PyYAML，
+- `apollo-mavis-v2-core/pyproject.toml`（`uv` 可安装，依赖仅 numpy + pydantic v2 + PyYAML，
   Python ≥3.10，ruff banned-imports 把依赖规则做成 lint）。
-- `src/apollo_xarm7_core/`：`types.py se3.py state.py errors.py bus.py testing.py` +
+- `src/apollo_mavis_v2_core/`：`types.py se3.py state.py errors.py bus.py testing.py` +
   `interfaces/{arm,camera,workcell,ik,safety,policy,recorder,teleop}.py` +
   `schemas/{config,safety,profile}.py` + `profiles/store.py` + `dagger/{types,interfaces}.py` +
   `protocol/{control,telemetry,session,video,keymap,export_schemas}.py`（01-core.md §2 布局）。
@@ -120,13 +120,13 @@ numpy + pydantic v2 + PyYAML）；接口的具体实现；网络 I/O（除 Profi
 
 ## 验收标准
 
-在 `apollo-xarm7-core/` 内逐条执行：
+在 `apollo-mavis-v2-core/` 内逐条执行：
 
-- [ ] `uv sync && uv run python -c "import apollo_xarm7_core"` 成功。
-- [ ] `uv run python -c "import apollo_xarm7_core, sys; assert not any(m.startswith(('mujoco','xarm','fastapi','lerobot','torch','cv2','mink','zmq','websockets')) for m in sys.modules)"`
+- [ ] `uv sync && uv run python -c "import apollo_mavis_v2_core"` 成功。
+- [ ] `uv run python -c "import apollo_mavis_v2_core, sys; assert not any(m.startswith(('mujoco','xarm','fastapi','lerobot','torch','cv2','mink','zmq','websockets')) for m in sys.modules)"`
       — 导入 core 不得拉入任何栈内重依赖。
 - [ ] `uv run pytest` 全绿；测试数 ≥30。
-- [ ] `uv run python -m apollo_xarm7_core.protocol.export_schemas --out schemas/ --check`
+- [ ] `uv run python -m apollo_mavis_v2_core.protocol.export_schemas --out schemas/ --check`
       退出码 0，且 `git diff --exit-code schemas/` — 导出幂等，schema 与代码不漂移。
 - [ ] keymap 测试断言：恰好 25 条、code 唯一；`ArrowLeft/ArrowRight` 的
       `requires_rail == true`；Tab/Space/KeyN/Enter/Backspace 的 `kind == "discrete"`

@@ -1,4 +1,4 @@
-# Phase 03 — apollo-xarm7-sim（二）：MinkIKSolver、DigitalTwin、ResetPlanner、基准复现
+# Phase 03 — apollo-mavis-v2-sim（二）：MinkIKSolver、DigitalTwin、ResetPlanner、基准复现
 
 ## 目标
 
@@ -85,10 +85,10 @@ WS 广播（phase-05）；真机 twin 校准与硬件验收清单（phase-09）�
 
 ## 交付物
 
-- `src/apollo_xarm7_sim/{ik,twin,planner}.py` + `tools/guardrail_check.py`；
+- `src/apollo_mavis_v2_sim/{ik,twin,planner}.py` + `tools/guardrail_check.py`；
   `MinkIKSolver`、`DigitalTwin`、`ResetPlanner`、`apply_inflation`、
   `build_monitored_pairs` 公共符号（03-sim §1 布局）。
-- `python -m apollo_xarm7_sim.tools.guardrail_check --all [--no-ik-avoidance]`
+- `python -m apollo_mavis_v2_sim.tools.guardrail_check --all [--no-ik-avoidance]`
   可独立运行，退出码 0 = 全部断言通过（CI 直接接）。
 - `benchmarks/bench_ik.py`、`benchmarks/bench_twin.py`（打印均值/p99，README 记录本机数字）。
 - `tests/`：IK 收敛与 residual/diverged、rail 冗余（posture 权重下 rail 不吸收小平移）、
@@ -99,7 +99,7 @@ WS 广播（phase-05）；真机 twin 校准与硬件验收清单（phase-09）�
 
 ## 验收标准
 
-在 `apollo-xarm7-sim/` 内执行（本机 = Threadripper PRO 5975WX + RTX 4090，单线程基准）：
+在 `apollo-mavis-v2-sim/` 内执行（本机 = Threadripper PRO 5975WX + RTX 4090，单线程基准）：
 
 - [ ] `uv run pytest` 全绿。
 - [ ] `uv run python benchmarks/bench_ik.py`：servo 式 warm-start 循环，7-DoF
@@ -116,7 +116,7 @@ WS 广播（phase-05）；真机 twin 校准与硬件验收清单（phase-09）�
       配对阈值 = 两 geom gap 之和。
 - [ ] 不可达目标测试：连续 10 tick 超 residual 阈值（0.02 m / 0.35 rad）后
       `IKResult.diverged == True` 且不抛异常（静默冻结 = 错误行为）。
-- [ ] `uv run python -m apollo_xarm7_sim.tools.guardrail_check --all` 退出码 0，
+- [ ] `uv run python -m apollo_mavis_v2_sim.tools.guardrail_check --all` 退出码 0，
       总耗时 < 30 s（虚拟 tick）。四场景（env_table_descend / env_pedestal_sweep /
       cross_arm_head_on / cross_arm_rail_converge）× {IK 避障开, 关} 全部满足：
       **A1** 先于任何真接触发出 `CollisionEvent(kind="blocked")`（零膨胀 ground-truth

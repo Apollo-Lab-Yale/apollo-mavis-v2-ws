@@ -1,18 +1,18 @@
-# 02 — apollo-xarm7-hardware (`apollo_xarm7_hardware`)
+# 02 — apollo-mavis-v2-hardware (`apollo_mavis_v2_hardware`)
 
 Status: v0.1 (2026-09-01). Conforms to `00-overview.md` v0.3 (spine). Ground
 truth: `docs/research/xarm-python-sdk.md` (SDK 1.18.5, verified against
 source), `network-manager.md` (audited on the target machine),
 `web-teleop-stack.md` §5 (camera ABC). Depends **only** on
-`apollo_xarm7_core` + `xarm-python-sdk==1.18.5`, `opencv-python`,
+`apollo_mavis_v2_core` + `xarm-python-sdk==1.18.5`, `opencv-python`,
 optional `pyrealsense2`. No MuJoCo, no FastAPI.
 
 ## 1. Package layout
 
 ```
-apollo-xarm7-hardware/
+apollo-mavis-v2-hardware/
 ├── pyproject.toml              # deps per header; extras: [realsense]
-├── src/apollo_xarm7_hardware/
+├── src/apollo_mavis_v2_hardware/
 │   ├── config.py               # XArmDriverConfig, ServoLimits (pydantic)
 │   ├── units.py                # ALL m/rad <-> mm + pulse/frac conversions (§2)
 │   ├── driver.py               # XArmDriver, _ServoStreamer, _MonitorThread (§3)
@@ -42,7 +42,7 @@ Core is m/rad/quat-wxyz; the SDK is mm + rad (always construct
 `XArmAPI(is_radian=True)` — **degrees never appear anywhere**). Conversion
 happens exactly once, here; nothing else multiplies by 1000. Joints/torques
 pass through (rad, N·m). Quat↔RPY helpers come from
-`apollo_xarm7_core.se3`; this module fixes convention and scaling (RPY =
+`apollo_mavis_v2_core.se3`; this module fixes convention and scaling (RPY =
 intrinsic XYZ per `core.se3.rpy_to_quat` — equivalently extrinsic ZYX — the
 xArm firmware convention).
 
@@ -343,7 +343,7 @@ def split_terse(line: str) -> list[str]: ...
 #               detail=""), NicMapEntry(mac, ifname, profile_uuid, arm_ip, ts)
 class NetSetup:
     def __init__(self, arms: list[ArmNet],
-                 state_path: Path = Path("~/.config/apollo-xarm7/nic_map.json"),
+                 state_path: Path = Path("~/.config/apollo-mavis-v2/nic_map.json"),
                  run: NmcliRunner = nmcli) -> None: ...
     def verify(self) -> dict[str, MatchResult]: ...  # fast path; raises NetSetupError
     def match(self) -> dict[str, MatchResult]: ...   # full probe (§7.2), persists state

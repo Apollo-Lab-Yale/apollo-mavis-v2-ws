@@ -1,4 +1,4 @@
-# Phase 05 — apollo-xarm7-runtime（一）：会话引擎、控制环、teleop、安全监督、FastAPI 服务
+# Phase 05 — apollo-mavis-v2-runtime（一）：会话引擎、控制环、teleop、安全监督、FastAPI 服务
 
 ## 目标
 
@@ -22,7 +22,7 @@ twist → 微分 IK → servo 的 teleop 管线、直接关节控制路径（`jo
 
 ## 范围
 
-包内（`apollo_xarm7_runtime`，依赖 core，extras：`[hardware,sim]`；单进程、单 uvicorn worker）：
+包内（`apollo_mavis_v2_runtime`，依赖 core，extras：`[hardware,sim]`；单进程、单 uvicorn worker）：
 
 - **SessionManager**（`session/manager.py`）：状态机 `IDLE → BRINGUP → START_FROM →
   RUNNING → TEARDOWN`（+ `FAULT/RECOVERING`），状态经 telemetry `session.state` 广播；
@@ -67,7 +67,7 @@ twist → 微分 IK → servo 的 teleop 管线、直接关节控制路径（`jo
   - `InputWatchdog`：输入陈旧 **0.2 s**（deadman）⇒ twist 线性斜坡归零 **0.1 s**
     （ramp）；恢复前**必须**先收到一个空 held-key 集（AWAIT_EMPTY）；控制 WS 断开 ⇒
     立即按 deadman 路径归零、丢 held 状态；驱动错误恢复后 re-seed + AWAIT_EMPTY。
-  - CI：把 phase-03 的 `python -m apollo_xarm7_sim.tools.guardrail_check --all` 接进
+  - CI：把 phase-03 的 `python -m apollo_mavis_v2_sim.tools.guardrail_check --all` 接进
     runtime CI（integration job），且 runtime `SafetyGate` 语义与其一致。
 - **StateProfile 服务**（`profiles/store.py`）：re-export core `ProfileStore` +
   `save_from_snapshot(store, snap, name, notes)`；`save_profile`/`set_initial_condition`
@@ -114,22 +114,22 @@ UI 本体（phase-06，本 phase 用 Python WS 客户端测试）；WebRTC / MuJ
 
 ## 交付物
 
-- `apollo-xarm7-runtime/pyproject.toml`（extras `[hardware] [sim] [trainer]`）+
-  `src/apollo_xarm7_runtime/`：`__main__.py config.py runtime.py bus.py` +
+- `apollo-mavis-v2-runtime/pyproject.toml`（extras `[hardware] [sim] [trainer]`）+
+  `src/apollo_mavis_v2_runtime/`：`__main__.py config.py runtime.py bus.py` +
   `session/ control/ safety/ profiles/ streams/ server/`（04-runtime §2 布局；
   `recorder/` 属 phase-07、`dagger/` 属 phase-08）。
-- 启动入口：`uv run python -m apollo_xarm7_runtime --config <runtime.yaml>`
+- 启动入口：`uv run python -m apollo_mavis_v2_runtime --config <runtime.yaml>`
   （uvicorn 内嵌，端口默认 8765，`ws_per_message_deflate=False`）。
 - `tests/`：单元（watchdog 状态机穷举、seq 去重、单 writer/observer、gate
   hold-last-safe/hysteresis/escape、jog/goto、start_from 解析、chokepoint AST 扫描）
   + WS/REST 契约（starlette TestClient + FakeWorkcell）+ **sim-backed e2e**
   （无浏览器，`httpx`/`websockets` 客户端）。
-- CI 配置：pytest + guardrail 回归（`python -m apollo_xarm7_sim.tools.guardrail_check
+- CI 配置：pytest + guardrail 回归（`python -m apollo_mavis_v2_sim.tools.guardrail_check
   --all`，integration job，装 `[sim]` extra）。
 
 ## 验收标准
 
-在 `apollo-xarm7-runtime/` 内执行：
+在 `apollo-mavis-v2-runtime/` 内执行：
 
 - [ ] `uv sync --extra sim && uv run pytest` 全绿。
 - [ ] e2e：起服务（sim workcell，1 臂带 rail 场景）→ `POST /api/session
@@ -157,7 +157,7 @@ UI 本体（phase-06，本 phase 用 Python WS 客户端测试）；WebRTC / MuJ
       p99 **< 2 ms**（overview §9 预算：IK ~0.12 ms/臂 + twin 0.24–0.75 ms）；
       tick 率 100 Hz ± 1%；telemetry 实测 20–30 Hz。
 - [ ] safety_debug e2e（CI 回归）：`uv run python -m
-      apollo_xarm7_sim.tools.guardrail_check --all` 退出码 0（runtime CI job）；
+      apollo_mavis_v2_sim.tools.guardrail_check --all` 退出码 0（runtime CI job）；
       另起 `safety_debug` 会话走 WS 复演 `env_table_descend`：gate 在接触前 block，
       `/ws/telemetry` 的 `collision.severity` 经历 `warn → blocked`，blocked 时
       被钳命令不到达 workcell（hold-last-safe）。

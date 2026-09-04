@@ -45,7 +45,7 @@ Devices 页（`#/devices`）通过**页内弹窗向导**（复用现有 `.modal-
   reader，航向手势的触发器点击会在 session 中触发 clutch。标定进行中 `POST /api/session`
   返回 409 `"tracker calibration in progress"`。
 
-### 2. core（`apollo_xarm7_core/protocol/tracker.py`，新模块；core 是拼写权威）
+### 2. core（`apollo_mavis_v2_core/protocol/tracker.py`，新模块；core 是拼写权威）
 
 ```python
 CalibrationKind  = Literal["none", "base_station", "yaw"]
@@ -113,7 +113,7 @@ class TrackerCalibrationCommand(BaseModel):
   `tests/test_schema_export.py` 精确集合、`tests/test_protocol.py::_WIRE_MODELS`、
   `TrackerTelemetry` 属性集合断言同步更新（附带把已在代码里的 `charging` 一起钉住）。
 - 类名唯一，避免 json-schema-to-typescript 别名重编号；不要新增 keymap 行。
-- 命令：`cd apollo-xarm7-core && uv run pytest && uv run python -m apollo_xarm7_core.protocol.export_schemas --out schemas/ && ... --check`。
+- 命令：`cd apollo-mavis-v2-core && uv run pytest && uv run python -m apollo_mavis_v2_core.protocol.export_schemas --out schemas/ && ... --check`。
 
 ### 3. runtime
 
@@ -218,7 +218,7 @@ class TrackerCalibrationCommand(BaseModel):
   "backend is not libsurvive"、yaw 全流程经 REST、telemetry 含 `calibration` 块、有 session
   时 409。真机测试门 `APOLLO_TRACKER_HW=1`。
 
-### 4. UI（apollo-xarm7-ui）
+### 4. UI（apollo-mavis-v2-ui）
 
 - 类型：`npm run gen:sync && npm run gen:types && npm run gen:check`（pnpm 的 gen:* 目前在
   预检就失败，用 npm）。
@@ -275,10 +275,10 @@ core 新模块 + schemas；runtime `tracker_calibration.py`、reader 扩展、RE
 
 ## 验收标准
 
-- `cd apollo-xarm7-core && uv run pytest && uv run python -m apollo_xarm7_core.protocol.export_schemas --out schemas/ --check` 全绿。
-- `cd apollo-xarm7-runtime && uv run ruff check src tests && MUJOCO_GL=egl uv run pytest -q` 全绿
+- `cd apollo-mavis-v2-core && uv run pytest && uv run python -m apollo_mavis_v2_core.protocol.export_schemas --out schemas/ --check` 全绿。
+- `cd apollo-mavis-v2-runtime && uv run ruff check src tests && MUJOCO_GL=egl uv run pytest -q` 全绿
   （e2e 在负载下偶发超时不算，需单独重跑通过）。
-- `cd apollo-xarm7-ui && npm run gen:check && npx tsc --noEmit && npx eslint . && npx vitest run` 全绿。
+- `cd apollo-mavis-v2-ui && npm run gen:check && npx tsc --noEmit && npx eslint . && npx vitest run` 全绿。
 - fake backend e2e：yaw 向导用 7 次 `capture` 走完并 `apply`，telemetry `settings.yaw_deg` 变为
   拟合值，重启进程后 `yaw_deg` 来自持久化文件。
 - 真机（用户在场）：基站向导采集 ≥ 6 场景 → 验证 std < 5 mm、最大台阶 < 20 mm → 安装后

@@ -1,4 +1,4 @@
-# Phase 07 — apollo-xarm7-runtime（二）：LeRobot v3 录制器、collection 模式、episode 端到端
+# Phase 07 — apollo-mavis-v2-runtime（二）：LeRobot v3 录制器、collection 模式、episode 端到端
 
 ## 目标
 
@@ -81,7 +81,7 @@ push_to_hub 自动化。
 
 ## 交付物
 
-- `src/apollo_xarm7_runtime/recorder/{episode_recorder,features}.py` +
+- `src/apollo_mavis_v2_runtime/recorder/{episode_recorder,features}.py` +
   `RecorderThread` 集成（04-runtime §2/§10 布局）。
 - collection 模式完整可用（sim 后端）；sidecar 写入 `meta/apollo/`。
 - UI：Collect 页接线 + 测试更新。

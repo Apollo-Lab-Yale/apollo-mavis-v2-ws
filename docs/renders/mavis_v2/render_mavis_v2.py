@@ -2,7 +2,7 @@
 
 Usage (from the workspace root, sim repo's uv env)::
 
-    cd apollo-xarm7-sim && MUJOCO_GL=egl uv run python \
+    cd apollo-mavis-v2-sim && MUJOCO_GL=egl uv run python \
         ../docs/renders/mavis_v2/render_mavis_v2.py [out_dir]
 
 Writes the scene cameras (cam_front, cam_top, view_wrist_cam, grip_wrist_cam), a
@@ -27,8 +27,8 @@ os.environ.setdefault("MUJOCO_GL", "egl")
 import mujoco  # noqa: E402
 import numpy as np  # noqa: E402
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "apollo-xarm7-sim" / "src"))
-from apollo_xarm7_sim import REGISTRY  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "apollo-mavis-v2-sim" / "src"))
+from apollo_mavis_v2_sim import REGISTRY  # noqa: E402
 
 OPERATOR_VIEW = {"lookat": [0.1, 0.0, 0.9], "distance": 2.4}  # azimuth/elevation from the scene
 

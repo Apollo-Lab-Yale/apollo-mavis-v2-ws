@@ -340,7 +340,7 @@ episode_{idx}.hdf5
 
 ---
 
-## 8. Concrete guidance for apollo-xarm7
+## 8. Concrete guidance for apollo-mavis-v2
 
 1. **Depend on `lerobot` (≥0.6) in the data-collection package** and use `LeRobotDataset.create/resume/add_frame/save_episode/clear_episode_buffer/finalize` directly — do not reimplement the writer (parquet rollover, video concat, stats, and metadata buffering are subtle). Pin the version; the format has a history of breaking majors.
 2. One dataset repo per (task × arm-count × action-space/frame convention). Stamp session names (upstream appends `_%Y%m%d_%H%M%S` via `DatasetRecordConfig.stamp_repo_id`) and merge with `lerobot.datasets.dataset_tools.merge_datasets` later.

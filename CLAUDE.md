@@ -1,11 +1,17 @@
-# apollo-xarm7-ws — guidance for Claude
+# apollo-mavis-v2-ws — guidance for Claude
 
 ## What this is
 
-Development workspace for a five-repo robotics stack (Apollo Lab, Yale):
-`apollo-xarm7-core` (interfaces/schemas/protocols) ← `apollo-xarm7-hardware`
-(real xArm7 drivers) and `apollo-xarm7-sim` (MuJoCo) ← `apollo-xarm7-runtime`
-(teleop / data collection / DAgger / inference) ← `apollo-xarm7-ui` (web UI).
+Development workspace for **MAVIS v2** (Manipulation And Viewpoint Selection v2),
+the Apollo Lab (Yale) dual-arm cell: two UFACTORY xArm7 arms on linear tracks over
+one table — the *grip* arm (xArm gripper + wrist camera) and the *view* arm
+(wrist camera only, the perception / viewpoint arm). The stack targets exactly
+this cell, real or as its MuJoCo digital twin (scene `mavis_v2`), not xArm7 in
+general. Five repos: `apollo-mavis-v2-core` (interfaces/schemas/protocols) ←
+`apollo-mavis-v2-hardware` (real xArm7 + linear-track drivers) and
+`apollo-mavis-v2-sim` (MuJoCo) ← `apollo-mavis-v2-runtime` (teleop / data
+collection / DAgger / inference) ← `apollo-mavis-v2-ui` (web UI). Renamed from
+`apollo-xarm7-*` on 2026-09-03 (GitHub keeps redirects from the old names).
 
 The five sub-repos live side by side in this directory as independent git
 clones (gitignored by the ws repo until converted to submodules).
@@ -24,7 +30,7 @@ clones (gitignored by the ws repo until converted to submodules).
 
 - Converse with the user in Chinese; write code, comments, and repo docs in English.
 - Python ≥3.10, managed with `uv`; each sub-repo is an installable package
-  (`apollo_xarm7_core`, `_hardware`, `_sim`, `_runtime`). UI is React+Vite+TS.
+  (`apollo_mavis_v2_core`, `_hardware`, `_sim`, `_runtime`). UI is React+Vite+TS.
 - Dependency direction is strict: core depends on nothing in the stack;
   hardware/sim depend only on core; runtime depends on core (+ hardware/sim
   as optional extras); ui talks to runtime over HTTP/WebSocket only.
@@ -50,7 +56,7 @@ clones (gitignored by the ws repo until converted to submodules).
   joint 1 to re-face the workspace. 0.16 × 0.16 × 0.24 m untouchable obstacle flush
   against the operator's-left (+X) end in the channel. (Earlier the scene was mirrored
   in X from an inner-side viewpoint, then fixed to yaw −90 which left the plate facing
-  the operator; turned each rail 180° to yaw +90 on 2026-09-03.) Encoded in apollo-xarm7-sim
+  the operator; turned each rail 180° to yaw +90 on 2026-09-03.) Encoded in apollo-mavis-v2-sim
   `scenes/mavis_v2.yaml` (header lists every measurement and the assumptions to
   confirm in phase-09); docs/design/03-sim.md §4.3 has the arithmetic.
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/

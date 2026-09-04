@@ -373,7 +373,7 @@ Notes:
 
 ---
 
-## 8. Recommended recipes for apollo-xarm7
+## 8. Recommended recipes for apollo-mavis-v2
 
 ### Per-arm session setup
 

@@ -1,8 +1,8 @@
-# Phase 04 — apollo-xarm7-hardware：netsetup、XArmDriver、相机、HardwareWorkcell
+# Phase 04 — apollo-mavis-v2-hardware：netsetup、XArmDriver、相机、HardwareWorkcell
 
 ## 目标
 
-实现 `apollo-xarm7-hardware` 仓库：NetworkManager 网络自动匹配（netsetup）、
+实现 `apollo-mavis-v2-hardware` 仓库：NetworkManager 网络自动匹配（netsetup）、
 xArm7 驱动（mode-1 servo 流、错误恢复、rail、双种 gripper）、V4L2/RealSense 相机后端、
 以及组装成 core `WorkcellInterface` 的 `HardwareWorkcell`。**全部功能不依赖真机即可落地**：
 交付一个 fake-SDK 测试骨架（模拟 `XArmAPI` 行为，含错误注入），真机验证留到 phase-09。
@@ -19,7 +19,7 @@ xArm7 驱动（mode-1 servo 流、错误恢复、rail、双种 gripper）、V4L2
 
 ## 范围
 
-包内（`apollo_xarm7_hardware`，依赖 core + `xarm-python-sdk==1.18.5` + opencv +
+包内（`apollo_mavis_v2_hardware`，依赖 core + `xarm-python-sdk==1.18.5` + opencv +
 可选 pyrealsense2）：
 
 - **units.py**：**唯一**的 m/rad ↔ mm、pulses/开度、rail m↔mm 转换点
@@ -34,7 +34,7 @@ xArm7 驱动（mode-1 servo 流、错误恢复、rail、双种 gripper）、V4L2
     `ipv6.method disabled`）→ 串行探测 carrier-on 且**不是**最低 metric 默认路由设备
     的 ethernet NIC（internet NIC 与非 ethernet 设备硬 denylist）→ `ping -c1 -W1 -I`
     重试 ≥3 + `ip neigh` 交叉验证 + TCP connect `(ip, 502)`（只连不写）→ 持久化
-    `{arm → MAC, ifname, profile UUID}` 到 `~/.config/apollo-xarm7/nic_map.json`。
+    `{arm → MAC, ifname, profile UUID}` 到 `~/.config/apollo-mavis-v2/nic_map.json`。
   - `reconcile(apply=False)`（一次性清理，先出 `ReconcilePlan` 再执行）：按 MAC +
     interface-name 钉死、去重/禁用 stale profile、剥离 gateway 污染、强制 manual；
     **绝不**碰正在承载 SDK 流量的活动 profile。
@@ -99,19 +99,19 @@ Out of scope：控制环/安全门/teleop（runtime）；真机/真网卡验证�
 
 ## 交付物
 
-- `apollo-xarm7-hardware/pyproject.toml`（依赖 core + `xarm-python-sdk==1.18.5` +
+- `apollo-mavis-v2-hardware/pyproject.toml`（依赖 core + `xarm-python-sdk==1.18.5` +
   opencv-python；extras：`realsense`）。
-- `src/apollo_xarm7_hardware/`：`config.py units.py driver.py grippers.py rail.py
+- `src/apollo_mavis_v2_hardware/`：`config.py units.py driver.py grippers.py rail.py
   backstops.py events.py workcell.py` + `netsetup/` + `cameras/`（02-hardware §1 布局）。
 - `tests/` + `tests/fakes/{fake_xarm_api,report_replayer}.py` +
   `tests/fixtures/nmcli/*.txt` + `tests/fixtures/report/*.bin`。
-- netsetup CLI：`python -m apollo_xarm7_hardware.netsetup
+- netsetup CLI：`python -m apollo_mavis_v2_hardware.netsetup
   {verify|match|reconcile|install|status}`（reconcile 默认只出 plan，`--apply` 才执行）。
 - 安装文档：`docs/netsetup-install.md`（.pkla 内容 + `usermod -aG netdev`）。
 
 ## 验收标准
 
-在 `apollo-xarm7-hardware/` 内执行（**无真机、无 root**）：
+在 `apollo-mavis-v2-hardware/` 内执行（**无真机、无 root**）：
 
 - [ ] `uv sync && uv run pytest` 全绿（全程不触网、不真调 nmcli — fixture/fake 驱动）。
 - [ ] netsetup 单测覆盖：terse 输出 `\:` 反转义；两个同名 `xarm7_1` profile 场景下
@@ -136,7 +136,7 @@ Out of scope：控制环/安全门/teleop（runtime）；真机/真网卡验证�
 - [ ] 100 Hz 流软实时测试：fake SDK 下 servo 线程 1000 tick 的节拍 p99 < 12 ms；
       逐 tick 断言 `sent_joints` 满足 vel/acc 限幅与 lever-arm TCP 步长 ≤ 9 mm
       （`max_cart_step_m=0.009`）；mock `monotonic` 停顿 50 ms 后无补发突发。
-- [ ] `uv run python -m apollo_xarm7_hardware.netsetup reconcile`（fixture 注入的
+- [ ] `uv run python -m apollo_mavis_v2_hardware.netsetup reconcile`（fixture 注入的
       `NmcliRunner`）输出的 `ReconcilePlan` 恰好 = 去重 + 剥 gateway + 按 MAC 钉死 +
       优先级；不带 `--apply` 不执行任何 mutating nmcli 命令。
 

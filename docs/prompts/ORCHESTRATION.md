@@ -19,7 +19,7 @@ Wave 6:  phase-08 (runtime+ui: DAgger + AsyncTrainer + inference)        ← 07
 
 ## 模式 A：手动（每 session 一个 phase）
 
-在 `apollo-xarm7-ws` 目录启动 Claude Code，粘贴：
+在 `apollo-mavis-v2-ws` 目录启动 Claude Code，粘贴：
 
 ```
 请执行 docs/prompts/phase-0X-<name>.md。先读 CLAUDE.md 和
@@ -40,7 +40,7 @@ commit + push、推进下一波。已于 2026-09-01 由本模式启动。
 1. 必读：`docs/prompts/phase-0X-*.md`（任务书）+ 其列出的设计文档（binding）
    + `CLAUDE.md`。设计文档与任务书冲突时以设计文档为准，并在报告中注明。
 2. 只在指定子 repo 内写代码；core 以 editable path dep 引入
-   （`uv add --editable ../apollo-xarm7-core`）；版本 pin 按设计文档。
+   （`uv add --editable ../apollo-mavis-v2-core`）；版本 pin 按设计文档。
 3. **反 stall 规则**：单次工具调用生成 ≤120 行；大文件先写骨架再分节 Edit。
 4. 迭代到「验收标准」全部通过（跑真实命令，贴输出），`ruff check` clean。
 5. **不 commit**——orchestrator 验证后统一 commit + push。

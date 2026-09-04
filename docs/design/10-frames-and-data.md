@@ -12,7 +12,7 @@ This is the **cross-cutting spec** every repo defers to for (a) coordinate-frame
 definitions and conversions, and (b) the on-disk dataset format. Units are
 **meters and radians**; quaternions are **(w, x, y, z)**, normalized, canonical
 `w >= 0` (`core.se3.quat_normalize`). All math below is expressible in
-`apollo_xarm7_core.se3` primitives — no repo rolls its own quaternion code.
+`apollo_mavis_v2_core.se3` primitives — no repo rolls its own quaternion code.
 
 Binding resolutions this document makes (siblings adopt on next edit; the
 consistency pass aligns them):
@@ -100,7 +100,7 @@ T_W_Ck = T_W_P ⊕ T_P_Ck          # T_P_Ck read from the calibration file
 - **Sim cameras**: MuJoCo cameras look along **−Z** with +Y up; the sim
   adapter post-multiplies `R_x(π)` (quat `(0,1,0,0)`) onto the MJCF camera
   orientation so `camera:<id>` means the same OpenCV-convention frame in sim,
-  twin, and hardware. This happens once, inside `apollo-xarm7-sim`.
+  twin, and hardware. This happens once, inside `apollo-mavis-v2-sim`.
 - **As a recording frame**, `camera:<id>` requires `T_W_Ck` to be constant
   over the session: `extrinsics_frame` must be `"world"` or
   `"arm_base:<id>"` of a rail-less arm. Wrist (`ee:`-parented) and
@@ -235,7 +235,7 @@ The legacy solver (`M4D-SC1ENTIST/xarm7-ik`, research `xarm7-ik.md`) differs
 from this stack in four ways; old datasets/policies are converted, not
 reinterpreted:
 
-| aspect | legacy `xarm7-ik` | apollo-xarm7 |
+| aspect | legacy `xarm7-ik` | apollo-mavis-v2 |
 |---|---|---|
 | target frame | **flange** (DH ends at d7 = 0.097 m) | **TCP** site `link_tcp`, 0.172 m past flange |
 | orientation convention | user quat premultiplied by `quat_offset = (0,1,0,0)` (180° about X): user identity = "gripper down" | plain TCP orientation, no implicit offset |
@@ -299,7 +299,7 @@ rail:      clamp(q, 0.0, RAIL_TRAVEL_M)   # legacy allowed up to 0.74 m; 0.65 is
 
 ### 4.4 Dataset/policy migration entry point
 
-`apollo_xarm7_runtime.tools.convert_legacy` applies §4.1–§4.3 row-wise to a
+`apollo_mavis_v2_runtime.tools.convert_legacy` applies §4.1–§4.3 row-wise to a
 legacy dataset and emits a LeRobot v3 dataset in this doc's schema with
 `features["action"]["info"]["converted_from"] = "xarm7-ik-legacy"`. Policies
 trained on unconverted legacy data must be wrapped with the inverse mapping
@@ -749,7 +749,7 @@ Optional offline export for training codebases that demand ALOHA-style HDF5
 recording path. Interface only:
 
 ```python
-# apollo_xarm7_runtime/tools/export_aloha.py
+# apollo_mavis_v2_runtime/tools/export_aloha.py
 @dataclass(frozen=True)
 class AlohaExportConfig:
     repo_id: str; root: Path; out_dir: Path      # one episode_{idx}.hdf5 per episode

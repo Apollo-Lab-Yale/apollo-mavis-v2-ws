@@ -1,6 +1,6 @@
 # MuJoCo simulation assets & techniques for xArm7
 
-Research note for the apollo-xarm7 stack (1-3 real/simulated UFACTORY xArm7, rail-mounted,
+Research note for the apollo-mavis-v2 stack (1-3 real/simulated UFACTORY xArm7, rail-mounted,
 digital-twin collision checking, web-streamed rendering, teleop-in-sim).
 
 **Verified against:** MuJoCo **3.12.0** (installed and benchmarked on this machine: Ubuntu 22.04,
@@ -88,7 +88,7 @@ mavis_mujoco_gym/
   `xarm.wrapper.XArmAPI` (`set_servo_angle`, `get_linear_track_pos`, `get_gripper_position`,
   `set_collision_sensitivity`, `set_self_collision_detection`).
 
-### Directly reusable for apollo-xarm7
+### Directly reusable for apollo-mavis-v2
 
 | Asset | Verdict |
 | --- | --- |
@@ -377,7 +377,7 @@ while running:
 
 ---
 
-## 7. Recommendations for the apollo-xarm7 stack
+## 7. Recommendations for the apollo-mavis-v2 stack
 
 1. **Vendor menagerie `ufactory_xarm7`** (BSD-3) as the single source of arm/gripper MJCF; do not
    fork per-scene copies. Take mavis's `linear_motor_rail/platform.stl` + `d435_with_cam_stand.stl`

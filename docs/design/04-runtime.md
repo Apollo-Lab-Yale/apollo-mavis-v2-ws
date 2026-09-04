@@ -1,4 +1,4 @@
-# 04 — apollo-xarm7-runtime (`apollo_xarm7_runtime`)
+# 04 — apollo-mavis-v2-runtime (`apollo_mavis_v2_runtime`)
 
 Status: v0.1 (2026-09-01; amended 2026-09-03 — phase-10 tracker calibration:
 §2 `devices/tracker_calibration.py`, §6 "Tracker calibration modes", §13.1
@@ -13,7 +13,7 @@ Runtime = session engine + server: composes a workcell (hardware or sim),
 runs the 100 Hz control loop for all four modes (teleop / collect / DAgger /
 inference), owns recording, safety supervision, the DAgger trainer process,
 and the single FastAPI app (REST + WS + video + SPA) on **port 8765**.
-Depends on `apollo_xarm7_core`; `hardware` and `sim` are optional extras
+Depends on `apollo_mavis_v2_core`; `hardware` and `sim` are optional extras
 (hardware mode with twin safety needs both — the twin lives in `sim`).
 Server deps: `fastapi`, `uvicorn[standard]`, `opencv-python`, `lerobot>=0.6`
 (pinned), `numpy`, `pydantic`; trainer extra adds `torch`, `pyzmq`. Internal
@@ -23,8 +23,8 @@ inside `hardware`.
 ## 2. Package layout
 
 ```
-src/apollo_xarm7_runtime/        # pyproject extras: [hardware] [sim] [trainer]
-├── __main__.py                  # `python -m apollo_xarm7_runtime --config ...`
+src/apollo_mavis_v2_runtime/        # pyproject extras: [hardware] [sim] [trainer]
+├── __main__.py                  # `python -m apollo_mavis_v2_runtime --config ...`
 ├── config.py                    # RuntimeConfig (§14)
 ├── runtime.py                   # Runtime: composition root, owns everything
 ├── bus.py                       # re-exports core.bus (Command, CommandBus, LatestSlot)
@@ -47,14 +47,14 @@ src/apollo_xarm7_runtime/        # pyproject extras: [hardware] [sim] [trainer]
 ├── dagger/     gate.py, loop.py (GatedPolicyExecutor/DaggerSession/InferenceSession),
 │               policy_runner.py, recorder.py (DaggerRecorder), reloader.py, client.py,
 │               trainer/ (AsyncTrainer process pkg — entrypoint
-│               `python -m apollo_xarm7_runtime.dagger.trainer`) (§11; 12-dagger §1)
+│               `python -m apollo_mavis_v2_runtime.dagger.trainer`) (§11; 12-dagger §1)
 ├── streams/    hub.py (VideoHub §13.4), render_source.py (sim/twin FrameSources)
 └── server/     app.py, rest.py (§13.1), ws_control.py (§13.2),
                 ws_telemetry.py (§13.3), ws_video.py (§13.4)
 ```
 
 Protocol message models (`HelloMsg`, `KeysMsg`, `ActionMsg`, `AckMsg`,
-`TelemetryMsg`, keymap) live in `apollo_xarm7_core.protocol` — runtime imports
+`TelemetryMsg`, keymap) live in `apollo_mavis_v2_core.protocol` — runtime imports
 them; it never redefines wire shapes.
 
 ## 3. Process & thread architecture
@@ -72,7 +72,7 @@ session state is singleton). Real-time work never runs on the event loop:
 | `EncoderWorker` ×streams | stream fps | `cv2.imencode` JPEG q80 (1–3 ms/frame) | Encode-once; WS + MJPEG share the buffer |
 | `RecorderThread` | 20–30 fps | the LeRobot dataset writer (single owner) | `add_frame`/`save_episode`; never touched from other threads |
 | `PolicyRunner` | 10–30 Hz | policy `act()`, GPU 0 | DAgger/inference only (§11) |
-| sim stepping thread | 500 Hz | `mj_step` (sim workcell) | Lives in `apollo_xarm7_sim`; runtime treats sim like hardware |
+| sim stepping thread | 500 Hz | `mj_step` (sim workcell) | Lives in `apollo_mavis_v2_sim`; runtime treats sim like hardware |
 | **AsyncTrainer process** | — | GPU 1 fine-tuning | Separate process from day one (§11); crash-isolated |
 
 Bridging rules: threads → asyncio only via
@@ -361,7 +361,7 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   device is present but silent (a mismatching `object_name` is spelled out);
   `rate_hz` is measured over a 1 s window and decays to 0 when samples stop;
   forwarded libsurvive warnings are rate-limited to ≤ 1 line/s per message
-  class; `python -m apollo_xarm7_runtime` configures Python logging (INFO to
+  class; `python -m apollo_mavis_v2_runtime` configures Python logging (INFO to
   stderr) unless the root logger already has handlers.
 - **Tracker calibration modes** (13-tracker §3 items 7–8, §4 "Calibration
   modes"; phase-10, 2026-09-03): `devices/tracker_calibration.py` —
@@ -681,7 +681,7 @@ unfinalized dataset is detected at next startup and repaired via `resume()` +
 Components only — the wire protocol, aggregation rules, and trainer loop are
 specified in `12-dagger-protocol.md`; runtime implements the core Protocols
 (`TakeoverGate`, `PolicyReloader`, `AsyncTrainerClient` from
-`apollo_xarm7_core.dagger.interfaces`).
+`apollo_mavis_v2_core.dagger.interfaces`).
 
 - **`TakeoverGate`** (`dagger/gate.py`): **Space = discrete toggle**
   (ActionMsg `takeover_toggle`, once per press — not held), policy↔human;
@@ -707,7 +707,7 @@ specified in `12-dagger-protocol.md`; runtime implements the core Protocols
   and recording (`RelativeFrame` rule). DAgger episodes append to a
   dedicated dataset; the seed dataset is never mutated.
 - **`AsyncTrainerClient`**: trainer spawned as `python -m
-  apollo_xarm7_runtime.dagger.trainer --config ...` with
+  apollo_mavis_v2_runtime.dagger.trainer --config ...` with
   `CUDA_VISIBLE_DEVICES=1` (12-dagger §7). Transport = **filesystem +
   control channel**: checkpoints at `checkpoints/{run_id}/v{n:06d}/`
   (state_dict + preprocess stats + `CheckpointInfo` JSON with dataset
@@ -1014,7 +1014,7 @@ Hardware-free by default; pytest. Three tiers:
    2 episodes (one saved, one discarded) to a tmpdir, `finalize`, re-open
    with `LeRobotDataset`, assert schema §10.2 (intervention / action_source /
    wallclock_ns), fps=25, episode count 1; (c) `safety_debug` guardrail: the
-   `apollo-xarm7-sim` collision-course script through the runtime must be
+   `apollo-mavis-v2-sim` collision-course script through the runtime must be
    blocked *before* contact with `CollisionEvent`s (CI regression, overview
    §6); (d) DAgger smoke with scripted `Policy` + stub trainer: Space cycles
    policy→transition→human and back, hot-swap only at episode boundary;

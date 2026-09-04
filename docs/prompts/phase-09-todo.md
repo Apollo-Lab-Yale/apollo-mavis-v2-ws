@@ -20,7 +20,7 @@
       顺手记录每台臂固件版本（gripper 电流需 fw ≥ 2.7.100）。
 
 **A1. 网络 reconcile（一次性，需 sudo）**
-- [ ] `python -m apollo_xarm7_hardware.netsetup install`（写 polkit .pkla +
+- [ ] `python -m apollo_mavis_v2_hardware.netsetup install`（写 polkit .pkla +
       加 netdev 组，需要 sudo）→ 重新登录使组生效。
 - [ ] `... netsetup match` → 审阅 `... reconcile`（默认 plan-only 输出）→
       确认无误后 `reconcile --apply`。Claude 可以陪跑生成/解读，执行是你按回车。
@@ -30,7 +30,7 @@
       rail → gripper → twin 对拍 → 双臂 gate 课目 → 完整 teleop/采集/DAgger。
 - [ ] 物理测量项：6 个示教位姿的卷尺实测 clearance（对 twin ≤4 mm）、
       各臂 `base_in_world` 与 rail 原点实测、相机外参标定（标定板）。
-- [ ] **mavis_v2 场景校准**（`apollo-xarm7-sim/.../scenes/mavis_v2.yaml` 头部有全部
+- [ ] **mavis_v2 场景校准**（`apollo-mavis-v2-sim/.../scenes/mavis_v2.yaml` 头部有全部
       假设）：① mavis 轨道网格长 1.0926 m、零位端到基座中心 0.2476 m——按"右端与台面
       齐平"反推 x0=0.3599，滑块右边距右沿 15.0 cm（口述 14）；实测轨长/零位端悬出后回调；
       ② 障碍物（左端、纵深 27.5 起）内角与 gripper 轨网格左端有 1.4×3.8 cm 静态重叠，

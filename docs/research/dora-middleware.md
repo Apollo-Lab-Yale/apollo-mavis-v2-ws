@@ -1,4 +1,4 @@
-# Research note: dora-rs (Dora) as middleware for the apollo-xarm7 stack
+# Research note: dora-rs (Dora) as middleware for the apollo-mavis-v2 stack
 
 **Date:** 2026-09-01
 **Sources:** github.com/dora-rs/dora @ `b37f8fc` (main, 2026-08-31), repo docs (`docs/*.md`), PyPI `dora-rs`, github.com/dora-rs/dora-hub, github.com/dora-rs/dora-lerobot.

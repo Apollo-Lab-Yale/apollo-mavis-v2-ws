@@ -1,20 +1,35 @@
-# apollo-xarm7 — System Overview & Contract
+# apollo-mavis-v2 — System Overview & Contract
 
-Status: v0.3 (2026-09-01). This document is the **spine** of the stack: every
-other design doc and every sub-repo must stay consistent with it. All major
-technology decisions are resolved against `docs/research/` (several were
-benchmarked live on the target machine).
+Status: v0.3 (2026-09-01; renamed and re-scoped 2026-09-03). This document is
+the **spine** of the stack: every other design doc and every sub-repo must stay
+consistent with it. All major technology decisions are resolved against
+`docs/research/` (several were benchmarked live on the target machine).
+
+## 0. What MAVIS v2 is
+
+**MAVIS v2** (Manipulation And Viewpoint Selection, version 2) is one physical
+cell in the Apollo Lab (Yale): two UFACTORY xArm7 arms, each mounted on a
+0.65 m linear track, on opposite rails of a shared tabletop. The **grip arm**
+carries the xArm gripper and a wrist camera; the **view arm** carries only a
+wrist camera and is the perception / viewpoint-selection arm. The software in
+these repos exists for exactly this cell — real hardware or its MuJoCo digital
+twin (`apollo-mavis-v2-sim` scene `mavis_v2`, the authoritative geometry, see
+03-sim §4.3) — and is not a general xArm7 framework. Where the code is generic
+(scene composition for 1–3 arms, per-arm rail auto-detection, camera-only arms)
+that is an implementation convenience, not a product promise. The stack was
+renamed from `apollo-xarm7-*` on 2026-09-03; package names follow
+(`apollo_mavis_v2_*`).
 
 ## 1. Repos and dependency rules
 
 ```
-                apollo-xarm7-core          interfaces, schemas, protocols, SE3 utils
+                apollo-mavis-v2-core          interfaces, schemas, protocols, SE3 utils
                  /          \
-apollo-xarm7-hardware    apollo-xarm7-sim   implementations of core interfaces
+apollo-mavis-v2-hardware    apollo-mavis-v2-sim   implementations of core interfaces
                  \          /
-              apollo-xarm7-runtime          teleop / collect / DAgger / inference engine + server
+              apollo-mavis-v2-runtime          teleop / collect / DAgger / inference engine + server
                       |
-                apollo-xarm7-ui             web frontend (React 18 + Vite + TS)
+                apollo-mavis-v2-ui             web frontend (React 18 + Vite + TS)
 ```
 
 Hard rules:
@@ -23,11 +38,11 @@ Hard rules:
   no xArm SDK, no FastAPI).
 - `hardware` and `sim` depend only on `core`. They never import each other.
 - `runtime` depends on `core`, with `hardware` and `sim` as optional extras
-  (`pip install apollo-xarm7-runtime[hardware,sim]`). Hardware mode with
+  (`pip install apollo-mavis-v2-runtime[hardware,sim]`). Hardware mode with
   digital-twin safety requires both extras; composition happens in runtime.
 - `ui` never imports Python; it talks to runtime exclusively over HTTP/WebSocket.
-- Python packages: `apollo_xarm7_core`, `apollo_xarm7_hardware`,
-  `apollo_xarm7_sim`, `apollo_xarm7_runtime`. Python ≥3.10, managed with `uv`.
+- Python packages: `apollo_mavis_v2_core`, `apollo_mavis_v2_hardware`,
+  `apollo_mavis_v2_sim`, `apollo_mavis_v2_runtime`. Python ≥3.10, managed with `uv`.
 
 ## 2. Process model
 
@@ -95,7 +110,7 @@ runtime from a vendored menagerie `ufactory_xarm7` model (BSD-3) + a
 the composed `spec.to_xml()` is persisted with every episode. 1–3 arms in both
 modes; up to 4 cameras (3 wrist + 1 environment), typically 2.
 
-### 3.3 Interfaces (in `apollo_xarm7_core.interfaces`)
+### 3.3 Interfaces (in `apollo_mavis_v2_core.interfaces`)
 
 - `ArmInterface` — per-arm driver facade: `connect/disconnect`,
   `get_state() -> ArmState` (joint pos/vel, rail pos, ee pose in base frame,
@@ -247,7 +262,7 @@ and the physics itself stops penetration; scene meshes/colliders constrain the
 arm naturally. But the safety stack must be *testable* in sim: a
 `safety_debug` configuration runs the full hardware-mode stack (twin instance
 + gate + IK collision limits) against a sim workcell playing the role of the
-real robot, and `apollo-xarm7-sim` ships a guardrail debugging script that
+real robot, and `apollo-mavis-v2-sim` ships a guardrail debugging script that
 deliberately drives arms onto environment-collision and arm↔arm
 self-collision courses and asserts the gate clamps/blocks and emits
 `CollisionEvent`s *before* contact. This doubles as the CI regression test
