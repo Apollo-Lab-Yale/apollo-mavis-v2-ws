@@ -287,8 +287,12 @@ arm IPs `grip` 192.168.1.201 / `view` 192.168.2.219 (gripper `xarm_g2`, `view`
 `microphone: true`), the two wrist cameras (`grip_wrist` serial `349643062582`,
 `view_wrist` serial `322143060792`; `kind: v4l2`, `fourcc: YUYV`, 640×480 @ 30 — see
 "Cameras" below), `microphone.enabled: true` with `source_match: NT-USB Mini`,
-`hardware_probe` on 502, the phase-09a `hardware_monitor` / `twin_overlay` blocks and the wrist
-cameras' D435i colour `intrinsics` (2026-09-04), `egl_device_id: 0`, `control.target_rate`, `tracker.controller_map`,
+`hardware_probe` on 502, the phase-09a `hardware_monitor` / `twin_overlay` blocks, the wrist
+cameras' D435i colour `intrinsics` (2026-09-04), the phase-09b per-arm controller backstops
+(`tcp_load_kg` / `tcp_load_cog_mm` / `collision_sensitivity`: `grip` 0.95 kg @ (0, 0, 60) mm,
+`view` 0.55 kg @ (0, 0, 90) mm, sensitivity 3 — estimates accepted by the user on 2026-09-05 (the tools were not weighed); the
+driver writes them at every session connect, the Hardware tab's **Apply safety settings** writes
+them without a session), `egl_device_id: 0`, `control.target_rate`, `tracker.controller_map`,
 `filter`, `calibration` blocks (these newer keys are **missing** from the developer's
 `/tmp/mavis_v2_live.yaml`; the render starts from the repo file so they are kept).
 
@@ -520,6 +524,27 @@ overlays with the note `rail not homed · twin assumes 0.65 m` until the tracks 
 microphone) and, today, a red `C19` chip on the Perception Arm card; `/ws/telemetry`
 `hardware_monitor.arms[].status` should read `running` for both arms.
 
+Phase-09b (2026-09-04) — controller maintenance without a session. These are **configuration
+writes only, no motion** (the arms stay `state 4` / `mode 0`, no joint moves). While a hardware
+session owns the boxes the card buttons read `Use the Cockpit`: `apply_backstops` is then refused
+with 409, and `clear_errors` is NOT refused but routed to the session driver's user-initiated
+recovery (= `recover`: clears, `motion_enable`s, re-enters servo mode, re-seeds — the arm does
+not move, but its brakes release; use the Cockpit's **Clear errors & resume** instead of curl).
+Each Hardware-tab arm card shows the controller's read-back `sensitivity N · payload X kg`
+(amber + `differs from config` while it does not match `mavis_v2_lab.yaml`); a red `C<code>`
+chip enables **Clear errors**, a mismatch enables **Apply safety settings**. The same over REST:
+
+```bash
+M=127.0.0.1:8765/api/hardware/arms
+curl -s -X POST -H 'content-type: application/json' -d '{"op":"clear_errors"}' $M/view/maintenance | python3 -m json.tool | grep -E '"ok"|"detail"|"error_code"'   # ok true, after.error_code 0 (C19 returns until Studio -> Settings -> Externals -> End Effector -> None)
+for a in grip view; do curl -s -X POST -H 'content-type: application/json' -d '{"op":"apply_backstops"}' $M/$a/maintenance | python3 -m json.tool | grep -E '"ok"|"detail"|collision_sensitivity|tcp_load_kg|backstops_match'; done   # ok true; after: collision_sensitivity 3, tcp_load_kg 0.95 / 0.55, backstops_match true
+```
+
+Afterwards `hardware_monitor.arms[]` still reads `state 4` / `mode 0`, the joints did not move,
+the card's read-back line is neutral and both toasts appeared (`<Arm> · errors cleared`,
+`<Arm> · safety settings applied (sensitivity 3, payload 0.95 kg)`). The settings are volatile
+(lost at a controller reboot); the driver re-applies them at every session connect.
+
 From a mavis shell additionally (**verify on first deploy**): `pactl list short sources | grep NT-USB`
 must list `alsa_input.usb-R__DE_Microphones_R__DE_NT-USB_Mini_750BFEE8-00.mono-fallback`
 (needs `XDG_RUNTIME_DIR` exported; proves mavis's PulseAudio sees the card via group `audio`).
@@ -680,6 +705,8 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 | both wrist-cam tiles black after a reboot (`/api/cameras` `live: false`, log: `select() timeout` / `cannot open`) | cold-boot quirk of the D435i colour UVC stream: it delivers nothing until librealsense has opened the device once. The driver runs `rs-enumerate-devices -s` automatically before the first RealSense open — check `command -v rs-enumerate-devices` (librealsense2-utils, Intel apt repo) and the runtime log for `RealSense wake`; manual fallback: run `rs-enumerate-devices -s`, then restart the service. `rs-enumerate-devices` prints ASIC serials (243522071002 / 327122074467), not the USB serials in the config. |
 | sim previews black / `stream died` in the log, EGL errors | render node permission: mavis needs `render` (`/dev/dri/renderD* root:render 0660`); `/dev/nvidia*` are 0666. Check `MUJOCO_GL=egl` in `systemctl --user show mavis-runtime -p Environment`; `egl_device_id: 0` = PCI 41:00.0. An EGL failure kills only the preview streams, not the runtime. |
 | `POST /api/session` kind=hardware → 409 "hardware sessions land with phase-09 integration" | expected until phase-09; use sim sessions. |
+| red `C<code>` chip on a Hardware-tab arm card (Perception Arm `C19` today; `hardware_monitor.arms[].error_code != 0`) | a controller error is latched in the box. Click **Clear errors** on the card (phase-09b; `POST /api/hardware/arms/<id>/maintenance {"op":"clear_errors"}` = `clean_error` + `clean_warn` on the read-only monitor — no enable, no motion, no confirm dialog). Toast `<Arm> · errors cleared`; the chip clears with the next monitor sample. `C19` (End Effector Communication Error: the box expects an end effector on the tool RS-485 bus, the Perception Arm has none) returns until xArm Studio → Settings → Externals → End Effector → **None** (no SDK write for it). Inside a hardware session the card buttons are disabled (`Use the Cockpit`): use the Cockpit fault banner's **Clear errors & resume**, then re-grip the clutch. 409 `… needs the read-only monitor connected` = box off / monitor paused; `ok: false … re-latched right after clearing` = a persisting hardware fault (cable, e-stop). |
+| amber `sensitivity 1 · payload 0.00 kg` with `differs from config` on an arm card (`hardware_monitor.arms[].backstops_match: false`) | the controller lost its volatile safety settings (reboot) or never had them written. Click **Apply safety settings** (`{"op":"apply_backstops"}`: payload, gravity, collision sensitivity, self-collision model, rebound off — configuration writes only, no motion) → toast `<Arm> · safety settings applied (sensitivity 3, payload 0.95 kg)` and `backstops_match: true`. The driver re-applies the same values at every session connect; the values live in the lab config per arm (`tcp_load_kg` / `tcp_load_cog_mm` / `collision_sensitivity`; PROVISIONAL payloads until the tools are weighed — change them in `configs/mavis_v2.yaml`, then S9 re-render). |
 | arms `unreachable` | boxes off (1-2 min after power-on), or the NIC lost its profile: `nmcli -t -f NAME,DEVICE con show --active \| grep mavis_`, `tail /var/log/mavis-netsetup.log` (dispatcher repairs on link events), `$PY -m apollo_mavis_v2_hardware.netsetup verify --arm grip=192.168.1.201 --arm view=192.168.2.219`, `… match --repair` (needs `netdev` + the `.pkla`, S5). Also `ip route get 192.168.2.219` must leave via `enp36s0f0`. |
 | landing-page warning "polkit grant missing / user not in netdev / dispatcher hook missing" | S5 not run for this venv/user; `sudo $PY -m apollo_mavis_v2_hardware.netsetup install --check --python $PY --user mavis --arm … --arm …` (same `--arm` order as the install). Without sudo the `.pkla` cannot be read (`/etc/polkit-1/localauthority` is root-only) and is reported as a `note:` only. |
 | `fatal: detected dubious ownership in repository at '/opt/apollo-mavis-v2…'` | git 2.34.1 refuses a checkout owned by another uid. The deploy scripts export `GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0='*'` for their own git calls (`_common.sh`; verified to work with this git build). For ad-hoc git in the ops tree either `source /opt/apollo-mavis-v2/scripts/deploy/_common.sh` or, once per account, `for d in /opt/apollo-mavis-v2 /opt/apollo-mavis-v2/apollo-mavis-v2-{core,sim,hardware,runtime,ui}; do git config --global --add safe.directory $d; done`. |

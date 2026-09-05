@@ -3,7 +3,11 @@
 Status: v0.1 (2026-09-01; amended 2026-09-03 — phase-10 tracker calibration:
 §2 `devices/tracker_calibration.py`, §6 "Tracker calibration modes", §13.1
 `/api/tracker/calibration` + "Not REST" addendum, §14 `calibration_dir` /
-`tracker.libsurvive_config_path` / `tracker.calibration`). Conforms to
+`tracker.libsurvive_config_path` / `tracker.calibration`; amended 2026-09-04 —
+phase-09b error recovery: §5 FAULT/RECOVERING implemented, §13.1
+`POST /api/hardware/arms/{arm_id}/maintenance`, §13.3 `arms[*].fault_detail` /
+`.recovering` + `hardware_monitor.arms[*]` safety read-backs, §14 per-arm
+backstop parameters, §15 driver-event consumption, §16 `tests/fakes.py`). Conforms to
 `00-overview.md` (spine, v0.3) and mirrors `05-ui.md` protocol shapes exactly. Research ground truth: `web-teleop-stack.md`,
 `lerobot-data.md`, `dagger-online-training.md`, `xarm-python-sdk.md`.
 
@@ -49,10 +53,12 @@ src/apollo_mavis_v2_runtime/        # pyproject extras: [hardware] [sim] [traine
 │               WorkcellStatus.hardware_ready, phase-11 §13.1),
 │               hardware_monitor.py (HardwareStateMonitor: one READ-ONLY
 │               apollo_mavis_v2_hardware.ArmStateMonitor per hardware arm — joints,
-│               flange pose, error/warn codes, rail + gripper registers, never a
-│               command — with the pause = release-the-box supervisor; feeds
+│               flange pose, error/warn codes, rail + gripper registers, safety
+│               read-backs; zero writes unless an explicit maintenance request —
+│               with the pause = release-the-box supervisor; feeds
 │               telemetry.hardware_monitor, ArmStatusInfo.error_code and the twin
-│               overlays, phase-09a §13.3)
+│               overlays, phase-09a §13.3; .maintenance(arm_id, op) = the monitor
+│               path of POST /api/hardware/arms/{arm_id}/maintenance, phase-09b §13.1)
 ├── safety/     gate.py (SafetyGate/NullGate §8), supervisor.py (twin gate §8),
 │               watchdog.py (InputWatchdog + ArmReportWatchdog §8)
 ├── profiles/   store.py (core ProfileStore re-export + save_from_snapshot §9)
@@ -87,7 +93,7 @@ session state is singleton). Real-time work never runs on the event loop:
 | `RenderThread` | per-stream fps (≤30) | every `mujoco.Renderer` of sim's `RenderService` (sim + twin views) | runtime hosts sim's `RenderService` (03-sim §7), which paces each stream at its own fps — a fixed rate could not feed the 30 fps video streams; GL context thread-affinity; `MUJOCO_GL=egl`; ~0.6 ms/frame measured on the 4090 |
 | `EncoderWorker` ×streams | stream fps | `cv2.imencode` JPEG q80 (1–3 ms/frame) | Encode-once; WS + MJPEG share the buffer |
 | `TwinOverlayRenderer` (phase-09a) | `twin_overlay.fps` (12) | its OWN `BuiltScene` copy, `MjData` and two `mujoco.Renderer`s (RGB + segmentation) for the `<camera_id>_align` overlays | Session-less; renderers created and closed in-thread (GL affinity); ~1 ms RGB + ~4.5 ms segmentation per stream; never touches the gate's `DigitalTwin` (§13.4) |
-| `hw.<arm>.monitor-ro` ×N + `HardwareStateMonitor` supervisor (phase-09a) | 10 Hz (+ ~2 Hz registers) / 0.5 s | one READ-ONLY xArm SDK client per hardware arm (`apollo_mavis_v2_hardware.ArmStateMonitor`) | Session-less; zero writes; released (`paused`) while a hardware session owns the box (§13.3) |
+| `hw.<arm>.monitor-ro` ×N + `HardwareStateMonitor` supervisor (phase-09a/b) | 10 Hz (+ ~2 Hz registers) / 0.5 s | one READ-ONLY xArm SDK client per hardware arm (`apollo_mavis_v2_hardware.ArmStateMonitor`) | Session-less; zero writes unless an explicit maintenance request (`clear_errors` / `apply_backstops`, executed on this thread, REST only waits; §13.1); released (`paused`) while a hardware session owns the box (§13.3) |
 | `RecorderThread` | 20–30 fps | the LeRobot dataset writer (single owner) | `add_frame`/`save_episode`; never touched from other threads |
 | `PolicyRunner` | 10–30 Hz | policy `act()`, GPU 0 | DAgger/inference only (§11) |
 | sim stepping thread | 500 Hz | `mj_step` (sim workcell) | Lives in `apollo_mavis_v2_sim`; runtime treats sim like hardware |
@@ -200,8 +206,34 @@ Phase behavior (identical skeleton for all four modes; overview §4):
    runner, zero-twist ramp, `recorder.finalize()` (§10.4), stop trainer
    process, stop encoders/renderer, `arm.stop()` + `disconnect()`; clients
    detect the released session via hello epoch/`session_id`.
-5. **FAULT/RECOVERING** — per-arm SDK error recovery (§15). All arms hold
-   while any arm recovers; resume requires an empty held-key set (§8).
+5. **FAULT/RECOVERING** — per-arm SDK error recovery (§15; implemented
+   phase-09b, fake-tested). The control loop drains the workcell's driver
+   events every tick: a `FaultEvent` stops THAT arm (its `ArmSender` is
+   paused — dispatch stops and the pending gripper target is dropped — it
+   holds, its plan / jog / teleop seed are dropped, the clutch anchors are
+   released if it was the clutched arm, and `_gripper_step` ignores F/H for
+   it while FAULTED / RECOVERING so nothing integrates or queues; the re-seed
+   re-syncs the gripper target from the measured opening) and the session
+   goes FAULT; the OTHER arms keep running in the loop. The driver's own bounded
+   auto-recovery (02-hardware §3.5: ≤ 3 per 30 s for RECOVERABLE codes such
+   as C22 / C24 / C31 / C35) still runs; once it is LATCHED (budget exhausted,
+   unrecoverable code, e-stop) only the operator's click recovers (`POST
+   /api/hardware/arms/{arm_id}/maintenance {op: recover}` → the driver's
+   `request_recovery`, §13.1) — the runtime itself never re-enables an arm.
+   `ReseedEvent` /
+   `RecoveredEvent` re-seed the arm's targets from the MEASURED position
+   (`ControlLoop.reseed_arm`: `_last_cmd`, IK warm state, gate `_last_safe`,
+   watchdog AWAIT_EMPTY) and put it — and the session — in RECOVERING; it
+   returns to RUNNING on the first tick whose inputs (sampled after the
+   re-seed) hold nothing live: the device clutch released (its next press is
+   a true rising edge → zero delta on engage) and every WS code up or latched
+   by the watchdog (which itself only clears on a fresh EMPTY KeysMsg, §8).
+   `session.state` follows the loop's aggregate (`ControlLoop.on_fault_state`
+   → `SessionManager._on_arm_fault_state`): `fault` while any arm is stopped,
+   `recovering` while any is re-seeded and waiting, else `running`; the
+   start_from worker never overwrites a fault. Telemetry: `arms[*].fault_detail`
+   (the SDK `x_code` title, e.g. `controller error 24: Speed Exceeds Limit`,
+   kept through RECOVERING, `""` when running) and `arms[*].recovering`.
 
 ## 6. Control loop — teleop pipeline
 
@@ -545,7 +577,10 @@ OK`:
   with `held == []` (AWAIT_EMPTY) — never resume from a replayed held set.
 - **Re-seed after recovery**: after SDK error recovery (§15) the servo stream
   and teleop `target` re-seed from `get_state()` before any command is sent;
-  watchdog enters AWAIT_EMPTY.
+  watchdog enters AWAIT_EMPTY. The arm additionally stays held (RECOVERING)
+  until a tick whose inputs — sampled after the re-seed — hold nothing live:
+  the device clutch must be released (the next press is a rising edge with
+  zero delta) and WS codes must be up or watchdog-latched (phase-09b, §5).
 - Applies to human inputs; `PolicyRunner` has its own staleness rule (§11,
   11-safety §10.2): interpolate toward the last action for ≤ 5 policy
   periods, then hold — never a ramp.
@@ -782,13 +817,18 @@ generated from them — 05-ui §2). Errors: `{"detail": str}` with 4xx/5xx.
 | `GET /api/episodes` | → `{repo_id, total_episodes, total_frames}` | current dataset counters (collect/dagger) |
 | `GET /api/tracker/calibration` | → `TrackerCalibrationStatus` | phase-10 (13-tracker §3 item 8); idle snapshot (`kind: none, phase: idle` + persisted `yaw_valid` / dates) when nothing runs; the same object rides `telemetry.tracker.calibration` |
 | `POST /api/tracker/calibration` | `TrackerCalibrationCommand{kind: base_station\|yaw, op: start\|capture\|validate\|install\|apply\|abort, point?}` → `TrackerCalibrationStatus` | 409 `{detail}` on an illegal transition (`CalibrationError`): `"stop the session first"`, `"backend is not libsurvive"`, too few scenes for `validate`, `install` without `validation.passed`, `apply` with non-empty `fit_checks`, `capture` after all seven points, a second `start` while one runs. Returns the post-command snapshot; progress via telemetry (§6 "Tracker calibration modes") |
+| `POST /api/hardware/arms/{arm_id}/maintenance` | `ArmMaintenanceRequest{op: clear_errors\|apply_backstops\|recover}` → `ArmMaintenanceResult{arm_id, op, path: monitor\|session, ok, detail, sdk_codes, warnings, before?, after?}` | phase-09b (core §12 `protocol/maintenance.py`; `docs/prompts/phase-09b-error-recovery.md`). **No op produces motion.** Routing (`Runtime.arm_maintenance`): 404 = `arm_id` not in `workcells.hardware`; **a hardware session owns the boxes** → the *session path* (`SessionManager.session_recovery`): `clear_errors` and `recover` both run the driver's user-initiated recovery on ITS monitor thread (`HardwareWorkcell.request_recovery(arm_id)`: `clean_error → clean_warn → motion_enable(True) → set_mode(1) → set_state(0)` → re-seed from the MEASURED position; the handler waits ≤ 10 s for a `recovery_result()` with a higher `seq` AND `user_initiated` — the driver bumps `seq` for its own auto recoveries too, and an auto sequence already running when the operator clicked completes first and must not be reported as the operator's outcome — and reports `ok` / the latch reason, e.g. `controller error 1: … - motion_enable failed (release the physical e-stop?)`), `apply_backstops` → 409 (the driver applied the volatile settings at connect), an arm outside `SessionSpec.arms` → 409; **no hardware session** → the *monitor path* (`HardwareStateMonitor.maintenance`): `clear_errors` = `clean_error` + `clean_warn` and NEVER `motion_enable`, `apply_backstops` = `backstops.apply_backstops(api, XArmDriverConfig)` with the arm's `ArmConfig` mapped through the hardware package's own `workcell._driver_cfg` (identical values to the connect-time call; §14), both queued to the arm monitor's poll thread (one `XArmAPI`, one thread; the REST threadpool thread only waits ≤ 10 s), `recover` → 409 `"no hardware session - use clear_errors"`, monitor off / paused / connecting / error → 409 (`"… needs the read-only monitor connected to 'view' (monitor error: …)"`), a second op on the same arm while one runs → 409 (`"a maintenance op is already running on 'view'"`; per-arm lock + the monitor's `maintenance_busy`). 200 whether or not `ok` (a failed `clean_error` code, a re-latched error, a timed-out poll thread all come back as `ok: false` + `detail`). `before` / `after` (monitor path only) are `ArmMonitorTelemetry` rows sampled right before / after the op with `backstops_match` computed against the config, so the UI can show `error_code` → 0 and `collision_sensitivity` / `tcp_load_kg` landing. `sdk_codes` preserves call order (`{clean_error, clean_warn}`; the `backstops.py` sequence). One INFO audit line per call: `maintenance <op> on arm <id> from <client host> via <path>: ok|FAILED - <detail>` (refusals: `refused - <detail>`) |
 
 **Not REST** (binding decision, 05-ui §4): episode new/save/discard, profile
 save / set-as-initial, joint targets, switch_arm, takeover — all ride
 `/ws/control` as `ActionMsg` and are answered by `AckMsg`. **Addendum
 (binding, 2026-09-03, phase-10):** session-less *device management* is REST
 with progress broadcast via telemetry — `/api/tracker/calibration` is the
-first instance. The Devices page has no session, `/ws/control` nacks every
+first instance, `/api/hardware/arms/{arm_id}/maintenance` (phase-09b) the
+second: it is session-less on the Welcome page's Hardware tab and, inside a
+hardware session, still an operator action on a *device* (the controller),
+not on the session, so it adds no `ActionName` and no keymap row either. The
+Devices page has no session, `/ws/control` nacks every
 action without one ("no session") and `AckMsg` carries no payload, so
 calibration adds no `ActionName` and no keymap row; the rule above still
 covers every discrete op that acts on a session.
@@ -845,7 +885,18 @@ back-pressures control. Runtime-side additions inside the same message:
 `session: {state, start_from_progress?, plan_status?, trainer_alive?}` —
 additive, UI ignores unknown fields. `ee_pose` is m + **wxyz**;
 `rail_pos_m: null` for rail-less arms; `dagger: null` outside DAgger;
-`episode: null` in teleop/inference.
+`episode: null` in teleop/inference. **`arms[*].fault_detail` /
+`arms[*].recovering`** (additive, phase-09b; core §11): the control loop's
+per-arm driver-fault text (`StateSnapshot.session_extra["arm_faults"]`, the
+SDK `x_code` title — `controller error 24: Speed Exceeds Limit` — plus the
+driver's latch reason when there is one; kept while the arm is FAULT or
+RECOVERING, `""` once RUNNING) and the re-seeded-waiting-for-the-operator
+flag (`session_extra["arm_recovering"]`), §5 item 5 / §15. A
+`StudioConflictWarning` (UFACTORY Studio live control fighting the stream)
+rides the same `fault_detail` field as `warning: close UFACTORY Studio live
+control` for 5 s without stopping the arm (`recovering: false`, `session.state`
+unchanged — core `TelemetryMsg` has no separate warnings field); a real fault
+replaces it. `session.state` reports `fault` / `recovering` per §5.
 
 **`microphone: MicrophoneTelemetry | null`** (additive, phase-11; core §11): the
 Runtime-owned `MicrophoneReader`'s newest frame + device status, present pre-
@@ -890,10 +941,24 @@ Runtime-owned objects, session-less and pre-session:
   `state` (4 = stopped / not enabled), `mode`. `stale` is derived from the
   sample age (`hardware_monitor.stale_s`); the same `error_code` fills
   `ArmStatusInfo.error_code` in `GET /api/workcell?kind=hardware` (0 without
-  a sample). **Zero writes**: the monitor's SDK allowlist is
-  `apollo_mavis_v2_hardware.monitor.READ_ONLY_SDK_METHODS` (02-hardware).
-- `paused: bool` — a hardware session owns the boxes. **Pause = release the
-  connection**: the supervisor thread polls `Runtime._hardware_session_active`
+  a sample). **Phase-09b read-backs** (every slow poll, from the SDK's
+  `collision_sensitivity` / `tcp_load` properties — the rich 30002 report
+  frame; SDK 1.18.5 has no `get_*` for them): `collision_sensitivity` (0..5),
+  `tcp_load_kg`, `tcp_load_cog_mm[3]`; **`backstops_match`** =
+  `devices.hardware_monitor.backstops_match(sample, ArmConfig)`: sensitivity
+  equal AND `|Δ tcp_load| ≤ 0.05 kg` AND every centre-of-gravity component
+  within 10 mm (`null` until the first read-back) — the Hardware tab's
+  "differs from config" amber; **`maintenance_busy`** = a maintenance op is
+  queued / executing on that arm's monitor (§13.1). **Zero writes unless an
+  explicit maintenance request**: the polling allowlist is
+  `apollo_mavis_v2_hardware.monitor.READ_ONLY_SDK_METHODS` /
+  `READ_ONLY_SDK_ATTRS`, the per-op write sets `MAINTENANCE_SDK_METHODS`
+  (02-hardware §8.6).
+- `paused: bool` — a hardware session owns the boxes (the UI's only "a
+  hardware session exists" signal, 05-ui §8.2; an INERT monitor — `enabled:
+  false` / no hardware package — has nothing to release and reports the
+  predicate directly). **Pause = release the connection**: the supervisor
+  thread polls `Runtime._hardware_session_active`
   every 0.5 s and `disconnect()`s every arm monitor on the rising edge (status
   `paused`, last sample kept), `start()`s them again on the falling edge; two
   SDK clients on one control box are unevidenced, so the monitor and a
@@ -1063,11 +1128,17 @@ workcells:                   # POST /api/session picks by requested kind
     digital_twin_scene: mavis_v2        # twin for planning/gating; ArmConfig.microphone: true
                                         #   on the Perception Arm adds the mic collision body (03-sim §4)
     arms:                               # exactly two control boxes (2026-09-04), one NIC each
-      - {id: grip, ip: 192.168.1.201, base_in_world: {}, gripper: xarm_g2}  # Manipulation Arm:
-                                                                            #   Gripper G2 + wrist
-                                                                            #   cam; default teleop arm
+      - {id: grip, ip: 192.168.1.201, base_in_world: {}, gripper: xarm_g2,  # Manipulation Arm:
+         tcp_load_kg: 0.95, tcp_load_cog_mm: [0, 0, 60],                    #   Gripper G2 + wrist
+         collision_sensitivity: 3}                                          #   cam; default teleop arm
       - {id: view, ip: 192.168.2.219, base_in_world: {}, gripper: none,     # Perception Arm: wrist
-         microphone: true}                                                  #   D435 + RØDE NT-USB Mini
+         microphone: true,                                                  #   D435 + RØDE NT-USB Mini
+         tcp_load_kg: 0.55, tcp_load_cog_mm: [0, 0, 90],
+         collision_sensitivity: 3}
+                                        # tcp_load_* are estimates accepted 2026-09-05 (not weighed; phase-09b):
+                                        #   G2 + D435i + mount ≈ 0.95 kg @ (0, 0, 60) mm, D435i +
+                                        #   NT-USB Mini + mount ≈ 0.55 kg @ (0, 0, 90) mm; sensitivity
+                                        #   3 on both; reduced_tcp_boundary_mm / expected_sn unset
     cameras:                                # both wrist cams are RealSense D435i used as UVC
                                             # colour cameras: by USB serial (by-id collides
                                             # between the depth and colour interfaces), YUYV
@@ -1218,6 +1289,26 @@ the twin shows until phase-09 homes them; `joint1_offset_rad` / `rail_flip`
 exist only to diagnose a convention mismatch on the live cell and stay at their
 identity defaults.
 
+**Controller-side backstops per arm (phase-09b; core §7, 02-hardware §6).**
+`workcells.hardware.arms[*].tcp_load_kg` / `tcp_load_cog_mm` /
+`collision_sensitivity` (0..5, default 3) / `reduced_tcp_boundary_mm`
+(optional `[x_max, x_min, y_max, y_min, z_max, z_min]`, None = Reduced mode
+off) / `expected_sn` (None: both lab boxes read the model code `XS1305`) are
+the ONLY source of the values written to a control box: the hardware driver
+applies them at every connect (`backstops.apply_backstops`, order tcp_load →
+gravity → sensitivity → self-collision + tool model → optional reduced
+boundary → rebound off) and the session-less `apply_backstops` maintenance op
+(§13.1) writes the very same values through the same `ArmConfig →
+XArmDriverConfig` mapping (`apollo_mavis_v2_hardware.workcell._driver_cfg`,
+resolved lazily by `devices/hardware_monitor.py`; the `driver_cfg_factory`
+seam replaces it in tests). They are volatile on the controller (a reboot
+drops them; the boxes were found at 0 kg / sensitivity 3 and 1 on
+2026-09-04), never `save_conf()`ed; the monitor reads them back
+(`backstops_match`, §13.3). A YAML value out of range fails
+`load_runtime_config` with the core `ConfigError` (`/workcells/hardware/arms/<i>/collision_sensitivity`).
+`configs/mavis_v2.yaml` carries the PROVISIONAL lab payloads above with
+'estimate accepted by the user 2026-09-05 (not weighed)' comments; `tests/test_configs.py` pins them.
+
 `tracker.*` is owned by `Runtime` for the process lifetime (`TrackerReader`
 thread + live `TrackerSettings`); the `tracker_settings` action mutates
 yaw/scale/rotation and the live filter fields at runtime and telemetry echoes
@@ -1238,10 +1329,22 @@ mink 1.3.0, lerobot ≥0.6 pinned, xArm-Python-SDK 1.18.5.
 
 ## 15. Error handling & recovery matrix
 
+Status (phase-09b, 2026-09-04): the first two rows and the Studio-conflict
+row are **implemented and fake-tested** (`tests/test_fault_recovery_loop.py`,
+`tests/test_maintenance_api.py` over `tests/fakes.EventFakeWorkcell`); the
+hardware session itself still lands with phase-09. Mechanism: every tick the
+loop calls `workcell.drain_events()` (core `WorkcellInterface`, default `[]`;
+`HardwareWorkcell` returns every driver's events in `t_mono` order) and
+dispatches BY CLASS NAME (`control.loop.FAULT_EVENT_NAMES`; the runtime never
+imports the optional hardware package's event types — the fakes mirror them
+field-for-field and a test pins the names against the hardware package).
+
 | Failure | Detection | Response |
 |---|---|---|
-| xArm controller error (C22 self-collision, C24 speed, C31 collision, C35 boundary…) | nonzero `error_code` in ArmState / command return code 1 | Arm → FAULT; stop sending; recovery worker: `clean_error → motion_enable(True) → set_mode(1) → set_state(0)`; **re-seed** servo target from `get_state()`; watchdog AWAIT_EMPTY; other arms hold |
-| Command return 9 / −2 (state not ready) | per-command code | same recovery path (controller silently drops to mode 0 on error) |
+| xArm controller error (C22 self-collision, C24 speed, C31 collision, C35 boundary…) | driver `FaultEvent` via `workcell.drain_events()` (the driver's 5 Hz monitor / servo return code 1 funnel into it; `ArmState.error_code` ≠ 0 holds the arm meanwhile) | THAT arm → FAULT: `ArmSender.pause()` (drains its slot, dispatches nothing), the loop holds it (`arm_stopped`) and publishes no target for it, drops its plan / jog / teleop seed, releases the clutch anchors if it was the clutched arm; `session.state = fault`, `arms[*].fault_detail` = the SDK `x_code` title (+ the driver's latch reason); **other arms keep running**. Recovery is the driver's (auto within its 3/30 s budget for RECOVERABLE codes, else the operator's `recover` click, §13.1): `clean_error → clean_warn → motion_enable(True) → set_mode(1) → set_state(0)` → `ReseedEvent` + `RecoveredEvent` → the loop **re-seeds** from `get_state()` (`_last_cmd`, IK warm state, gate `_last_safe`, watchdog AWAIT_EMPTY), resumes the sender and holds the arm in RECOVERING until the first tick whose inputs hold nothing live (clutch released / keys up or watchdog-latched) → RUNNING; a latch `FaultEvent` (`motion_enable failed (release the physical e-stop?)`, budget exhausted, …) keeps FAULT until the next click |
+| Command return 9 / −2 (state not ready) | per-command code → driver `FaultEvent(source="servo")` | same recovery path (controller silently drops to mode 0 on error) |
+| Operator "Clear errors & resume" (Cockpit) / "Clear errors" (Hardware tab) | `POST /api/hardware/arms/{arm_id}/maintenance` | session: `request_recovery` on the driver's monitor thread, result awaited ≤ 10 s via `recovery_result()`; no session: `clean_error` + `clean_warn` on the read-only monitor's poll thread, never `motion_enable` (§13.1). Neither moves the arm; the linear-track homing IS motion and is not a maintenance op (phase-09) |
+| UFACTORY Studio "Live control" grabs mode/state (no error code) | driver `StudioConflictWarning` (it pauses, re-enters mode 1 once, re-seeds; a second grab within 5 s latches) | telemetry warning: `arms[*].fault_detail = "warning: close UFACTORY Studio live control"` for 5 s, nothing stopped; the eventual latch arrives as a `FaultEvent` (row 1) |
 | Rail comm loss (controller error 111) | error code | rail target frozen; arm control continues; telemetry flags rail fault |
 | Control WS silent > 0.2 s | InputWatchdog | ramp twist → 0 over 0.1 s; resume needs empty held set (§8) |
 | Controller WS disconnect | `WebSocketDisconnect` | immediate zero-twist + drop held state; session stays RUNNING; next connection becomes controller and re-syncs via `GET /api/session` + hello epoch |
@@ -1258,12 +1361,23 @@ mink 1.3.0, lerobot ≥0.6 pinned, xArm-Python-SDK 1.18.5.
 
 Hardware-free by default; pytest. Three tiers:
 
-1. **Unit (no extras)** — `FakeWorkcell` (`tests/fakes.py`: in-memory
+1. **Unit (no extras)** — core `testing.FakeWorkcell` (in-memory
    Arm/Camera/Workcell interface impls, synthetic frames, scriptable error
-   codes) + `FakeTwin` (scriptable `check`/`plan`); deterministic time via an
-   injected `Clock` (control loop, watchdog, recorder pacing all take it).
+   codes) extended by `tests/fakes.py` `EventFakeWorkcell` (phase-09b:
+   scriptable driver events `FaultEvent` / `ReseedEvent` / `RecoveredEvent` /
+   `StudioConflictWarning` mirroring the hardware package by name and field,
+   `fault(arm, code)`, `request_recovery` / `recovery_result` with a latency
+   and a scriptable latch) + `FakeTwin` (scriptable `check`/`plan`);
+   deterministic time via an injected `Clock` (control loop, watchdog,
+   recorder pacing all take it).
    Cases: watchdog (stale 0.21 s ⇒ ramp; resume blocked until empty held set;
-   recovery ⇒ AWAIT_EMPTY + re-seed); teleop math (held→twist per keymap,
+   recovery ⇒ AWAIT_EMPTY + re-seed); driver faults
+   (`test_fault_recovery_loop.py`: a FaultEvent stops only that arm — sender
+   paused, no publish, plan/jog dropped — sibling keeps moving; re-seed from
+   MEASURED; RECOVERING held while the device clutch stays down, released →
+   RUNNING, re-grip = zero-delta engage; WS keys stay behind the watchdog
+   latch; Studio warning lingers 5 s without stopping; event names pinned
+   against `apollo_mavis_v2_hardware.events`); teleop math (held→twist per keymap,
    leash + dq clamps, rail [0, 0.65], rail keys ignored for rail-less active
    arm, Tab cycling server-side); jog/goto (slew limit, jog>threshold
    rejected, goto routes via `FakeTwin.plan`, held key cancels a plan); gate
@@ -1278,7 +1392,17 @@ Hardware-free by default; pytest. Three tiers:
    (`struct.unpack("<dI", buf[:12])` + JPEG magic); unknown stream id closes
    1008; pre-session camera preview exists, `sim` does not; MJPEG shares the
    WS JPEG payload byte-for-byte; POST /api/session kind honoring + 409
-   matrix; served keymap == core keymap.
+   matrix; served keymap == core keymap; arm maintenance
+   (`test_maintenance_api.py`, fake read-only monitor + a hand-installed
+   hardware session over `EventFakeWorkcell`): monitor path (`clear_errors`
+   writes exactly `clean_error` + `clean_warn`, `apply_backstops` the
+   `backstops.py` order with the `ArmConfig → XArmDriverConfig` values,
+   `before`/`after` rows + `backstops_match`, telemetry read-backs flip),
+   session path (`recover` / `clear_errors` = driver recovery, FAULT →
+   RECOVERING → RUNNING on telemetry, latch stays FAULT, 10 s timeout),
+   409 matrix (recover without session, apply_backstops in session, arm
+   outside the session, monitor off/paused/error, busy, no recovery channel),
+   404 unknown arm, 422 unknown op.
 3. **Sim-backed e2e** (`[sim]` extra, CI with EGL): (a) sim session, stream
    `KeysMsg` W for 1 s ⇒ EE moved +x, telemetry ≥ 20 Hz; (b) collect: record
    2 episodes (one saved, one discarded) to a tmpdir, `finalize`, re-open

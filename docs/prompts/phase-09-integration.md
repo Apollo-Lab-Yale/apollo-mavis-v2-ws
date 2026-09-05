@@ -13,6 +13,13 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
   真机只读状态监视 `telemetry.hardware_monitor` + 孪生叠加窗口 `grip_wrist_align` /
   `view_wrist_align`）已落地——本阶段所有"twin 渲染 vs 真机相机"的对拍都用这两个窗口判断，
   不再另写渲染脚本。
+- **phase-09b**（`phase-09b-error-recovery.md`，2026-09-04：控制器错误清除 / 恢复接口 + 控制器侧安全
+  参数）已落地——本阶段的"错误恢复课目"与 backstops 回读都以它的 UI 按钮 / REST 为操作入口：无 session
+  时 Hardware 页签臂卡片 **Clear errors**（`clean_error` + `clean_warn`，不使能）与 **Apply safety
+  settings**（`apply_backstops`，参数来自 `configs/mavis_v2.yaml` 的 `ArmConfig`，监视器回读
+  `backstops_match`）；真机 session 中 Cockpit 故障横幅 **Clear errors & resume**（驱动
+  `request_recovery`：清错 → 使能 → servo → 从实测位置重播种，之后重新握持 clutch 才恢复运动）。
+  三者都不产生运动（2026-09-04 实测）。
 - 必读设计文档：
   - `docs/design/00-overview.md` §6（安全分层）、§7（bring-up）、§9（性能目标）
   - `docs/design/02-hardware.md`（netsetup/驱动真机行为）
@@ -38,7 +45,11 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
   1. 单臂、无 rail、低速：bring-up、controller backstops 生效并**回读**
      （`set_tcp_load` 最先 → `set_collision_sensitivity(3)` → self-collision +
      tool model → 可选 reduced-mode TCP boundary → `set_collision_rebound(False)`；
-     `get_reduced_states()` 回读入会话记录、手拍触发 C31）、100 Hz servo 流稳定性。
+     参数来自 `ArmConfig`（phase-09b：`configs/mavis_v2.yaml` grip 0.95 kg @ (0, 0, 60) mm、
+     view 0.55 kg @ (0, 0, 90) mm、灵敏度 3——**暂定值，先称重再定**）；会话前可在 Hardware 页签
+     **Apply safety settings** 一键应用，监视器回读 `hardware_monitor.arms[*].collision_sensitivity /
+     tcp_load_kg / backstops_match`；会话中 `get_reduced_states()` 回读入会话记录、手拍触发 C31）、
+     100 Hz servo 流稳定性。
   2. rail 自动探测 + 归零 + `command_rail` 钳制验证。
   3. gripper（classic 与 G2 各验一台，若在场）。
   4. 数字孪生对真机：twin fidelity — 6 个示教位姿（贴近桌面/rail/他臂），twin
@@ -60,9 +71,14 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
   按现场布局复核 `geom_inflation_m`（默认 0.008，紧凑桌面误报则考虑对凹形链节
   做凸分解而不是砍膨胀）。
 - **watchdog/恢复真机课目**：拔控制 WS（模拟浏览器崩溃）⇒ 斜坡停（0.2 s deadman +
-  0.1 s ramp，总停 ≤ 0.3 s）；触发一次 controller 错误（如轻推碰撞检测）⇒ 驱动自动
-  恢复序列 + 流重播种，臂不跳变；物理急停中途按下 ⇒ 恢复后首个下发步距测量位
-  < 1 mm + UI ack 流程。
+  0.1 s ramp，总停 ≤ 0.3 s）；触发一次 controller 错误（如轻推碰撞检测 C31）⇒ session 进入
+  FAULT、该臂停发、另一臂继续，Cockpit 出现红色 `FaultBanner`（"CONTROLLER FAULT — <臂> C31 …"）；
+  可恢复码在驱动预算内（3 次 / 30 s）自动走恢复序列 + 从实测位置重播种（横幅转琥珀 RECOVERING），
+  预算耗尽 / 不可恢复码 / 急停后 LATCHED 则点横幅的 **Clear errors & resume**（phase-09b，
+  `POST /api/hardware/arms/{arm_id}/maintenance {op: recover}`）；两种情况都要**重新握持 clutch /
+  松开所有键**才回到 RUNNING，臂不跳变。物理急停中途按下 ⇒ 松开急停后点 **Clear errors & resume**，
+  恢复后首个下发步距测量位 < 1 mm + UI ack 流程。无 session 时的控制器错误（如 Perception Arm 的
+  C19）用 Hardware 页签臂卡片的 **Clear errors**（不使能、不运动）。
 - **submodule 化**：五个子仓各自打 tag / 推远端后，在 ws 仓
   `git submodule add <url> apollo-mavis-v2-<name>` × 5，更新 `.gitignore`
   （移除子仓忽略项）、`README.md`、`CLAUDE.md`（克隆说明改为
@@ -105,12 +121,16 @@ NVENC 视频编码优化（除非验收不达标）。
       < 2 ms（overview §9），twin check 实测落在 0.24–0.75 ms 带内（3 臂时）。
 - [ ] 双臂逼近课目（10% 速度）：gate 在 hull 接触前 block（UI 红横幅 + 被钳命令
       不下发）；解除后恢复顺滑；deep-penetration 课目 IK 恢复梯退出无 C24/C31。
-- [ ] backstop 回读：`get_reduced_states()` 与配置一致；sensitivity 3 下手拍触发
-      C31。
+- [ ] backstop 回读：`get_reduced_states()` 与配置一致；无 session 时监视器回读
+      `hardware_monitor.arms[*].backstops_match true`（灵敏度 3、`tcp_load_kg` ≈ 配置，
+      phase-09b **Apply safety settings** 之后）；sensitivity 3 下手拍触发 C31。
 - [ ] watchdog 课目：断 WS 后臂总停 ≤ **0.3 s**（0.2 s deadman + 0.1 s ramp）；
       恢复连接后必须先空 held 集才恢复运动。
-- [ ] 错误恢复课目：人为触发 C31/C22 后驱动自动恢复且**重播种自当前位姿**（无跳变）；
-      物理急停恢复后首个下发步 < 1 mm；UI 错误码 chip 全程正确。
+- [ ] 错误恢复课目：人为触发 C31/C22 后驱动自动恢复且**重播种自当前位姿**（无跳变），
+      Cockpit `FaultBanner` FAULT（红）→ RECOVERING（琥珀）→ 重新握持 clutch 后消失；预算耗尽 /
+      物理急停后用横幅的 **Clear errors & resume**（phase-09b）恢复，首个下发步 < 1 mm；
+      无 session 时 Hardware 页签 **Clear errors** 清 C19 后 `error_code` 回 0、关节不动
+      （< 1e-3 rad）；UI 错误码 chip（红色 `C<code>`）全程正确。
 - [ ] twin 校准：6 个示教位姿上 twin `clearance()` 与实测差 ≤ **4 mm**（δ/2）；
       twin FK TCP vs 控制器上报 TCP 误差 < 5 mm；rail 移动时 twin rail 位姿跟踪
       实测 ≤ 5 mm；twin 渲染与真机相机对拍无明显姿态错位——以 phase-09a 的 `*_align` 叠加窗口为准：

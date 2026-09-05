@@ -1,6 +1,10 @@
 # 02 — apollo-mavis-v2-hardware (`apollo_mavis_v2_hardware`)
 
-Status: v0.3 (2026-09-04 phase-09a: §8.5 read-only state monitor, §12 SDK
+Status: v0.4 (2026-09-04 phase-09b: §8.6 explicit maintenance channel on the
+monitor — "zero writes unless an explicit maintenance request", §3.5/§3.6
+`request_recovery()` / `recovery_result()`, §6 backstop parameters from core
+`ArmConfig` + read-back, §9 `drain_events()` / `request_recovery(arm_id)`, §13;
+v0.3 2026-09-04 phase-09a: §8.5 read-only state monitor, §12 SDK
 1.18.5 fixes from the first read-only contact with the real boxes; v0.2
 2026-09-04: §7.4 NM dispatcher, state-path precedence, permissions; v0.1
 2026-09-01). Conforms to `00-overview.md` v0.3 (spine). Ground
@@ -22,6 +26,7 @@ apollo-mavis-v2-hardware/
 │   ├── grippers.py             # GripperBackend ABC + Classic/G2/No (§4)
 │   ├── rail.py                 # RailController (§5)
 │   ├── monitor.py              # ArmStateMonitor: read-only controller poller (§8.5)
+│   │                           #   + explicit maintenance channel (§8.6)
 │   ├── backstops.py            # controller-side safety params (§6)
 │   ├── events.py               # DriverEvent union: FaultEvent, RecoveredEvent,
 │   │                           #   ReseedEvent, StudioConflictWarning, RailEvent,
@@ -102,7 +107,15 @@ class XArmDriver(ArmInterface):
         # api_factory defaults to xarm.wrapper.XArmAPI; tests inject FakeXArmAPI
     phase: DriverPhase          # property: §3.5 machine phase
     def drain_events(self) -> list[DriverEvent]: ...  # bounded deque pickup
+    def request_recovery(self) -> None: ...           # phase-09b: user recovery on the
+                                                      #   monitor thread (§3.5, §3.6)
+    def recovery_result(self) -> RecoveryResult | None: ...  # last sequence's outcome
     tick_stats: TickStats       # property: jitter p50/p99, late ticks, faults
+
+@dataclass(frozen=True)
+class RecoveryResult:           # set at the end of every recovery sequence
+    seq: int; ok: bool; error_code: int; detail: str = ""   # detail = latch reason
+    user_initiated: bool = False; t_mono: float = 0.0
 ```
 
 `dof` = 8 if `has_rail` else 7; `gripper_force_capable` True only for
@@ -250,7 +263,23 @@ Classification (controller error codes):
 `LATCHED`: streamer paused, gripper/rail queues cleared, every `command_*`
 raises `ArmFaultedError` (hardware-local, subclasses core `CommandError`);
 state reporting continues (UI shows the arm red +
-SDK error message). Only explicit `clear_errors()` re-enters `RECOVERING`.
+SDK error message). Only an explicit user action — `clear_errors()` or
+`request_recovery()` — re-enters `RECOVERING`.
+
+**User-initiated recovery (phase-09b).** `request_recovery()` only sets
+`_user_recovery_pending`; `_MonitorThread.step()` services it first (before a
+pending auto fault): budget + C24 backoff reset, streamer paused, then
+`_recover(user_initiated=True)` — the same binding sequence, bypassing
+classification and the budget, so it also works from `LATCHED` after an
+UNRECOVERABLE code (e-stop released, C19 cleared in Studio, …) and from
+`STREAMING` (then it is a re-seed). Its `FaultEvent` carries `source="user"`
+and the controller error still latched at capture; success is
+`ReseedEvent` + `RecoveredEvent`, failure a latch `FaultEvent`
+(`motion_enable failed (release the physical e-stop?)`, …). Every sequence
+(auto or user) ends by publishing a `RecoveryResult` (`recovery_result()`),
+so a waiter (REST) can observe the outcome without draining the events the
+control loop consumes. `request_recovery()` raises `CommandError` when the
+driver is not connected. It never runs SDK calls on the caller's thread.
 
 ### 3.6 stop(), clear_errors(), disconnect()
 
@@ -258,8 +287,11 @@ SDK error message). Only explicit `clear_errors()` re-enters `RECOVERING`.
 this ≤3 s), clear queues, phase → `LATCHED` (`user_stop`); does **not**
 clear errors and is not hardware STO — the physical e-stop button remains
 the real emergency path. `clear_errors()`: from `LATCHED` only; runs §3.5
-recovery — with the physical e-stop still engaged, `motion_enable` fails and
-it stays `LATCHED` ("release e-stop" event). `disconnect()`: stop streamer +
+recovery synchronously ON THE CALLER's thread — with the physical e-stop still
+engaged, `motion_enable` fails and it stays `LATCHED` ("release e-stop"
+event). From another thread (the runtime's REST handler) use
+`request_recovery()` instead: one `XArmAPI` must not be driven from two
+threads, so the sequence runs on the driver's monitor thread (§3.5). `disconnect()`: stop streamer +
 monitor (join, 0.5 s timeouts), best-effort `set_mode(0); set_state(0)`,
 gripper `close()`, `api.disconnect()`; idempotent, never raises (logs).
 
@@ -352,19 +384,47 @@ its own motion at `rail_speed_mm_s`.
 
 Layer 3 of overview §6 — controller-enforced limits under the twin gate
 (the controller knows nothing about other arms or the rail).
-`apply_backstops(api, cfg) -> list[str]` runs at connect, returns non-fatal
-warnings, ordered:
+
+**Parameters come from the core `ArmConfig`** (phase-09b): `tcp_load_kg`,
+`tcp_load_cog_mm`, `collision_sensitivity` (0..5, default 3),
+`reduced_tcp_boundary_mm` (optional `[x_max, x_min, y_max, y_min, z_max,
+z_min]`, None = reduced mode off) and `expected_sn`, mapped field-for-field
+into `XArmDriverConfig` by `workcell._driver_cfg` (an older core without the
+three new fields keeps the driver defaults). The lab values are in the runtime's
+`configs/mavis_v2.yaml` and are estimates the user accepted on 2026-09-05 without weighing (whole-arm collision detection is what matters to the lab):
+Manipulation Arm (G2 + D435i + mount) ≈ 0.95 kg at (0, 0, 60) mm, Perception
+Arm (D435i + RØDE NT-USB Mini + mount) ≈ 0.55 kg at (0, 0, 90) mm, sensitivity
+3 on both. As found on 2026-09-04 both boxes reported `tcp_load` 0 kg and
+sensitivity 3 (grip) / 1 (view) — wrong for torque-estimate collision detection,
+hence the operator-facing `apply_backstops` maintenance op (§8.6).
+
+`apply_backstops(api, cfg, codes=None) -> list[str]` runs at every connect
+(§3.2 step 3) and on an explicit monitor maintenance request (§8.6); it
+returns non-fatal warnings (`"<call> returned <code>"`) and, when `codes` (a
+dict) is passed, records every SDK return code by call name in call order.
+Order (`BACKSTOP_SDK_METHODS`; `expected_backstop_sequence(cfg)` drops the two
+reduced-mode calls when no boundary is configured):
 (1) `set_tcp_load(cfg.tcp_load_kg, list(cfg.tcp_load_cog_mm))` +
 `set_gravity_direction([0, 0, -1])` **first** — collision detection is
 torque-estimate based, wrong payload = false pos/negatives;
-(2) `set_collision_sensitivity(3..4)` — volatile, re-applied every connect;
-never `save_conf()` (controllers stay config-clean);
+(2) `set_collision_sensitivity(cfg.collision_sensitivity)` — volatile,
+re-applied every connect; never `save_conf()` (controllers stay config-clean);
 (3) `set_self_collision_detection(True)` + `set_collision_tool_model(1)`
 classic / `(9)` G2 / `(0)` none;
-(4) optional reduced mode (off by default): `set_reduced_tcp_boundary(mm)` +
-`set_reduced_max_tcp_speed(...)`, then `set_reduced_mode(True)` **last**;
+(4) optional reduced mode (off by default): `set_reduced_tcp_boundary(mm)`,
+then `set_reduced_mode(True)` **last**;
 (5) `set_collision_rebound(False)` — stop-and-latch, not bounce
 (C22/C31/C35 = RECOVERABLE with budget, §3.5).
+
+**Read-back.** SDK 1.18.5 has no `get_tcp_load` / `get_collision_sensitivity`;
+`XArmAPI.tcp_load` (`[kg, [x, y, z] mm]`) and `XArmAPI.collision_sensitivity`
+are properties filled by the SDK report thread from bytes 115..132 of the
+`normal`/`rich` report frame (`x3/base.py:1635-1636, 1784-1787`) — NOT from
+the `real` 30003 stream the session driver uses, so the driver cannot read them
+back; the monitor (§8.5, SDK default `report_type='rich'`) reports them every
+slow round as `collision_sensitivity`, `tcp_load_kg`, `tcp_load_cog_mm`, and
+the runtime compares them with the config (`backstops_match`). The values are
+volatile: a controller reboot drops them, the next connect re-applies them.
 
 ## 7. netsetup module (`netsetup/`)
 
@@ -624,7 +684,8 @@ shows real streams at reduced ~15 fps per the binding video protocol), so
 
 Session-less view of the real cell for the runtime (`telemetry.hardware_monitor`,
 the Welcome page's error chips, the digital-twin overlay streams `*_align`).
-One `ArmStateMonitor` per arm; **it never commands the controller**.
+One `ArmStateMonitor` per arm; **it never commands the controller on its own —
+zero writes unless an explicit maintenance request (§8.6)**.
 
 ```python
 ArmMonitorStatus = Literal["off", "connecting", "running", "stale", "paused", "error"]
@@ -640,6 +701,9 @@ class ArmMonitorSample:            # data part of core ArmMonitorTelemetry + t_m
     rail_pos_m: float | None       # None unless on_zero == 1 AND is_enabled == 1
     rail_raw_mm: float | None      # raw register, always when present
     gripper_open_frac: float | None; gripper_raw: float | None  # None for "none"
+    collision_sensitivity: int | None  # phase-09b read-backs, slow rounds (§6):
+    tcp_load_kg: float | None          #   XArmAPI.collision_sensitivity / .tcp_load
+    tcp_load_cog_mm: tuple[float, ...] #   properties (rich report frame); () until read
 
 class ArmStateMonitor:
     def __init__(self, arm_id, ip, *, gripper: Literal["xarm", "xarm_g2", "none"],
@@ -651,28 +715,38 @@ class ArmStateMonitor:
     def disconnect(self, timeout=2.0) -> bool    # release the box; status "paused" (hand-over)
     def join(self, timeout=None) -> bool         # wait for the poll thread (late release)
     def snapshot(self) -> ArmMonitorSample | None
+    def maintenance(self, op: MaintenanceOp, driver_cfg: XArmDriverConfig | None = None,
+                    timeout_s: float = 10.0) -> MaintenanceOutcome   # §8.6
+    maintenance_busy: bool                       # a request is queued / executing
     status: ArmMonitorStatus; detail: str; age_s: float | None; connected: bool
 ```
 
 - **Connection**: `XArmAPI(ip, is_radian=True, do_not_open=True)` then
-  `connect()` (SDK defaults otherwise, i.e. the report stream stays on so the
-  `state`/`mode` properties are live). Thread `hw.{arm_id}.monitor-ro` polls
+  `connect()` (SDK defaults otherwise, i.e. the `rich` report stream on 30002
+  stays on so the `state`/`mode`/`tcp_load`/`collision_sensitivity` properties
+  are live). Thread `hw.{arm_id}.monitor-ro` polls
   at `poll_hz`: `get_servo_angle(is_radian=True)`, `get_position(is_radian=True)`
   (mm → m via `units`), `get_err_warn_code()`, `api.state`, `api.mode`; every
-  ≈2 Hz additionally `get_linear_track_registers()` (when `expect_rail`) and the
+  ≈2 Hz additionally `get_linear_track_registers()` (when `expect_rail`), the
   gripper reading — G2 through **the same call and conversion as
   `G2Gripper.poll()`** (`get_gripper_g2_position()` → `units.g2_mm_to_frac`),
-  classic through `get_gripper_position()` → `units.pulse_to_frac`, `none` skipped.
+  classic through `get_gripper_position()` → `units.pulse_to_frac`, `none` skipped —
+  and the safety read-backs `api.collision_sensitivity` / `api.tcp_load` (§6).
   `detail` carries the SDK's error title (`controller error 19: End Effector
   Communication Error`), a controller warning, or read problems.
-- **Zero writes**: `monitor.READ_ONLY_SDK_METHODS = {connect, disconnect,
-  get_servo_angle, get_position, get_err_warn_code, get_linear_track_registers,
+- **Zero writes unless an explicit maintenance request**:
+  `monitor.READ_ONLY_SDK_METHODS = {connect, disconnect, get_servo_angle,
+  get_position, get_err_warn_code, get_linear_track_registers,
   get_gripper_g2_position, get_gripper_position}` and `READ_ONLY_SDK_ATTRS =
-  {connected, state, mode}` are the complete list of `XArmAPI` members touched.
-  `tests/test_monitor.py` wraps the fake in a call-logging proxy and asserts
-  nothing outside the lists is ever called (in particular no
-  `motion_enable/set_mode/set_state/clean_error/clean_warn/set_*`) and that
-  the fake's state/mode/error are unchanged afterwards.
+  {connected, state, mode, collision_sensitivity, tcp_load}` are the complete
+  list of `XArmAPI` members the polling touches; `MAINTENANCE_SDK_METHODS`
+  (§8.6) is the complete per-operation write set. `tests/test_monitor.py`
+  wraps the fake in a call-logging proxy and asserts that WITHOUT a request
+  nothing outside the read lists is ever called (in particular no
+  `motion_enable/set_mode/set_state/clean_error/clean_warn/set_*`) and the
+  fake's state/mode/error are unchanged, that `clear_errors` writes exactly
+  `[clean_error, clean_warn]` and `apply_backstops` exactly the `backstops.py`
+  sequence in order — and nothing else either way.
 - **Pause = disconnect**: a hardware session owns the boxes exclusively (two SDK
   clients on one control box are unevidenced). The runtime calls
   `disconnect()` before its session bring-up (status `paused`, last sample kept,
@@ -716,6 +790,71 @@ class ArmStateMonitor:
   stop the monitor; (d) while `0 < error_code <= 17` the SDK stops refreshing
   its cached joints from the report stream, `get_servo_angle` still asks the box.
 
+## 8.6 Maintenance channel (`ArmStateMonitor.maintenance`, phase-09b)
+
+Operator-triggered, session-less controller maintenance for the UI's Hardware
+tab ("Clear errors", "Apply safety settings"). Design rules: (a) **nothing
+moves** — `clear_errors` never enables (brakes stay engaged; measured
+2026-09-04: `clean_error()` on the Perception Arm cleared C19 with ≤ 5e-5 rad
+joint change), and enabling + servo mode (`recover`) is refused here because it
+needs a session driver; (b) **one `XArmAPI`, one thread** — the request is
+queued and executed by the poll thread between polls, the caller only waits;
+(c) **auditable** — the outcome lists every SDK return code in call order plus
+a sample right before and right after the operation.
+
+```python
+MaintenanceOp = Literal["clear_errors", "apply_backstops", "recover"]
+MAINTENANCE_SDK_METHODS = {
+    "clear_errors":    {"clean_error", "clean_warn"},          # in that order
+    "apply_backstops": set(backstops.BACKSTOP_SDK_METHODS),   # §6 order, cfg-dependent
+    "recover":         set(),                                  # refused: needs a session
+}
+
+@dataclass(frozen=True)
+class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtime adds path)
+    arm_id: str; op: str; ok: bool; detail: str = ""
+    sdk_codes: dict[str, int]   # SDK call -> return code, call order
+    warnings: tuple[str, ...]   # apply_backstops non-fatal codes
+    before: ArmMonitorSample | None; after: ArmMonitorSample | None
+```
+
+- **Execution** (poll thread): full slow poll → `before`; the op; for
+  `apply_backstops` wait ≤ `BACKSTOP_READBACK_SETTLE_S` (0.5 s) until the rich
+  report frame echoes the new sensitivity/payload (the `set_*` replies arrive
+  before the ~10 Hz frame does); full slow poll → `after` (rail, gripper,
+  sensitivity, payload refreshed at once); complete the request; back to polling
+  without a sleep. `maintenance()` wakes the poll thread immediately instead of
+  waiting out the current period.
+- **Outcome**: `clear_errors` — `ok` iff both codes are 0 AND `after.error_code
+  == 0` (a controller error that re-latches right away — a persisting hardware
+  fault — is reported as `ok=False`, "… re-latched right after clearing");
+  `detail` names what was cleared (`cleared controller error 19: End Effector
+  Communication Error and controller warning 11`) or says nothing was latched.
+  `apply_backstops` — `ok` iff every code is 0 (`warnings` lists the nonzero
+  ones; `detail` = "safety settings applied: sensitivity 3, payload 0.95 kg at
+  (0, 0, 60) mm" [+ ", reduced-mode boundary on"], with a read-back note if the
+  frame has not caught up yet).
+- **Refusals** (`ok=False`, no SDK call): `recover` ("recover needs a session");
+  `apply_backstops` without a `driver_cfg`; monitor `off` / `paused` /
+  `connecting` / `error` ("not connected to <ip> (monitor paused: released for
+  hand-over)"); unknown op → `ValueError`.
+- **Failure paths**: an SDK exception inside the op completes the request with
+  `ok=False` (`"clear_errors failed: Exception: …"`, codes so far) and the
+  monitor treats the box as lost (client released, reconnect with backoff).
+  Pending (queued) requests fail when the box is lost, when `stop()`/`disconnect()`
+  run ("monitor paused: released for hand-over"), or when the monitor is
+  superseded. A request already EXECUTING re-checks the hand-over between its
+  SDK calls: if `stop()`/`disconnect()` landed during the before-sample it
+  refuses with the same text and writes nothing; if the writes already went out
+  it skips the after-sample and reports them (`after=None`, detail suffixed
+  "(monitor paused: released for hand-over before the read-back)"). The shutdown
+  itself never disconnects the client under a mid-write op — it waits for the op
+  (bounded by `STALE_THREAD_JOIN_S`) before releasing the box, so a session
+  driver taking over never finds the monitor still writing. A caller timeout (`timeout_s`, default 10 s)
+  abandons the request: `ok=False` "… timed out …", the late result is dropped,
+  polling continues. `maintenance_busy` is true while a request is queued or
+  executing (telemetry `maintenance_busy`).
+
 ## 9. HardwareWorkcell assembly & bring-up (`workcell.py`)
 
 ```python
@@ -736,11 +875,26 @@ class HardwareWorkcell(WorkcellInterface):
     def start(self) -> None               # core ABC (core §5.1) — delegates to bring_up()
     def stop(self) -> None                # core ABC — delegates to shutdown(); idempotent
     def states(self) -> dict[str, ArmState]   # core ABC — per-arm get_state()
+    def drain_events(self) -> list[DriverEvent]   # phase-09b: every driver's events, t_mono order
+    def request_recovery(self, arm_id: str) -> None   # -> XArmDriver.request_recovery (§3.5)
+    def recovery_result(self, arm_id: str) -> RecoveryResult | None
     def start_cameras(self) -> None       # pre-session landing previews; idempotent
     def bring_up(self, status_cb: Callable[[ArmBringupStatus], None] | None = None,
                  timeout_s: float = 180.0) -> dict[str, ArmBringupStatus]: ...
     def shutdown(self) -> None            # reverse order, never raises
 ```
+
+`_driver_cfg(arm)` maps the core `ArmConfig` onto `XArmDriverConfig`: id, ip,
+`expect_rail`, `gripper`, `tcp_load_kg`, `tcp_load_cog_mm` and (phase-09b)
+`collision_sensitivity`, `reduced_tcp_boundary_mm`, `expected_sn` when the core
+model carries them (driver defaults otherwise) — so the connect-time backstops
+(§6) and the monitor's `apply_backstops` op (§8.6) write the same values.
+`drain_events()` concatenates every driver's `drain_events()` (stable sort by
+`t_mono`; the runtime's control loop drains it once per tick: `FaultEvent` →
+that arm stops streaming / session FAULT, `RecoveredEvent`/`ReseedEvent` →
+re-seed + RECOVERING, `StudioConflictWarning` → warning). `request_recovery(arm_id)`
+forwards to the driver (unknown arm → `KeyError`; a driver without the channel →
+`CommandError`).
 
 Bring-up (`status_cb` fires on every transition → runtime pushes landing
 updates over `/ws/telemetry`): (1) **netsetup** `verify()`,
@@ -772,7 +926,7 @@ Per arm (daemon threads, named `hw.{arm_id}.{role}` for py-spy):
 | `_ServoStreamer` | 100 Hz | `set_servo_angle_j` only | 1 sub-ms call/tick |
 | `_MonitorThread` | 5 Hz | err/warn poll, rail `step()`, gripper poll + queued gripper/rail commands, recovery | few ms bursts |
 | `_Port30000Reader` (opt) | 10 Hz push | gripper current fields | none |
-| `hw.{arm_id}.monitor-ro` (§8.5, session-less; never coexists with the above) | 10 Hz + 2 Hz | `ArmMonitorSample` swap | 3 reads/tick + 2 modbus reads per slow tick |
+| `hw.{arm_id}.monitor-ro` (§8.5, session-less; never coexists with the above) | 10 Hz + 2 Hz | `ArmMonitorSample` swap; queued maintenance ops (§8.6) run here, never on the requester's thread | 3 reads/tick + 2 modbus reads per slow tick (+ the op's writes on request) |
 
 Plus one capture thread per camera (workcell-scoped). `_StateSnap` swap =
 single reference assignment; targets are latest-wins slots under a `Lock`
@@ -794,8 +948,10 @@ has the SDK keys only (no `mode`; `mode`/`state` are instance attributes the
 reads with `(0, [])`, `connect_fails=N` scripts failing connects, and gripper
 `set_*` calls record `wait_motion`. Scriptable `FaultScript`
 (latch error at tick N, return code X from `set_servo_angle_j`, drop mode to
-0, rail present/absent/unhomed, gripper fw); records `sent_joints` + full
-`calls` log; `emit_report(q, tcp, ...)` fires report callbacks. It encodes
+0, rail present/absent/unhomed, gripper fw, `collision_sensitivity` /
+`tcp_load` start values — `set_collision_sensitivity` / `set_tcp_load` echo
+into those properties like the controller's report frame does); records
+`sent_joints` + full `calls` log; `emit_report(q, tcp, ...)` fires report callbacks. It encodes
 the SDK gotchas as behavior: errors reset mode to 0; `set_servo_angle_j`
 returns 1 latched / 9 not-ready / -8 joint-limit; `clean_error()` alone ≠
 readiness; unhomed rail → 82; absent rail → code 3. Key tests: recovery
@@ -803,7 +959,20 @@ order (clean_error → motion_enable → set_mode(1) → set_state(0) → reseed
 from measured q); C24 backoff; budget → LATCHED; per-tick clamps (assert
 |Δq|, accel, lever-arm bound on `sent_joints`); re-anchor (mocked
 `monotonic` stalls 50 ms → no burst); e-stop code 1 → LATCHED; rail slot
-round-trips into `get_state()`.
+round-trips into `get_state()`; `request_recovery()` runs on `hw.a1.monitor`
+(thread name recorded inside the fake), emits FaultEvent(`user`) → ReseedEvent →
+RecoveredEvent, stays LATCHED with `motion_enable_fails` and reports it via
+`recovery_result()`; `HardwareWorkcell.drain_events()` aggregates both arms in
+`t_mono` order and `request_recovery("arm1")` recovers only that arm.
+**Monitor / maintenance** (`test_monitor.py`, call-logging proxy): zero writes
+without a request (read-back attrs included); `clear_errors` write set exactly
+`[clean_error, clean_warn]`, executed on `hw.<arm>.monitor-ro`, before/after
+samples, no enable / mode change; `apply_backstops` write set == a reference
+`apply_backstops` run on a fresh fake (same order) with the read-back reflected
+in `after`; nonzero codes → `ok=False` + `warnings`; refusals (`recover`, no
+cfg, off/paused/error) never touch the SDK; caller timeout drops the late result
+while polling continues; an SDK exception fails the request and reconnects; a
+request pending during `disconnect()` fails with "monitor paused".
 
 **Report-stream replayer**: TCP server on `127.0.0.1:<ephemeral>` replaying
 `fixtures/report/*.bin` (captured 30003 streams; 87-byte frames: big-endian
@@ -872,3 +1041,38 @@ error **C19** (SDK title "End Effector Communication Error"; Studio says "End
 Module Communication Error") persistently; both arms `state 4`, `mode 0`; both
 tracks unhomed/unenabled (§5). The joint convention is an identity mapping to
 the `mavis_v2` twin (no +π on joint 1; see `docs/prompts/phase-09a-*.md`).
+
+## 13. Phase-09b (2026-09-04) — controller error clearing / recovery interface
+
+- Monitor (§8.5/§8.6): `ArmStateMonitor.maintenance(op, driver_cfg, timeout_s)`
+  executes `clear_errors` (`clean_error` + `clean_warn`, no enable) and
+  `apply_backstops` (`backstops.apply_backstops`) on the poll thread with
+  before/after samples; `recover` is refused ("recover needs a session"). The
+  zero-write guarantee is now "zero writes unless an explicit maintenance
+  request" (`MAINTENANCE_SDK_METHODS`). Every slow round reads back
+  `XArmAPI.collision_sensitivity` / `XArmAPI.tcp_load` (properties fed by the
+  rich report frame; SDK 1.18.5 has no getters).
+- Driver (§3.5/§3.6): `request_recovery()` (flag serviced by the 5 Hz monitor
+  thread → `_recover(user_initiated=True)`, FaultEvent `source="user"`),
+  `recovery_result()` / `RecoveryResult` for non-consuming waiters; events
+  unchanged and still delivered through `drain_events()`.
+- Workcell (§9): `drain_events()` (all drivers, `t_mono` order),
+  `request_recovery(arm_id)`, `recovery_result(arm_id)`; `_driver_cfg` forwards
+  `collision_sensitivity`, `reduced_tcp_boundary_mm`, `expected_sn` from the
+  core `ArmConfig` (driver defaults with an older core).
+- Backstops (§6): parameters documented as coming from `ArmConfig`
+  (provisional lab payloads), `apply_backstops(api, cfg, codes=None)` records
+  return codes, `BACKSTOP_SDK_METHODS` / `expected_backstop_sequence(cfg)`
+  pin the write order for the maintenance tests.
+- Out of scope here (phase-09): rail homing (motion), `_bringup_hardware`,
+  changing backstops inside a session.
+
+
+> **SDK 1.18.5 quirks met live (2026-09-04):** `set_collision_rebound` returns the raw
+> reply list `[code, ...]` (every other setter returns `ret[0]`) — `_check` normalises
+> list replies; `set_tcp_load` returns APIState 9 (STATE_NOT_READY) while the arm is
+> stopped (state 4/5) although the controller stores the value — recorded as a warning
+> and verified by the `tcp_load` read-back; the setters are called with `wait=False`
+> because the SDK defaults would `wait_move()` in the stopped state. After
+> `apply_backstops` both controllers reported state 5 instead of 4 (both "stopped / not
+> ready" for the SDK; no joint moved).

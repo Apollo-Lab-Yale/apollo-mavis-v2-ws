@@ -151,12 +151,52 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   `api.version` is the RAW string `7,7,XS1305,MC1303,v1.12.10` (use `api.version_number`);
   G2/classic gripper `set_*` need `wait_motion=False` or they `wait_move()`. The runtime's
   session-less READ-ONLY monitor (`telemetry.hardware_monitor`, one SDK client per arm,
-  allowlist in hardware `monitor.py`) drives the twin overlays `grip_wrist_align` /
+  polling allowlist in hardware `monitor.py`; since phase-09b "zero writes unless an explicit
+  maintenance request", next bullet) drives the twin overlays `grip_wrist_align` /
   `view_wrist_align` (kind `twin`, Hardware tab); it is PAUSED = disconnected while a
   hardware session owns a box (two SDK clients on one box are unevidenced). Read-only is not
   side-effect-free: SDK `connect()` runs `clean_warn()` if a warning is latched, and the first
   track/gripper register read may rewrite the RS-485 baud + soft-reboot the end module if the
   controller's baud differs from the SDK default (02-hardware §8.5).
+- Controller error clearing / recovery + controller-side safety parameters (phase-09b,
+  2026-09-04; `docs/prompts/phase-09b-error-recovery.md`). **C19 cause**: the control box looks
+  for an end effector on the tool-port RS-485 bus and the Perception Arm has none
+  (`get_tgpio_modbus_baudrate` → `(1, -1)`); it comes back after every clear until the one-off
+  fix in xArm Studio: Settings → Externals → End Effector → **None** (SDK 1.18.5 has no write
+  API for it). **Clearing errors produces no motion (measured 2026-09-04)**: `clean_error()` on
+  the Perception Arm cleared C19, no recurrence for 6 s, all seven joints changed ≤ 5e-5 rad
+  (encoder noise); the full recovery sequence `clean_error → clean_warn → motion_enable(True)
+  → set_mode(1) → set_state(0)` is equally motion-free (it only enables / enters servo state;
+  `motion_enable` releases the brakes so the motors hold position actively — motion comes only
+  from explicit motion commands). Linear-track homing (`set_linear_track_back_origin`) IS motion
+  and is NOT a maintenance op (phase-09). Interface: `POST /api/hardware/arms/{arm_id}/maintenance
+  {op}` — `clear_errors` (no session: `clean_error` + `clean_warn` on the read-only monitor's
+  poll thread, never enables; INSIDE a hardware session it is routed to the session driver's
+  user-initiated recovery and is then equivalent to `recover`, i.e. it DOES `motion_enable` —
+  the Welcome button never posts it then), `apply_backstops` (no session; 409 during one),
+  `recover` (hardware session only: the driver's user-initiated recovery + re-seed from the
+  MEASURED position; 409 without one). UI: Hardware-tab arm card **Clear errors** / **Apply
+  safety settings** (disabled with "Use the Cockpit" while a hardware session owns the boxes),
+  Cockpit `FaultBanner` **Clear errors & resume** (then re-grip the clutch). The monitor's
+  guarantee is now "zero writes unless an explicit maintenance request"; the driver's own
+  bounded auto-recovery (3 per 30 s for recoverable codes) is unchanged, anything LATCHED
+  beyond it waits for the click. **Controller-side backstops live in core `ArmConfig`**
+  (`tcp_load_kg`, `tcp_load_cog_mm`, `collision_sensitivity` 0..5, optional
+  `reduced_tcp_boundary_mm`, `expected_sn`) → `configs/mavis_v2.yaml`, estimates the user accepted
+  on 2026-09-05 without weighing (whole-arm collision detection is the goal): Manipulation Arm (G2 + D435i + mount) **0.95 kg @ (0, 0, 60) mm**,
+  Perception Arm (D435i 0.072 kg + NT-USB Mini ≈ 0.35 kg + mount) **0.55 kg @ (0, 0, 90) mm**,
+  collision sensitivity **3 on both**. As found 2026-09-04 both boxes had `tcp_load` 0 kg
+  (wrong — collision detection is torque-estimate based) and sensitivity 3 (grip) / 1 (view).
+  They are volatile (lost at a controller reboot, never `save_conf()`ed); the driver re-applies
+  them at every connect. Read-back: SDK 1.18.5 has no `get_tcp_load` /
+  `get_collision_sensitivity`; `XArmAPI.tcp_load` / `.collision_sensitivity` are properties fed
+  by the rich 30002 report frame (NOT the 30003 stream the session driver uses) →
+  `telemetry.hardware_monitor.arms[*]` `tcp_load_kg` / `tcp_load_cog_mm` /
+  `collision_sensitivity` / `backstops_match` (sensitivity equal, |Δ load| ≤ 0.05 kg, |Δ cog| ≤
+  10 mm). **`arm.sn` reads the model code `XS1305` on BOTH boxes**, not a unique serial →
+  `expected_sn` stays None (useless for catching swapped cables; the NIC ↔ profile mapping is
+  the check). Never open UFACTORY Studio "Live control" during a session (the driver's
+  `StudioConflictWarning` shows as `fault_detail` "warning: close UFACTORY Studio live control").
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
   hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
   NVIDIA driver 580.173.02 (upgraded 2026-09-01); NVENC works. lerobot's

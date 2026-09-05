@@ -8,8 +8,13 @@ amended 2026-09-03 — phase-11 MAVIS UI: `protocol/microphone.py`
 §7, §11, §12, §14; amended 2026-09-04 — phase-09a hardware twin overlay:
 `protocol/hardware_monitor.py` (`ArmMonitorTelemetry`, `TwinOverlayTelemetry`,
 `HardwareMonitorTelemetry`, `ArmMonitorStatus`, `TwinOverlayStatus`),
-`TelemetryMsg.hardware_monitor`, `CameraInfo.kind` `"twin"`; §11, §12, §14, §18 —
-all additive).
+`TelemetryMsg.hardware_monitor`, `CameraInfo.kind` `"twin"`; §11, §12, §14, §18;
+amended 2026-09-04 — phase-09b error recovery: `protocol/maintenance.py`
+(`ArmMaintenanceRequest`, `ArmMaintenanceResult`, `ArmMaintenanceOp`,
+`MaintenancePath`), `ArmConfig.collision_sensitivity` / `.reduced_tcp_boundary_mm` /
+`.expected_sn`, `ArmMonitorTelemetry` safety read-back + `.maintenance_busy`,
+`ArmTelemetry.fault_detail` / `.recovering`, `WorkcellInterface.drain_events`;
+§5.1, §7, §11, §12, §14, §18 — all additive).
 Conforms to `00-overview.md` v0.3 (binding spine).
 Research ground truth: `docs/research/{dagger-online-training, lerobot-data,
 xarm-python-sdk, xarm7-ik}.md`. Message shapes mirror `05-ui.md` §2 exactly.
@@ -49,7 +54,8 @@ apollo-mavis-v2-core/
 │   ├── profiles/store.py      # ProfileStore (§8)
 │   ├── dagger/                # types.py interfaces.py (§9)
 │   └── protocol/              # control.py (§10) telemetry.py (§11) session.py (§12)
-│                              #   tracker.py microphone.py (§12) hardware_monitor.py (§11)
+│                              #   tracker.py microphone.py maintenance.py (§12)
+│                              #   hardware_monitor.py (§11)
 │                              #   video.py keymap.py (§13) export_schemas.py (§14)
 └── tests/                     # §18
 ```
@@ -194,6 +200,11 @@ class WorkcellInterface(ABC):
         # mj_step thread so runtime treats sim exactly like hardware (spine §3.3).
     def stop(self) -> None               # reverse order; idempotent
     def states(self) -> dict[str, ArmState]
+    def drain_events(self) -> list[Any]  # NON-abstract, default []: the driver events (fault /
+                                         #   recovered / reseed / Studio conflict / rail /
+                                         #   gripper / stale) queued since the last call;
+                                         #   the hardware workcell overrides, the runtime loop
+                                         #   drains once per tick (04-runtime §15; phase-09b)
 ```
 
 ### 5.2 IK, digital twin, policy, recorder, teleop (Protocols + support types)
@@ -364,6 +375,16 @@ class ArmConfig(BaseModel):
                                          #   camera (hardware view arm: true) -> the
                                          #   digital twin adds its collision body
                                          #   (03-sim §4); additive, phase-11
+    collision_sensitivity: int = Field(3, ge=0, le=5)
+                                         # -> set_collision_sensitivity, 0 = off .. 5 = most
+                                         #   sensitive; MAVIS: 3 on both arms (phase-09b)
+    reduced_tcp_boundary_mm: tuple[int, int, int, int, int, int] | None = None
+                                         # Reduced-mode TCP box [x_max, x_min, y_max, y_min,
+                                         #   z_max, z_min] mm (SDK set_reduced_tcp_boundary
+                                         #   order); None = leave Reduced mode off
+    expected_sn: str | None = None       # controller SN verified at connect; None = skip
+                                         #   (both MAVIS boxes read the model code "XS1305",
+                                         #   not a unique serial)
 
 class CameraIntrinsics(BaseModel):
     fx: float; fy: float; cx: float; cy: float
@@ -398,6 +419,17 @@ only in sim configs; `extrinsics_frame` parses and references a declared id.
 `ArmConfig.microphone` carries no core validator — the sim's `ArmSpec`
 after-validator (03-sim §4: requires `wrist_cam` and `gripper == "none"`)
 rejects it on a non-camera arm when the twin is built.
+`collision_sensitivity` is bounded 0..5 (`Field(ge=0, le=5)`) and
+`reduced_tcp_boundary_mm` is exactly six ints or absent; together with
+`tcp_load_kg` / `tcp_load_cog_mm` they are the controller-side backstops the
+hardware driver applies at connect (`backstops.apply_backstops`, 02-hardware
+§6: tcp_load → gravity → sensitivity → self-collision + tool model → optional
+Reduced boundary → rebound off), the UI re-applies session-less
+(`ArmMaintenanceOp` `apply_backstops`, §12) and the monitor reads back
+(`ArmMonitorTelemetry.backstops_match`, §11). They are volatile on the
+controller (lost at reboot), never `save_conf()`ed. Provisional MAVIS values
+(2026-09-04, payloads to be weighed): Manipulation Arm 0.95 kg @ (0, 0, 60) mm,
+Perception Arm 0.55 kg @ (0, 0, 90) mm, sensitivity 3 on both (04-runtime §14).
 Config files (`configs/hardware.yaml`, `configs/sim.yaml`) live in the runtime
 deployment dir; `POST /api/session` honors requested `kind` iff that config
 exists and validates (binding; else 409).
@@ -634,6 +666,11 @@ class ArmTelemetry(BaseModel):
     warn_code: int = 0; stale: bool = False             # additive
     goto: Literal["planning", "executing", "failed"] | None = None
                                          # joint-panel lifecycle; "failed" transient
+    fault_detail: str = ""               # controller fault the arm is stopped for, e.g.
+                                         #   "controller error 24: Speed Exceeds Limit" (SDK
+                                         #   x_code title); "" = none (additive, phase-09b)
+    recovering: bool = False             # recovery ran (session RECOVERING); streaming resumes
+                                         #   once the operator re-grips the clutch (additive)
 
 class ClearanceItem(BaseModel):
     pair: tuple[str, str]; dist_m: float
@@ -749,6 +786,15 @@ class ArmMonitorTelemetry(BaseModel):    # one arm as seen by the READ-ONLY moni
     error_code: int = 0; warn_code: int = 0    # controller codes (19 = End Effector Comm Error)
     state: int | None = None             # controller state (4 = stopped / not enabled)
     mode: int | None = None
+    # phase-09b read-back (slow poll) + maintenance flag — all additive
+    collision_sensitivity: int | None = None   # controller's CURRENT value 0..5 (unbounded
+                                         #   here: it is what the box reports)
+    tcp_load_kg: float | None = None     # controller's CURRENT tcp_load mass
+    tcp_load_cog_mm: list[float] = []    #   ... and centre of gravity [x, y, z] mm
+    backstops_match: bool | None = None  # runtime: read-back == ArmConfig (sensitivity equal,
+                                         #   |Δ load| <= 0.05 kg, |Δ cog| <= 10 mm); None = not
+                                         #   compared yet
+    maintenance_busy: bool = False       # a maintenance op (§12) is executing on this arm
 
 TwinOverlayStatus = Literal["off", "waiting", "live", "stale", "error"]
     # off = overlay disabled / twin scene failed to build; waiting = nothing published (no
@@ -814,12 +860,31 @@ backoff, the rail fallback and the compositing recipe are hardware / runtime
 territory (02-hardware "read-only monitor", 04-runtime §13.3 / §13.4); core
 only fixes the spellings.
 
-## 12. Protocol: session & REST models (`protocol/session.py`, `protocol/tracker.py`, `protocol/microphone.py`)
+**Phase-09b (`docs/prompts/phase-09b-error-recovery.md`).** The monitor's
+zero-write guarantee becomes *"zero writes unless an explicit maintenance
+request"* (§12): its polling thread also executes the operator-triggered
+`clear_errors` / `apply_backstops` ops and, every slow poll, reads back the
+controller-side safety parameters (`collision_sensitivity`, `tcp_load_kg`,
+`tcp_load_cog_mm`) so the Hardware tab can flag a box whose volatile settings
+differ from `ArmConfig` (`backstops_match == false`; `maintenance_busy` while
+an op runs). Inside a hardware session the driver's fault / recovered / reseed
+events (`WorkcellInterface.drain_events`, §5.1) drive `ArmTelemetry.fault_detail`
+/ `.recovering` and `SessionTelemetry.state` `fault` → `recovering` →
+`running` (04-runtime §15); the faulted arm stops streaming, its siblings keep
+going. The driver's own bounded auto-recovery (02-hardware §3.5: ≤ 3 per 30 s
+for RECOVERABLE codes) still runs; beyond it (LATCHED after the budget, an
+unrecoverable code, the e-stop) only the operator's `recover` click recovers,
+and motion never resumes before the operator releases every input / re-grips
+the clutch.
+
+## 12. Protocol: session & REST models (`protocol/session.py`, `protocol/tracker.py`, `protocol/microphone.py`, `protocol/maintenance.py`)
 
 Bodies for the `/api` surface (04-runtime §13.1); runtime defines no wire
 model of its own. Session models live in `protocol/session.py`; the phase-10
-tracker-calibration models in `protocol/tracker.py` and the phase-11
-microphone row + `MicStatus` vocabulary in `protocol/microphone.py` (below).
+tracker-calibration models in `protocol/tracker.py`, the phase-11
+microphone row + `MicStatus` vocabulary in `protocol/microphone.py` and the
+phase-09b arm-maintenance request / result in `protocol/maintenance.py`
+(all below).
 
 ```python
 Mode = Literal["teleop", "collect", "dagger", "inference"]
@@ -1011,6 +1076,52 @@ class MicrophoneInfo(BaseModel):         # GET /api/microphones row
 Capture backends, source resolution, envelope binning and stall detection are
 runtime territory (04-runtime §13.1/§13.3/§14); core only fixes the spellings.
 
+**Arm maintenance (`protocol/maintenance.py`; phase-09b,
+`docs/prompts/phase-09b-error-recovery.md`).** `POST
+/api/hardware/arms/{arm_id}/maintenance (ArmMaintenanceRequest) ->
+ArmMaintenanceResult` lets the operator clear xArm controller errors and
+(re)apply the controller-side safety parameters (§7) from the UI **without
+producing motion** — measured 2026-09-04 on the Perception Arm: `clean_error`
+cleared C19 and moved no joint by more than 5e-5 rad; the full recovery
+sequence (`clean_error → clean_warn → motion_enable(True) → set_mode →
+set_state(0)`) only puts the arm in ready / servo state. Linear-track homing
+IS motion and is not a maintenance op (phase-09). 404 = unknown arm; 409 = the
+op is not available on the current path (below) or the monitor is off / paused
+/ not connected; otherwise 200 with the result whether or not `ok`. The module
+is a pure-pydantic leaf importing `ArmMonitorTelemetry` (§11); both models
+export top-level (§14).
+
+```python
+ArmMaintenanceOp = Literal["clear_errors", "apply_backstops", "recover"]
+    # clear_errors:    no session: clean_error + clean_warn, NEVER motion_enable — on the
+    #                  read-only monitor's polling thread (its zero-write guarantee becomes
+    #                  "zero writes unless an explicit maintenance request"); INSIDE a hardware
+    #                  session the runtime routes it to the driver's user-initiated recovery
+    #                  (= recover below, which DOES enable) — 04-runtime §13.1
+    # apply_backstops: backstops.apply_backstops(api, cfg) from ArmConfig (§7 order) — no
+    #                  session; 409 inside a hardware session (the driver re-applies the
+    #                  volatile settings at connect anyway)
+    # recover:         the driver's full user-initiated recovery + reseed from the MEASURED
+    #                  position — hardware session only; 409 without one ("no hardware
+    #                  session - use clear_errors"); the operator re-grips the clutch after
+MaintenancePath = Literal["monitor", "session"]   # which thread executed the op
+
+class ArmMaintenanceRequest(BaseModel):  # POST body
+    op: ArmMaintenanceOp
+
+class ArmMaintenanceResult(BaseModel):   # response (200 whether or not ok)
+    arm_id: str; op: ArmMaintenanceOp; path: MaintenancePath; ok: bool
+    detail: str = ""                     # human-readable outcome
+    sdk_codes: dict[str, int] = {}       # SDK call -> return code, in call order
+    warnings: list[str] = []             # apply_backstops non-fatal codes
+    before: ArmMonitorTelemetry | None = None   # monitor samples around the op (None on
+    after: ArmMonitorTelemetry | None = None    #   the session path / monitor unconnected)
+```
+
+Queueing on the monitor thread, the recovery budget, the 409 matrix and the
+INFO audit line are hardware / runtime territory (02-hardware "maintenance
+channel", 04-runtime §13.1 / §15); core only fixes the spellings.
+
 ## 13. Protocol: video framing & keymap (`protocol/video.py`, `protocol/keymap.py`)
 
 **Video framing (binding).** `/ws/video/{stream_id}` frames = 12-byte
@@ -1098,6 +1209,9 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   #           CameraInfo, SceneInfo, ProfileInfo, PolicyInfo
   # microphone: MicrophoneInfo (REST /api/microphones; phase-11 — MicrophoneTelemetry
   #           rides TelemetryMsg $defs only)
+  # maintenance: ArmMaintenanceRequest, ArmMaintenanceResult (REST POST
+  #           /api/hardware/arms/{arm_id}/maintenance; phase-09b — the result embeds
+  #           ArmMonitorTelemetry via $defs, the same class TelemetryMsg nests)
   # misc:     StateProfile, KeymapEntry, CollisionEvent
 }
 def export(out_dir: Path) -> list[Path]
@@ -1239,7 +1353,10 @@ All of core tests with no robot, no MuJoCo, no network.
 - **State**: shape/dtype rejection; `q[7] == rail_pos_m` when rail present;
   GripperCommand range checks.
 - **Config**: YAML fixtures (1/2/3-arm hardware + sim) load; one failing
-  fixture per cross-field validator; errors carry file + loc.
+  fixture per cross-field validator; errors carry file + loc;
+  `ArmConfig.collision_sensitivity` bounds (0..5, ints only, loc
+  `/arms/i/collision_sensitivity`), `reduced_tcp_boundary_mm` exactly six ints,
+  `expected_sn` optional string.
 - **ProfileStore** (`tmp_path`): CRUD round trip; atomic overwrite (fault
   injected before `os.replace` leaves the old file intact); `set_initial`
   uniqueness incl. crash-ordering (target-last ⇒ never two flags);
@@ -1251,10 +1368,15 @@ All of core tests with no robot, no MuJoCo, no network.
   `model_fields` pinned per wire model (core is the spelling authority) and
   legacy-dict additivity for every additive field (`TrackerTelemetry.*`,
   `TelemetryMsg.microphone`, `TelemetryMsg.hardware_monitor`,
-  `ArmStatusInfo.reachable`, `WorkcellStatus.hardware_ready`); `MicStatus`
-  identical on `MicrophoneTelemetry` and `MicrophoneInfo`; `ArmMonitorStatus` /
-  `TwinOverlayStatus` vocabularies and `CameraInfo.kind` (incl. `"twin"`) pinned
-  as exact tuples.
+  `ArmStatusInfo.reachable`, `WorkcellStatus.hardware_ready`,
+  `ArmTelemetry.fault_detail` / `.recovering`, the `ArmMonitorTelemetry`
+  safety read-back + `maintenance_busy`); `MicStatus` identical on
+  `MicrophoneTelemetry` and `MicrophoneInfo`; `ArmMonitorStatus` /
+  `TwinOverlayStatus` / `ArmMaintenanceOp` / `MaintenancePath` vocabularies and
+  `CameraInfo.kind` (incl. `"twin"`) pinned as exact tuples;
+  `ArmMaintenanceResult` fixtures pin the `clear_errors` write set
+  (`clean_error`, `clean_warn` — never `motion_enable`) and the
+  `apply_backstops` call order.
 - **Keymap**: §13 invariants + literal table equality against spine §5 — any
   keymap edit is a conscious spine change.
 - **Video**: pack/unpack round trip; `struct.calcsize("<dI") == 12`;
@@ -1262,8 +1384,10 @@ All of core tests with no robot, no MuJoCo, no network.
 - **Schema export**: export twice → byte-identical; `--check` vs checked-in
   `schemas/` (drift fails CI); no numpy leakage; `EXPORTED_MODELS` pinned as
   an exact set; per-model property/required/enum/default sets pinned for the
-  tracker, microphone, hardware-monitor / twin-overlay and phase-11 workcell
-  fields; `CameraInfo.kind` enum incl. `"twin"` in both `CameraInfo.json` and
+  tracker, microphone, hardware-monitor / twin-overlay, arm-maintenance
+  (`ArmMaintenanceRequest.json` flat, `ArmMaintenanceResult.json` nesting the
+  same `ArmMonitorTelemetry` `$defs` as `TelemetryMsg.json`), `ArmTelemetry`
+  fault and phase-11 workcell fields; `CameraInfo.kind` enum incl. `"twin"` in both `CameraInfo.json` and
   the `WorkcellStatus.json` `$defs`.
 - **Bus**: N producer threads × 1 drainer — every Future resolves exactly
   once, corr_ids match; bus-full immediate nack; handler exception →
