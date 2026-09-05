@@ -1,7 +1,9 @@
 # 02 — apollo-mavis-v2-hardware (`apollo_mavis_v2_hardware`)
 
-Status: v0.2 (2026-09-04: §7.4 NM dispatcher, state-path precedence,
-permissions; v0.1 2026-09-01). Conforms to `00-overview.md` v0.3 (spine). Ground
+Status: v0.3 (2026-09-04 phase-09a: §8.5 read-only state monitor, §12 SDK
+1.18.5 fixes from the first read-only contact with the real boxes; v0.2
+2026-09-04: §7.4 NM dispatcher, state-path precedence, permissions; v0.1
+2026-09-01). Conforms to `00-overview.md` v0.3 (spine). Ground
 truth: `docs/research/xarm-python-sdk.md` (SDK 1.18.5, verified against
 source), `network-manager.md` (audited on the target machine),
 `web-teleop-stack.md` §5 (camera ABC). Depends **only** on
@@ -19,6 +21,7 @@ apollo-mavis-v2-hardware/
 │   ├── driver.py               # XArmDriver, _ServoStreamer, _MonitorThread (§3)
 │   ├── grippers.py             # GripperBackend ABC + Classic/G2/No (§4)
 │   ├── rail.py                 # RailController (§5)
+│   ├── monitor.py              # ArmStateMonitor: read-only controller poller (§8.5)
 │   ├── backstops.py            # controller-side safety params (§6)
 │   ├── events.py               # DriverEvent union: FaultEvent, RecoveredEvent,
 │   │                           #   ReseedEvent, StudioConflictWarning, RailEvent,
@@ -115,16 +118,28 @@ joints 0–6 as the streamer target (latest-wins), forward `q[7]` to
 1. `api = api_factory(cfg.ip, is_radian=True, report_type='real',
    enable_report=True, check_joint_limit=True)`; retry 3× 2 s apart.
    HardwareWorkcell delays this until TCP 502 probes open (§7).
-2. Identity: `api.sn`/`api.version`; mismatch vs `expected_sn` →
-   `ArmIdentityError` (cabling swap). Parse fw tuple for gates (≥2.7.100
-   gripper current monitor, ≥1.9.110 `is_real` readback).
+2. Identity: `api.sn`; mismatch vs `expected_sn` → `ArmIdentityError`
+   (cabling swap). Firmware tuple for the gates (≥2.7.100 gripper current
+   monitor, ≥1.9.110 `is_real` readback) = `grippers.read_fw_tuple(api)` →
+   `api.version_number` (SDK-parsed `(major, minor, rev)`). **Not**
+   `parse_fw(api.version)`: in SDK 1.18.5 `api.version` is the RAW controller
+   string `7,7,XS1305,MC1303,v1.12.10` (axes, type, arm SN, box SN, fw) and
+   parsing it gave a bogus major so every gate passed (fixed 2026-09-04, §12).
 3. `api.clean_warn(); api.clean_error()` (a latched prior error makes every
    call return 1); apply backstops (§6); then `api.motion_enable(True);
    api.set_mode(0); api.set_state(0)` — required order; every `set_mode`
    must be followed by `set_state(0)`.
 4. Rail detection per `expect_rail` (`auto` → `RailController.detect()`;
-   `yes` → absent raises `RailExpectedError`; `no` → skip); fixes `dof`.
-5. Gripper backend init (§4); `register_report_callback` → snapshots (§3.4).
+   `yes` → absent raises `RailExpectedError`; `no` → skip); fixes `dof`;
+   `rail.warnings` (e.g. "SN not verified", §5) are appended to
+   `connect_warnings`.
+5. Gripper backend init (§4); `register_report_callback(self._on_report,
+   report_cartesian=True, report_joints=True, report_state=True,
+   report_error_code=False, report_warn_code=False, report_mtable=False,
+   report_mtbrake=False, report_cmd_num=True)` → snapshots (§3.4). These are
+   the ONLY keywords SDK 1.18.5 accepts (`xarm/wrapper/xarm_api.py:2222`);
+   the former `report_mode=True` raised `TypeError` on the first real connect
+   (fixed 2026-09-04).
 6. Enter streaming: `set_mode(1); set_state(0); sleep(0.1)`, seed streamer
    from `get_servo_angle(is_real=True)` (plain fallback on old fw), start
    `_ServoStreamer` + `_MonitorThread`. Phase → `STREAMING`.
@@ -178,8 +193,12 @@ SDK report thread parses frames; our `register_report_callback` hook
 writes a `_StateSnap` dataclass (written only by the callback, read by
 `get_state()`): `q` (`actual_joint_angle[7]`, rad), `dq` (finite-diff at
 100 Hz, EMA α=0.5 — 30003 carries no velocities), `ee_pose_sdk`
-(`actual_tcp_pose[6]`, mm+rad, base frame), `tau` (N·m), `mode`/`state`
-(from `state_mode`), `cmd_num`, `mono_ts`, `wallclock_ns`.
+(`actual_tcp_pose[6]`, mm+rad, base frame), `tau` (N·m), `state` (payload),
+`mode` (the SDK `api.mode` property — the callback PAYLOAD never carries
+`mode`, `x3/base.py:1284-1300`; the SDK report thread keeps `_mode` current
+from the 30003 `state_mode` byte. Reading `data["mode"]` returned 0 and made
+the Studio-conflict detector latch every arm ~1.2 s after connect; fixed
+2026-09-04), `cmd_num`, `mono_ts`, `wallclock_ns`.
 
 Swap-in is one reference assignment (GIL-atomic); `get_state()` never
 blocks: it assembles `ArmState` — `q`/`dq` (+ rail slot from
@@ -254,8 +273,11 @@ the monitor thread); `poll() -> GripperState` (5 Hz, monitor thread);
 **ClassicGripper** (`"xarm"`; RS-485 tool modbus, position-only, pulses
 0–850). init: `set_gripper_enable(True); set_gripper_mode(0);
 set_gripper_speed(3000)` (r/min, valid ~1000–5000). command:
-`set_gripper_position(units.frac_to_pulse(cmd.open_frac), wait=False)` —
-**never** `wait=True` in-session (latency jitter on the shared 502 socket);
+`set_gripper_position(units.frac_to_pulse(cmd.open_frac), wait=False,
+wait_motion=False)` — **never** `wait=True` in-session (latency jitter on the
+shared 502 socket); `wait_motion=False` skips the SDK's implicit `wait_move()`
+(`x3/gripper.py:560-568`, default on) that would block the monitor thread
+while the arm streams (2026-09-04);
 rate-limited 10 Hz, latest-wins, skip if |Δpulse| < 5; `cmd.force` ignored.
 poll: `get_gripper_position()` → `GripperState{open_frac, grasped?,
 current?}`; gripper fw ≥ 3.4.3: `get_gripper_status()&0x03 == 2` → grasped.
@@ -268,8 +290,11 @@ None. errors: poll `get_gripper_err_code()`; nonzero →
 
 **G2Gripper** (`"xarm_g2"`):
 `set_gripper_g2_position(units.frac_to_g2_mm(f), speed=150,
-force=int(cmd.force*100) if cmd.force else 50, wait=False)` — pos 0–84 mm,
-speed 15–225 mm/s, force 1–100 %. `GripperCommand.force` (normalized [0,1])
+force=int(cmd.force*100) if cmd.force else 50, wait=False,
+wait_motion=False)` — pos 0–84 mm, speed 15–225 mm/s, force 1–100 %.
+`wait_motion=False` is mandatory: the SDK otherwise runs `wait_move()` first
+(`x3/gripper.py:969-977`) and blocks the 5 Hz monitor thread for as long as
+the arm is moving (fixed 2026-09-04). `GripperCommand.force` (normalized [0,1])
 is honored here and only here; poll `get_gripper_g2_position/force`.
 
 ## 5. Linear track / rail (`rail.py`)
@@ -289,10 +314,29 @@ class RailController:
     pos_m: float; phase: RailPhase               # properties
 ```
 
-`detect()`: present = `get_linear_track_registers()` code == 0 (absent →
-code 3 timeout / 20 host-id / 23 modbus-length); also REQUIRE
-`get_linear_track_sn()` (AL13x prefix → travel) — sim-mode controllers
-silently no-op track calls. `ensure_homed()`: if `get_linear_track_on_zero()`
+`detect()`: present = `get_linear_track_registers()` code == 0 AND the reply
+is a real register dict (absent → code 3 timeout / 20 host-id / 23
+modbus-length; a controller in simulation mode never touches the bus and the
+SDK returns `(0, [])` → absent). The AL13x SN prefix is checked only when the
+SDK exposes `get_linear_track_sn` — **SDK 1.18.5 does not**: `XArmAPI` has
+`get_linear_track_registers/pos/status/error/is_enabled/on_zero`,
+`set_linear_track_*`, `clean_linear_track_error` (alias map
+`wrapper/xarm_api.py:120-133`) and `get_linear_motor_registers`, but no
+`get_linear_track_sn` / `get_linear_track_version` (`__getattr__` raises
+`AttributeError`; `rail.py:77` did exactly that on the first real connect,
+fixed 2026-09-04). Without the SN API `detect()` records one warning
+(`rail.warnings` → `connect_warnings` → `ArmBringupStatus.warnings`) and
+accepts the track on the registers alone.
+
+**Rail facts measured read-only 2026-09-04 (both arms identical):**
+`get_linear_track_registers` → `{pos: 0, status: 2, error: 0, is_enabled: 0,
+on_zero: 0}` — the tracks are NOT homed and NOT enabled, so `pos` is
+meaningless (the Manipulation Arm's carriage is physically at the operator's
+right end ≈ sim q 0.65 while its register reads 0). `pos` becomes a position
+only after `on_zero == 1` AND `is_enabled == 1`; the read-only monitor (§8.5)
+reports `rail_pos_m = None` until then and `rail_raw_mm` always. Homing
+(`set_linear_track_back_origin`) is a MOTION command and belongs to the
+session bring-up (phase-09), never to the monitor. `ensure_homed()`: if `get_linear_track_on_zero()`
 is 0 → `set_linear_track_back_origin(wait=True, timeout=30)` — REQUIRED once
 per power-on (commanding unhomed returns APIState 82); then
 `set_linear_track_enable(True)` + `set_linear_track_speed(speed_mm_s)`.
@@ -576,6 +620,102 @@ Pre-session preview: cameras start **before** any session (landing page
 shows real streams at reduced ~15 fps per the binding video protocol), so
 `start_cameras()` is independent of arm bring-up.
 
+## 8.5 Read-only state monitor (`monitor.py`, phase-09a)
+
+Session-less view of the real cell for the runtime (`telemetry.hardware_monitor`,
+the Welcome page's error chips, the digital-twin overlay streams `*_align`).
+One `ArmStateMonitor` per arm; **it never commands the controller**.
+
+```python
+ArmMonitorStatus = Literal["off", "connecting", "running", "stale", "paused", "error"]
+
+@dataclass(frozen=True)
+class ArmMonitorSample:            # data part of core ArmMonitorTelemetry + t_mono
+    arm_id: str; seq: int; t_mono: float
+    q: tuple[float, ...]           # 7 rad, controller order (identity to the twin)
+    tcp_pose: tuple[float, ...]    # [x, y, z m, roll, pitch, yaw rad], flange (tcp_offset 0)
+    error_code: int = 0; warn_code: int = 0
+    state: int | None = None; mode: int | None = None
+    rail_present: bool | None; rail_homed: bool | None; rail_enabled: bool | None
+    rail_pos_m: float | None       # None unless on_zero == 1 AND is_enabled == 1
+    rail_raw_mm: float | None      # raw register, always when present
+    gripper_open_frac: float | None; gripper_raw: float | None  # None for "none"
+
+class ArmStateMonitor:
+    def __init__(self, arm_id, ip, *, gripper: Literal["xarm", "xarm_g2", "none"],
+                 expect_rail: bool, poll_hz=10.0, stale_s=0.5, reconnect_s=2.0,
+                 api_factory=None, clock=time.monotonic) -> None: ...
+    def start(self) -> None                      # daemon thread, reconnects itself (waits for
+                                                 #   a previous thread still leaving the SDK)
+    def stop(self, timeout=2.0) -> bool          # release the box; status "off"; True = released
+    def disconnect(self, timeout=2.0) -> bool    # release the box; status "paused" (hand-over)
+    def join(self, timeout=None) -> bool         # wait for the poll thread (late release)
+    def snapshot(self) -> ArmMonitorSample | None
+    status: ArmMonitorStatus; detail: str; age_s: float | None; connected: bool
+```
+
+- **Connection**: `XArmAPI(ip, is_radian=True, do_not_open=True)` then
+  `connect()` (SDK defaults otherwise, i.e. the report stream stays on so the
+  `state`/`mode` properties are live). Thread `hw.{arm_id}.monitor-ro` polls
+  at `poll_hz`: `get_servo_angle(is_radian=True)`, `get_position(is_radian=True)`
+  (mm → m via `units`), `get_err_warn_code()`, `api.state`, `api.mode`; every
+  ≈2 Hz additionally `get_linear_track_registers()` (when `expect_rail`) and the
+  gripper reading — G2 through **the same call and conversion as
+  `G2Gripper.poll()`** (`get_gripper_g2_position()` → `units.g2_mm_to_frac`),
+  classic through `get_gripper_position()` → `units.pulse_to_frac`, `none` skipped.
+  `detail` carries the SDK's error title (`controller error 19: End Effector
+  Communication Error`), a controller warning, or read problems.
+- **Zero writes**: `monitor.READ_ONLY_SDK_METHODS = {connect, disconnect,
+  get_servo_angle, get_position, get_err_warn_code, get_linear_track_registers,
+  get_gripper_g2_position, get_gripper_position}` and `READ_ONLY_SDK_ATTRS =
+  {connected, state, mode}` are the complete list of `XArmAPI` members touched.
+  `tests/test_monitor.py` wraps the fake in a call-logging proxy and asserts
+  nothing outside the lists is ever called (in particular no
+  `motion_enable/set_mode/set_state/clean_error/clean_warn/set_*`) and that
+  the fake's state/mode/error are unchanged afterwards.
+- **Pause = disconnect**: a hardware session owns the boxes exclusively (two SDK
+  clients on one control box are unevidenced). The runtime calls
+  `disconnect()` before its session bring-up (status `paused`, last sample kept,
+  the SDK client is torn down with exactly one `api.disconnect()`) and
+  `start()` after teardown. `stop()` is the same with status `off`.
+  **Hand-over guarantee under a slow `connect()`** (SDK 1.18.5 opens two
+  sockets with their own timeouts and runs the version handshake — seconds on
+  a flaky link, longer than the 2 s join budget): each `start()` bumps a
+  generation counter and the poll thread publishes its client / status /
+  samples only while it is the current generation AND `_running` holds (checked
+  under the lock). If `stop()`/`disconnect()` return while the thread is still
+  inside `connect()` they return **False** (box not yet released; a warning is
+  logged) and the thread, on return, disconnects that client itself instead of
+  adopting it — status stays `paused`/`off`, `connected` stays False, no poll
+  happens; `join()` waits for that. `start()` after such a shutdown first joins
+  the old thread (`STALE_THREAD_JOIN_S`), so a new client is never opened while
+  the old one may still be connecting. `tests/test_monitor.py` covers all three
+  (`connect_delay_s` on the fake): exactly one `disconnect` on the abandoned
+  client, never published, status unchanged, one reconnect afterwards.
+- **Failure**: any SDK exception → status `error` + detail, client released,
+  reconnect after `reconnect_s` with exponential backoff (×2, capped at 10 s;
+  reset on success). `connected` flipping to False on the SDK client counts as
+  a failure. **Stale**: status `stale` (derived) when the newest sample is older
+  than `stale_s` while nominally running — e.g. `get_servo_angle` returning a
+  nonzero code (no sample that tick; the detail names the call and code — a
+  failing `get_position` / err-warn / rail / gripper read is only appended to
+  `detail` while the sample keeps the previous values) or a hung socket.
+- **Read-only ≠ side-effect-free (SDK 1.18.5, verified in source)**: (a)
+  `connect()` calls `clean_warn()` when a controller WARNING is latched
+  (`x3/base.py:519-521`); (b) the first track/gripper register read runs
+  `checkset_modbus_baud` (`x3/base.py:2581-2620`): if the controller's RS-485
+  baud differs from the SDK default 2 000 000 the SDK WRITES the baud
+  register, soft-reboots the end module (tool bus) and, should that raise
+  C19/C28 (tool) or C111 (control-box bus), calls `clean_error()` +
+  `set_state()`; at the factory baud nothing is written. `XArmAPI(...,
+  baud_checkset=False)` would disable that path (a wrong baud then just fails
+  the read) — the monitor keeps the SDK default so it reads through exactly the
+  path `grippers.py`/`rail.py` use; (c) reads succeed (code 0) while a
+  controller error is latched (`_check_code` maps ERR_CODE/WAR_CODE/
+  STATE_NOT_READY → 0 for get-type calls) — the Perception Arm's C19 does not
+  stop the monitor; (d) while `0 < error_code <= 17` the SDK stops refreshing
+  its cached joints from the report stream, `get_servo_angle` still asks the box.
+
 ## 9. HardwareWorkcell assembly & bring-up (`workcell.py`)
 
 ```python
@@ -606,7 +746,9 @@ Bring-up (`status_cb` fires on every transition → runtime pushes landing
 updates over `/ws/telemetry`): (1) **netsetup** `verify()`,
 on miss `match()` (`probing`); probe `refused` → `booting`: poll TCP 502
 every 2 s within `timeout_s` — never re-probe NICs. (2) **connect** each arm
-in its own thread (§3.2 steps updating statuses). (3) **rail detect + home**
+in its own thread (§3.2 steps updating statuses; `driver.connect_warnings` —
+backstop set_* return codes, rail SN not verifiable — are copied into
+`ArmBringupStatus.warnings`, fixed 2026-09-04: they were dropped before). (3) **rail detect + home**
 (inside connect; ~10 s, once per power-on). (4) **report stream**: require
 one fresh 30003 snapshot (`stale == False`) before declaring `connected`.
 (5) **cameras**: `start_cameras()` if not running. Partial failure: one arm
@@ -630,6 +772,7 @@ Per arm (daemon threads, named `hw.{arm_id}.{role}` for py-spy):
 | `_ServoStreamer` | 100 Hz | `set_servo_angle_j` only | 1 sub-ms call/tick |
 | `_MonitorThread` | 5 Hz | err/warn poll, rail `step()`, gripper poll + queued gripper/rail commands, recovery | few ms bursts |
 | `_Port30000Reader` (opt) | 10 Hz push | gripper current fields | none |
+| `hw.{arm_id}.monitor-ro` (§8.5, session-less; never coexists with the above) | 10 Hz + 2 Hz | `ArmMonitorSample` swap | 3 reads/tick + 2 modbus reads per slow tick |
 
 Plus one capture thread per camera (workcell-scoped). `_StateSnap` swap =
 single reference assignment; targets are latest-wins slots under a `Lock`
@@ -641,7 +784,15 @@ without a timeout.
 ## 11. Test strategy (hardware-free)
 
 **FakeXArmAPI** (`tests/fakes/`, injected via `api_factory`): stateful
-double of the `XArmAPI` surface used in §3–§6. Scriptable `FaultScript`
+double of the `XArmAPI` surface used in §3–§6 and §8.5 that MIRRORS SDK 1.18.5
+rather than tolerating callers (2026-09-04): `register_report_callback` has the
+exact SDK signature (a stray `report_mode` is a `TypeError`), the report payload
+has the SDK keys only (no `mode`; `mode`/`state` are instance attributes the
+"report thread" updates), `version` is the raw controller string and
+`version_number` the parsed tuple, there is no `get_linear_track_sn`,
+`do_not_open=True` needs `connect()`, `simulation_robot=True` answers track
+reads with `(0, [])`, `connect_fails=N` scripts failing connects, and gripper
+`set_*` calls record `wait_motion`. Scriptable `FaultScript`
 (latch error at tick N, return code X from `set_servo_angle_j`, drop mode to
 0, rail present/absent/unhomed, gripper fw); records `sent_joints` + full
 `calls` log; `emit_report(q, tcp, ...)` fires report callbacks. It encodes
@@ -690,3 +841,34 @@ pinned cases. **workcell**: one arm scripted to fail identity → others still
 (`APOLLO_HW_TESTS=1`, skipped in CI): connect one arm, 5 s joint-6 sine at
 100 Hz, zero faults, p99 tick < 3 ms; rail detect/home; gripper open/close;
 clean disconnect.
+
+## 12. Fixed 2026-09-04 — first read-only contact with the real boxes
+
+Both control boxes run fw **v1.12.10** (`7,7,XS1305,MC1303`); the pinned SDK is
+1.18.5. Reading them (no motion) exposed six defects in code that had only
+ever run against the permissive fake; all fixed the same day, the fake now
+mirrors the SDK (§11), and each has a regression test:
+
+1. `driver.py` `register_report_callback(..., report_mode=True)` — no such
+   keyword in 1.18.5 → `TypeError` after `motion_enable/set_mode(0)/rail homing`.
+   Now the exact SDK keyword set (§3.2 step 5).
+2. `driver.py` `_on_report` read `data["mode"]` — the payload has no `mode`
+   (only the `mode_changed` callback does) → `mode == 0` → Studio-conflict
+   detector → `LATCHED` ~1.2 s after every connect. Now `api.mode` (§3.4).
+3. `driver.py` `parse_fw(str(api.version))` parsed the raw controller string
+   `7,7,XS1305,MC1303,v1.12.10` → bogus major, fw gates trivially true. Now
+   `read_fw_tuple(api)` → `api.version_number` (§3.2 step 2).
+4. `rail.py` `get_linear_track_sn()` — not on `XArmAPI` 1.18.5 → `AttributeError`.
+   Now registers-only detection with a warning when the SN API is absent (§5).
+5. `workcell.py` never copied `driver.connect_warnings` (backstop `set_*`
+   return codes) into `ArmBringupStatus.warnings`. Now it does (§9).
+6. `grippers.py` G2 `set_gripper_g2_position(..., wait=False)` without
+   `wait_motion=False` → SDK `wait_move()` blocks the 5 Hz monitor thread
+   while the arm moves. Now `wait_motion=False` — also applied to the classic
+   `set_gripper_position`, whose SDK path has the same default (§4).
+
+Also learned: the Perception Arm (`view`, 192.168.2.219) reports controller
+error **C19** (SDK title "End Effector Communication Error"; Studio says "End
+Module Communication Error") persistently; both arms `state 4`, `mode 0`; both
+tracks unhomed/unenabled (§5). The joint convention is an identity mapping to
+the `mavis_v2` twin (no +π on joint 1; see `docs/prompts/phase-09a-*.md`).

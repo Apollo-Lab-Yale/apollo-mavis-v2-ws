@@ -9,7 +9,10 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
 
 ## 前置条件
 
-- 依赖 phase：01–08 全部完成。
+- 依赖 phase：01–08 全部完成；**phase-09a**（`phase-09a-hardware-twin-overlay.md`，2026-09-04：
+  真机只读状态监视 `telemetry.hardware_monitor` + 孪生叠加窗口 `grip_wrist_align` /
+  `view_wrist_align`）已落地——本阶段所有"twin 渲染 vs 真机相机"的对拍都用这两个窗口判断，
+  不再另写渲染脚本。
 - 必读设计文档：
   - `docs/design/00-overview.md` §6（安全分层）、§7（bring-up）、§9（性能目标）
   - `docs/design/02-hardware.md`（netsetup/驱动真机行为）
@@ -25,7 +28,11 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
   `reconcile --apply` 清理目标机已知污染 — 去重两个同名 `xarm7_1` profile、剥离
   `xarm7_1`/`xarm7_2` 的 gateway（xarm7_2 的 gateway `192.168.1.1` 甚至在错误子网）、
   删除 `default via 192.168.1.1 dev enp36s0f0 metric 20100` 假默认路由、按 MAC +
-  ifname 钉死 profile、`autoconnect yes` 优先级 50。
+  ifname 钉死 profile、`autoconnect yes` 优先级 50。**2026-09-04 已完成**（`netsetup install` + `match`，两条 profile
+  `mavis_manipulation_arm`(enp36s0f1) / `mavis_viewpoint_arm`(enp36s0f0) 已按 MAC + ifname 钉死，
+  旧 `xarm7_*` profile 与 metric 20100 假默认路由已不存在，`/etc/apollo-mavis-v2/nic_map.json`
+  含两臂；见 `phase-09-todo.md` A1 与 `docs/deploy/DEPLOYMENT.md` S5——dispatcher 钩子仍指向开发者
+  venv，部署到 ops 账号时要重跑 install）。
 - **硬件逐级点亮**（每步通过才进下一步；顺序 = 风险递增；对照 11-safety §14.3
   硬件验收清单执行）：
   1. 单臂、无 rail、低速：bring-up、controller backstops 生效并**回读**
@@ -36,7 +43,13 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
   3. gripper（classic 与 G2 各验一台，若在场）。
   4. 数字孪生对真机：twin fidelity — 6 个示教位姿（贴近桌面/rail/他臂），twin
      `clearance()` 与卷尺实测一致到 **δ/2（4 mm）以内**，否则先修外参/网格；twin
-     渲染 vs 真机相机画面对拍。
+     渲染 vs 真机相机画面对拍——**方法 = phase-09a 的叠加窗口**：Hardware 页签的
+     `grip_wrist_align` / `view_wrist_align`（孪生按真机关节角/导轨位置正运动学后，从同一台
+     腕部相机、用 D435i 彩色内参渲染，只保留臂/导轨/夹爪/麦克风/相机体像素，淡黄半透明叠在
+     真机画面上；蓝色细线 = 孪生的桌沿/障碍物边缘）。导轨归零 + 使能后叠加窗口下沿的小字
+     "rail not homed · twin assumes 0.65 m" 应消失（`rail_pos_m` 取代 `rail_fallback_m`）；
+     若孪生臂整体转 180° 或导轨方向反了，用 `twin_overlay.joint1_offset_rad` /
+     `rail_flip` 诊断（默认恒等，关节约定已在 2026-09-04 验证为恒等）。
   5. 双臂 + gate：10% 速度逼近课目验证 clamp/block 在接触前发生；
      deep-penetration 课目 — free-drive 进膨胀带后重新使能，IK 恢复梯退出且无
      C24/C31。
@@ -100,7 +113,8 @@ NVENC 视频编码优化（除非验收不达标）。
       物理急停恢复后首个下发步 < 1 mm；UI 错误码 chip 全程正确。
 - [ ] twin 校准：6 个示教位姿上 twin `clearance()` 与实测差 ≤ **4 mm**（δ/2）；
       twin FK TCP vs 控制器上报 TCP 误差 < 5 mm；rail 移动时 twin rail 位姿跟踪
-      实测 ≤ 5 mm；twin 渲染与真机相机对拍无明显姿态错位。
+      实测 ≤ 5 mm；twin 渲染与真机相机对拍无明显姿态错位——以 phase-09a 的 `*_align` 叠加窗口为准：
+      两臂/导轨/夹爪的淡黄轮廓与真机画面重合，导轨归零、使能后小字不再显示 fallback。
 - [ ] 真机 collection 会话：录 3 个 episode（save×2 discard×1），数据集回读通过
       phase-07 的全部断言；`robot_type` 无 `_mujoco` 后缀。
 - [ ] 真机 DAgger 短会话：接管/交还无跳变；trainer 在 GPU 1（`nvidia-smi` 验证）、

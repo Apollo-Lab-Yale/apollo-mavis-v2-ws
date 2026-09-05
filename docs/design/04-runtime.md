@@ -46,7 +46,13 @@ src/apollo_mavis_v2_runtime/        # pyproject extras: [hardware] [sim] [traine
 │               GET /api/microphones, phase-11 §13.3),
 │               hardware_probe.py (HardwareProbe thread: TCP 502 connect-and-close
 │               per configured hardware arm → ArmStatusInfo.reachable /
-│               WorkcellStatus.hardware_ready, phase-11 §13.1)
+│               WorkcellStatus.hardware_ready, phase-11 §13.1),
+│               hardware_monitor.py (HardwareStateMonitor: one READ-ONLY
+│               apollo_mavis_v2_hardware.ArmStateMonitor per hardware arm — joints,
+│               flange pose, error/warn codes, rail + gripper registers, never a
+│               command — with the pause = release-the-box supervisor; feeds
+│               telemetry.hardware_monitor, ArmStatusInfo.error_code and the twin
+│               overlays, phase-09a §13.3)
 ├── safety/     gate.py (SafetyGate/NullGate §8), supervisor.py (twin gate §8),
 │               watchdog.py (InputWatchdog + ArmReportWatchdog §8)
 ├── profiles/   store.py (core ProfileStore re-export + save_from_snapshot §9)
@@ -55,7 +61,10 @@ src/apollo_mavis_v2_runtime/        # pyproject extras: [hardware] [sim] [traine
 │               policy_runner.py, recorder.py (DaggerRecorder), reloader.py, client.py,
 │               trainer/ (AsyncTrainer process pkg — entrypoint
 │               `python -m apollo_mavis_v2_runtime.dagger.trainer`) (§11; 12-dagger §1)
-├── streams/    hub.py (VideoHub §13.4), render_source.py (sim/twin FrameSources)
+├── streams/    hub.py (VideoHub §13.4), render_source.py (sim/twin FrameSources),
+│               twin_overlay.py (TwinOverlayRenderer thread + per-stream
+│               TwinOverlaySource: the "<camera_id>_align" digital-twin alignment
+│               overlays over the hardware wrist cameras, phase-09a §13.4)
 └── server/     app.py, rest.py (§13.1), ws_control.py (§13.2),
                 ws_telemetry.py (§13.3), ws_video.py (§13.4)
 ```
@@ -75,8 +84,10 @@ session state is singleton). Real-time work never runs on the event loop:
 | `ControlLoop` thread | 100 Hz | teleop pipeline, gate, snapshot publish | Budget <2 ms/tick: IK ~0.12 ms/arm + twin check 0.24–0.75 ms (3 arms), measured |
 | `ArmSender` ×N (1/arm) | 100 Hz | blocking `ArmInterface.command_joints` | xArm SDK is sync TCP; a slow arm never stalls the tick — reads a depth-1 `LatestSlot[np.ndarray]` |
 | camera capture ×M | cam fps | `CameraInterface` bg threads | Provided by hardware/sim packages |
-| `RenderThread` | per-stream fps (≤30) | ALL `mujoco.Renderer` instances (sim + twin views) | runtime hosts sim's `RenderService` (03-sim §7), which paces each stream at its own fps — a fixed rate could not feed the 30 fps video streams; GL context thread-affinity; `MUJOCO_GL=egl`; ~0.6 ms/frame measured on the 4090 |
+| `RenderThread` | per-stream fps (≤30) | every `mujoco.Renderer` of sim's `RenderService` (sim + twin views) | runtime hosts sim's `RenderService` (03-sim §7), which paces each stream at its own fps — a fixed rate could not feed the 30 fps video streams; GL context thread-affinity; `MUJOCO_GL=egl`; ~0.6 ms/frame measured on the 4090 |
 | `EncoderWorker` ×streams | stream fps | `cv2.imencode` JPEG q80 (1–3 ms/frame) | Encode-once; WS + MJPEG share the buffer |
+| `TwinOverlayRenderer` (phase-09a) | `twin_overlay.fps` (12) | its OWN `BuiltScene` copy, `MjData` and two `mujoco.Renderer`s (RGB + segmentation) for the `<camera_id>_align` overlays | Session-less; renderers created and closed in-thread (GL affinity); ~1 ms RGB + ~4.5 ms segmentation per stream; never touches the gate's `DigitalTwin` (§13.4) |
+| `hw.<arm>.monitor-ro` ×N + `HardwareStateMonitor` supervisor (phase-09a) | 10 Hz (+ ~2 Hz registers) / 0.5 s | one READ-ONLY xArm SDK client per hardware arm (`apollo_mavis_v2_hardware.ArmStateMonitor`) | Session-less; zero writes; released (`paused`) while a hardware session owns the box (§13.3) |
 | `RecorderThread` | 20–30 fps | the LeRobot dataset writer (single owner) | `add_frame`/`save_episode`; never touched from other threads |
 | `PolicyRunner` | 10–30 Hz | policy `act()`, GPU 0 | DAgger/inference only (§11) |
 | sim stepping thread | 500 Hz | `mj_step` (sim workcell) | Lives in `apollo_mavis_v2_sim`; runtime treats sim like hardware |
@@ -756,7 +767,7 @@ generated from them — 05-ui §2). Errors: `{"detail": str}` with 4xx/5xx.
 |---|---|---|
 | `GET /api/health` | → `{status, epoch, version}` | liveness; `epoch` = process UUID |
 | `GET /api/workcell?kind=hardware\|sim` | → `WorkcellStatus{kind, available_kinds, arms: ArmStatusInfo[], cameras: CameraInfo[], policies_available: bool, hardware_ready: bool}` | per-arm connectivity/rail/gripper for the Welcome page (`reachable` / `hardware_ready`: core §12). `kind` optional (phase-11): omitted = the session's kind, else sim, cameras = everything previewed (legacy); `sim` = arms of the preview/session scene + sim cameras; `hardware` = arms from `workcells.hardware` (`ip` filled, `reachable: open\|refused\|unreachable\|unknown` from the `HardwareProbe`, `connected` keeps its "a hardware session exists" meaning, rail/joint limits from the digital-twin scene) + hardware cameras (`live` = preview opened). `hardware_ready` (every configured hardware arm `open`) is on every response and gates the Hardware-tab launchers (05-ui §8.1); a `kind` that is not configured returns empty `arms`/`cameras` (UI reads `available_kinds`); other values → 422 |
-| `GET /api/cameras` | → `CameraInfo[]` | sim preview/session cameras (kind `sim`, `live: true`) AND every configured hardware camera (kind `v4l2\|realsense`; `live` iff its pre-session preview opened, §13.4). The UI never opens `/ws/video/<id>` for `live: false` rows (draws a black "no signal" tile instead: an unknown stream id closes 1008 and would reconnect forever) |
+| `GET /api/cameras` | → `CameraInfo[]` | sim preview/session cameras (kind `sim`, `live: true`) AND every configured hardware camera (kind `v4l2\|realsense`; `live` iff its pre-session preview opened, §13.4) AND, phase-09a, one `<camera_id>_align` row per hardware wrist camera (kind `twin`, `live` = the real camera is live AND the overlay composites, §13.4). The UI never opens `/ws/video/<id>` for `live: false` rows (draws a black "no signal" tile instead: an unknown stream id closes 1008 and would reconnect forever) |
 | `GET /api/microphones` | → `MicrophoneInfo[]{mic_id, label, kind: pulse\|fake\|none, source, sample_rate, channels, live, status: MicStatus, detail}` | phase-11 (`MicrophoneInfo` / `MicStatus`: core §12 `protocol/microphone.py`; `ArmConfig.microphone`: core §7): the configured microphone (`microphone.enabled`) is ALWAYS listed — `live: false` with `status: absent\|stalled\|error\|no_backend` and a human-readable `detail` when it is unplugged / silent / failing / disabled — so the Hardware tab can render the MicTile with nothing connected; `[]` when `microphone.enabled: false`. Same device status as `telemetry.microphone` (§13.3); levels ride telemetry |
 | `GET /api/scenes?kind=sim\|twin` | → `SceneInfo[]` | from the `sim` scene registry (id, #arms, rail flags, cameras) |
 | `GET /api/keymap` | → `KeymapEntry[]` | canonical, from `core.protocol.keymap`; UI builds its bound-key set from it |
@@ -855,6 +866,57 @@ block is ≈0.5 kB (≈13 kB/s per client at 25 Hz). Raw PCM is never streamed o
 telemetry; a future listen/record feature would get its own `/ws/audio/<id>`
 binary channel with the §13.4 framing.
 
+**`hardware_monitor: HardwareMonitorTelemetry`** (additive, phase-09a; core §11
+`protocol/hardware_monitor.py`; the LAST field of `TelemetryMsg`, after
+`microphone`). Always present: `{enabled: false, paused: false, arms: [],
+overlays: []}` is the valid block when no `hardware` workcell is configured or
+the `[hardware]` extra is missing. Built by
+`ws_telemetry.build_hardware_monitor_telemetry(runtime)` from two
+Runtime-owned objects, session-less and pre-session:
+
+- `arms: ArmMonitorTelemetry[]` — one row per configured hardware arm (config
+  order) from `devices/hardware_monitor.py` (`HardwareStateMonitor`, one
+  read-only `ArmStateMonitor` per arm, `hardware_monitor.*` config §14):
+  `status: off | connecting | running | stale | paused | error`, `detail` (the
+  SDK's controller-error title, e.g. `controller error 19: End Effector
+  Communication Error` — the Perception Arm's live C19), `seq`, `age_s`, `q[7]`
+  (rad, controller order — an **identity** mapping onto the twin's
+  `<arm>_joint1..7`, verified 2026-09-04, no π offset), `tcp_pose` (flange pose
+  `[x, y, z m, roll, pitch, yaw rad]` in the base frame), `rail_present /
+  rail_homed / rail_enabled`, `rail_pos_m` (**null unless homed AND enabled** —
+  the register is meaningless otherwise; both lab tracks are unhomed today),
+  `rail_raw_mm` (always when present), `gripper_open_frac` (0 closed .. 1 open,
+  `null` for gripper `none`) / `gripper_raw`, `error_code`, `warn_code`,
+  `state` (4 = stopped / not enabled), `mode`. `stale` is derived from the
+  sample age (`hardware_monitor.stale_s`); the same `error_code` fills
+  `ArmStatusInfo.error_code` in `GET /api/workcell?kind=hardware` (0 without
+  a sample). **Zero writes**: the monitor's SDK allowlist is
+  `apollo_mavis_v2_hardware.monitor.READ_ONLY_SDK_METHODS` (02-hardware).
+- `paused: bool` — a hardware session owns the boxes. **Pause = release the
+  connection**: the supervisor thread polls `Runtime._hardware_session_active`
+  every 0.5 s and `disconnect()`s every arm monitor on the rising edge (status
+  `paused`, last sample kept), `start()`s them again on the falling edge; two
+  SDK clients on one control box are unevidenced, so the monitor and a
+  session driver never hold the same box. `HardwareStateMonitor.pause() /
+  resume()` are the synchronous seams a hardware bring-up (phase-09) calls
+  around its own connect; whole transitions are serialized (`_apply_lock`) so
+  a supervisor edge and a seam call never interleave their per-arm walks.
+  `ArmStateMonitor.disconnect()` returns False when its poll thread is still
+  inside a blocking SDK call (`connect()` can exceed the 2 s join budget) —
+  the runtime logs it; the thread then releases that client itself and never
+  re-publishes it (02-hardware §8.5 hand-over guarantee), and a following
+  `start()` waits for it before reconnecting.
+- `overlays: TwinOverlayTelemetry[]` — one row per `<camera_id>_align` stream
+  (§13.4): `stream_id`, `camera_id`, `arm_id`, `status: off | waiting | live |
+  stale | error`, `detail` (`rail not homed - twin assumes 0.65 m` — metres,
+  two decimals; `monitor stale: …`, `no frame from grip_wrist`, `no sample from
+  view yet - monitor error: …`, `paused - a hardware session owns the arms`;
+  parts are joined with `; `; the UI tile renders it as a caption with the
+  separators as middle dots), `fps` (1 s window),
+  `rail_fallback_m` (set while the twin assumes a rail position),
+  `joint1_offset_rad` (the diagnostic knob, 0 = verified identity),
+  `mask_fraction` (robot pixels / image pixels of the last composited frame).
+
 ### 13.4 `/ws/video/{stream_id}` and MJPEG debug
 
 `VideoHub` (`streams/hub.py`) — one pipeline per stream id:
@@ -872,7 +934,12 @@ paced at stream fps) → encoded[stream_id]: LatestSlot[bytes(header+jpeg)]
   the 12 bytes and wraps multipart) — encode-once, no double work.
 - **Stream ids**: camera ids from config, plus reserved `"sim"` and `"twin"`
   (render-thread FrameSources; exist only during a session — connecting
-  otherwise closes 1008). Unknown id → close 1008.
+  otherwise closes 1008), plus the phase-09a **`<camera_id>_align`** twin
+  overlays of the hardware wrist cameras (session-less; below). Unknown id →
+  close 1008. Reservation rules: an overlay id must not end in `_wrist_cam`
+  (the sim scene's wrist-camera names) and must not equal any camera id or
+  `sim`/`twin`; `twin_overlay.stream_suffix` (default `_align`) is the only
+  knob and a colliding id is skipped with an error log.
 - **Pre-session previews**: real-camera streams are available with no
   session, encoded at **~15 fps** (landing-page grid); on session start the
   session's cameras switch to configured fps, on teardown back to 15.
@@ -894,6 +961,64 @@ only the sim preview sources; hardware previews survive sim sessions and are
 torn down by `stop_hardware_previews()` at process exit (or handed over when a
 hardware session starts, phase-09). Hardware camera ids must not collide with
 sim scene camera names (one VideoHub namespace).
+`SessionManager.hardware_camera(cam_id)` returns the started preview camera
+(or `None`): a UVC node cannot be opened twice, so every other consumer of a
+real frame — the twin overlay below — reads `latest()` from that one object.
+
+**Digital-twin alignment overlays (phase-09a;
+`docs/prompts/phase-09a-hardware-twin-overlay.md`; `streams/twin_overlay.py`).**
+For every hardware camera mounted on an arm (`extrinsics_frame: ee:<arm>`, else
+the `<arm>_` id prefix: `grip_wrist` → `grip`) the Runtime-owned
+`TwinOverlayRenderer` publishes a session-less stream
+`<camera_id><twin_overlay.stream_suffix>` — `grip_wrist_align`,
+`view_wrist_align` — at `twin_overlay.fps` (12): the REAL frame with the
+`digital_twin_scene` (`mavis_v2`, Perception Arm with the microphone body,
+`SceneOverrides(microphones=…, base_pose=…)`) rendered from the SAME wrist
+camera and composited as a pale-yellow translucent silhouette. It is a visual
+tool to judge the twin against the cell (rail position and direction, base
+pose, camera extrinsics, joint convention) — not a calibration, and not shown
+in the Cockpit. One thread owns a PRIVATE `BuiltScene` copy (never the
+phase-09 gate's `DigitalTwin`) with these compile-time edits, all verified on
+the lab box (MuJoCo 3.12.0 + EGL): `spec.visual.quality.offsamples = 0`
+(multisampling blends segmentation ids at edges into OTHER valid geom ids —
+mask area inflates, centroid off by 37 px); per wrist camera
+`resolution = [640, 480]`, `sensor_size`, `focal_pixel = [fx, fy]`,
+`principal_pixel = [W/2 − cx, H/2 − cy]` from `CameraConfig.intrinsics`
+(**MuJoCo's principal-point offset has the opposite sign of OpenCV's**; a camera
+without intrinsics falls back to fovy 43.2° — the D435i colour field of view,
+never the MJCF depth `fovy 57` — with a warning); the environment geoms
+(floor / table / obstacle) moved to geom group 4 so `MjvOption.geomgroup[4] =
+0` hides them in the robot passes. Per frame: pose every sampled arm from the
+monitor (`qpos[j1..j7] = q + [joint1_offset_rad, 0…]`; `qpos[rail] =
+rail_pos_m`, `rail_flip` → `0.65 − pos`, or `rail_fallback_m[arm]` while the
+track is not homed / enabled — telemetry `rail_fallback_m` + detail `rail not
+homed - twin assumes X m`; gripper fingers `(1 − open_frac) · 0.85` rad via the
+sim gripper mapping), `mj_forward`, an RGB pass (twin shading) and a
+segmentation pass (robot mask = every non-environment geom, mic and camera
+bodies included), then `out[mask] = alpha · tint + (1 − alpha) · real` with
+`tint = tint_rgb · (0.55 + 0.45 · luminance)`, a 1 px `edge_rgb` inner outline,
+and with `env_outline` an env-only segmentation pass whose Canny edges are
+drawn in `env_rgb` (table / obstacle edges = the base-placement cue; the robot
+occludes them). A stale / erroring / connecting / paused monitor for the
+stream's arm swaps the tint for `stale_tint_rgb` (grey) and reports status
+`stale` — provided the arm HAS a sample (the twin is drawn from that last
+reading); an arm the monitor never sampled (box off, still connecting) →
+`waiting` with detail `no sample from <arm> yet - monitor <status>: …`
+(nothing published, `/api/cameras` `live: false`) rather than a grey twin at
+the keyframe posture nobody measured; no real frame → `waiting` (nothing
+published); a hardware session (`paused()`) → `waiting` with detail `paused -
+a hardware session owns the arms`. The published `CameraFrame` keeps the real frame's `t_mono` /
+`wallclock_ns`; each stream is an ordinary `VideoHub` FrameSource
+(`TwinOverlaySource`, JPEG q80 over `/ws/video/<id>_align`). GL contexts are
+thread-affine: both `mujoco.Renderer`s (RGB + segmentation) and the `MjData`
+are created and closed inside the overlay thread; `Runtime.start()` starts
+monitor → overlay after `start_previews()`, `Runtime.stop()` stops overlay →
+monitor → the rest. `/api/cameras` and `/api/workcell?kind=hardware` list the
+overlays as `CameraInfo{kind: "twin", label: "Manipulation · twin overlay" |
+"Perception · twin overlay", resolution: [640, 480], fps: 12, live}` with
+`live` = the real camera underneath is live AND the overlay status is `live`
+or `stale` (so `waiting` / paused / `off` rows draw the black tile and open no
+WebSocket). Cost: ~1 ms RGB + ~4.5 ms segmentation per stream per frame.
 
 ### 13.5 SPA serving & server startup
 
@@ -948,9 +1073,13 @@ workcells:                   # POST /api/session picks by requested kind
                                             # between the depth and colour interfaces), YUYV
                                             # only; serial -> arm mapping confirmed 2026-09-04
       - {id: grip_wrist, kind: v4l2, serial: "349643062582", fourcc: YUYV,
-         resolution: [640, 480], fps: 30}
-      - {id: view_wrist, kind: v4l2, serial: "322143060792", fourcc: YUYV,
-         resolution: [640, 480], fps: 30}
+         resolution: [640, 480], fps: 30,
+         intrinsics: {fx: 608.19, fy: 608.23, cx: 327.39, cy: 247.90}}  # D435i COLOUR
+      - {id: view_wrist, kind: v4l2, serial: "322143060792", fourcc: YUYV,   #   imager
+         resolution: [640, 480], fps: 30,                                   #   (rs-enumerate-
+         intrinsics: {fx: 606.36, fy: 606.38, cx: 311.90, cy: 249.45}}  #   devices -c),
+                                            # fovy = 2·atan(240/fy) ≈ 43.2°, NOT the MJCF
+                                            # depth fovy 57; the twin overlay renders with them
     safety: {enabled: true, geom_inflation_m: 0.008, min_clearance_m: 0.016}
   sim:      { <WorkcellConfig>: sim_scene, cameras (kind sim),
               safety: {safety_debug: false} }
@@ -1022,6 +1151,25 @@ hardware_probe:              # phase-11 (§13.1 `reachable` / `hardware_ready`)
   period_s: 2.0              # one connect-and-close round per configured hardware arm
   timeout_s: 1.0
   port: 502                  # xArm control port; 30001-30003 report streams are never probed
+hardware_monitor:            # phase-09a (§13.3 `hardware_monitor.arms`): READ-ONLY SDK client
+  enabled: true              #   per hardware arm, session-less; paused (boxes released) while
+  poll_hz: 10.0              #   a hardware session runs; joints/pose/codes at poll_hz, rail +
+  stale_s: 0.5               #   gripper registers at ~2 Hz; sample older than stale_s -> stale
+  reconnect_s: 2.0           #   first retry delay after a failure (doubles, capped at 10 s)
+twin_overlay:                # phase-09a (§13.4 `<camera_id>_align` streams)
+  enabled: true
+  fps: 12.0
+  alpha: 0.5                 # robot tint opacity
+  tint_rgb: [255, 235, 140]  # pale yellow, shaded by the twin's own luminance
+  edge_rgb: [255, 220, 60]   # 1 px robot outline
+  env_outline: true          # table / obstacle edges as thin lines (alignment cue)
+  env_rgb: [90, 200, 250]
+  stale_tint_rgb: [170, 170, 170]   # monitor stale / error -> grey twin
+  joint1_offset_rad: 0.0     # diagnostic knob only; the identity convention is verified
+  rail_flip: false           # true: q_sim = 0.65 - q_track
+  rail_fallback_m: {grip: 0.65, view: 0.0}  # rail position the twin assumes while the
+                                            #   track is not homed (its register is meaningless)
+  stream_suffix: _align      # grip_wrist_align / view_wrist_align (reservation rules §13.4)
 egl_device_id: 0
 ```
 
@@ -1049,6 +1197,26 @@ failing. Unplugging is detected by a 1 Hz Pulse source re-listing (Pulse
 migrates streams to the fallback source rather than erroring); open/read
 failures re-open with 0.5 → 5 s backoff. Placeholder arm IPs / camera paths
 only make the probe report `unreachable` and the previews `live: false`.
+
+`hardware_monitor.*` and `twin_overlay.*` are owned by `Runtime` for the process
+lifetime (phase-09a): `HardwareStateMonitor` (`devices/hardware_monitor.py`) is
+constructed in `Runtime.__init__` (inert — `enabled: false`, every arm `off`
+with a `detail` — without a `hardware` workcell, with `enabled: false`, or when
+`apollo_mavis_v2_hardware` is not importable) and `TwinOverlayRenderer`
+(`streams/twin_overlay.py`) when a hardware workcell exists (inert without a
+wrist camera matching an arm, without `digital_twin_scene`, or without the
+`[sim]` extra). `Runtime.start()` starts them monitor → overlay AFTER
+`manager.start_previews()` (the overlay composites onto the hardware camera
+previews); `Runtime.stop()` stops overlay → monitor before everything else.
+`Runtime(cfg, monitor_factory=…)` is the test seam that replaces the hardware
+package's `ArmStateMonitor`. `CameraConfig.intrinsics` on the hardware wrist
+cameras are the D435i **colour** intrinsics (the depth stream is not used);
+without them the overlay renders with fovy 43.2° and logs a warning. Both lab
+tracks are unhomed today, so `rail_fallback_m` (grip 0.65 = the operator's
+right end, view 0.0 = the left end, matching the `mavis_v2` keyframe) is what
+the twin shows until phase-09 homes them; `joint1_offset_rad` / `rail_flip`
+exist only to diagnose a convention mismatch on the live cell and stay at their
+identity defaults.
 
 `tracker.*` is owned by `Runtime` for the process lifetime (`TrackerReader`
 thread + live `TrackerSettings`); the `tracker_settings` action mutates

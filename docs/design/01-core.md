@@ -5,7 +5,11 @@ Status: v1.0 (2026-09-01; amended 2026-09-03 — phase-10 tracker calibration:
 amended 2026-09-03 — phase-11 MAVIS UI: `protocol/microphone.py`
 (`MicrophoneInfo`, `MicStatus`), `MicrophoneTelemetry` / `TelemetryMsg.microphone`,
 `ArmStatusInfo.reachable`, `WorkcellStatus.hardware_ready`, `ArmConfig.microphone`;
-§7, §11, §12, §14 — all additive).
+§7, §11, §12, §14; amended 2026-09-04 — phase-09a hardware twin overlay:
+`protocol/hardware_monitor.py` (`ArmMonitorTelemetry`, `TwinOverlayTelemetry`,
+`HardwareMonitorTelemetry`, `ArmMonitorStatus`, `TwinOverlayStatus`),
+`TelemetryMsg.hardware_monitor`, `CameraInfo.kind` `"twin"`; §11, §12, §14, §18 —
+all additive).
 Conforms to `00-overview.md` v0.3 (binding spine).
 Research ground truth: `docs/research/{dagger-online-training, lerobot-data,
 xarm-python-sdk, xarm7-ik}.md`. Message shapes mirror `05-ui.md` §2 exactly.
@@ -45,7 +49,7 @@ apollo-mavis-v2-core/
 │   ├── profiles/store.py      # ProfileStore (§8)
 │   ├── dagger/                # types.py interfaces.py (§9)
 │   └── protocol/              # control.py (§10) telemetry.py (§11) session.py (§12)
-│                              #   tracker.py microphone.py (§12)
+│                              #   tracker.py microphone.py (§12) hardware_monitor.py (§11)
 │                              #   video.py keymap.py (§13) export_schemas.py (§14)
 └── tests/                     # §18
 ```
@@ -611,7 +615,7 @@ Devices page has no session and `/ws/control` nacks actions without one, and
 (§13) are unchanged — the controller trigger is re-purposed by the runtime as
 the yaw-gesture capture click while a yaw calibration is active.
 
-## 11. Protocol: telemetry (`protocol/telemetry.py`)
+## 11. Protocol: telemetry (`protocol/telemetry.py`, `protocol/hardware_monitor.py`)
 
 Server → all `/ws/telemetry` clients at 25 Hz (20–30 band). Shapes match
 05-ui §2; *additive* fields extend the UI shape (UI ignores unknowns).
@@ -714,6 +718,64 @@ class MicrophoneTelemetry(BaseModel):    # additive block (phase-11; 04-runtime 
                                          #   env / 127 * 10 ** (peak_dbfs / 20) (oscilloscope)
     overruns: int = 0                    # backend overruns / dropped blocks since start
 
+ArmMonitorStatus  = Literal["off", "connecting", "running", "stale", "paused", "error"]
+    # protocol/hardware_monitor.py (phase-09a). off = monitor disabled / hardware package
+    # not importable; connecting = opening the box (incl. reconnect backoff); running =
+    # samples within stale_s; stale = connected, last sample older than stale_s; paused =
+    # a hardware session owns the box (connection RELEASED, never shared); error =
+    # connect / read failure (runtime retries with exponential backoff)
+
+class ArmMonitorTelemetry(BaseModel):    # one arm as seen by the READ-ONLY monitor
+    arm_id: str                          # the only required field
+    status: ArmMonitorStatus = "off"
+    detail: str = ""                     # e.g. "controller error 19: End Effector
+                                         #   Communication Error" (the SDK's title for C19;
+                                         #   xArm Studio calls it "End Module Communication
+                                         #   Error")
+    seq: int = 0; age_s: float | None = None
+    q: list[float] = []                  # 7 joint angles, rad, controller order = IDENTITY
+                                         #   onto the twin's <arm>_joint1..7 (no pi offset;
+                                         #   verified 2026-09-04)
+    tcp_pose: list[float] = []           # controller flange pose [x,y,z m, roll,pitch,yaw
+                                         #   rad] in the arm base frame (tcp_offset zero)
+    rail_present: bool | None = None     # linear-track registers readable
+    rail_homed: bool | None = None       # on_zero == 1
+    rail_enabled: bool | None = None
+    rail_pos_m: float | None = None      # None unless homed AND enabled (the register is
+                                         #   meaningless otherwise)
+    rail_raw_mm: float | None = None     # raw register, always reported when present
+    gripper_open_frac: float | None = None     # 0 closed .. 1 open; None for gripper "none"
+    gripper_raw: float | None = None     # raw SDK reading for diagnosis
+    error_code: int = 0; warn_code: int = 0    # controller codes (19 = End Effector Comm Error)
+    state: int | None = None             # controller state (4 = stopped / not enabled)
+    mode: int | None = None
+
+TwinOverlayStatus = Literal["off", "waiting", "live", "stale", "error"]
+    # off = overlay disabled / twin scene failed to build; waiting = nothing published (no
+    # real camera frame yet, NO monitor sample for this arm yet — box off / connecting: the
+    # twin is never drawn at an unmeasured keyframe posture — or a hardware session owns the
+    # boxes, monitor paused); live = compositing at ~cfg.fps; stale = this arm HAS a sample
+    # but its monitor is not running (sample aged out / error / connecting / paused; twin
+    # drawn from that last sample in the stale tint); error = render / composite failure
+
+class TwinOverlayTelemetry(BaseModel):   # one "<camera_id>_align" stream (04-runtime §13.4)
+    stream_id: str                       # grip_wrist_align / view_wrist_align
+    camera_id: str                       # grip_wrist / view_wrist (the real frame underneath)
+    arm_id: str
+    status: TwinOverlayStatus = "off"
+    detail: str = ""                     # e.g. "rail not homed - twin assumes 0.65 m"
+    fps: float = 0.0                     # measured publish rate (1 s window)
+    rail_fallback_m: float | None = None # set while the track is not homed and the twin
+                                         #   assumes the configured position instead
+    joint1_offset_rad: float = 0.0       # diagnostic knob echo (0 = the verified identity)
+    mask_fraction: float = 0.0           # robot pixels / image pixels of the last frame
+
+class HardwareMonitorTelemetry(BaseModel):   # additive block (phase-09a; 04-runtime §13.3);
+    enabled: bool = False                #   EVERY field defaults (no-hardware producers
+    paused: bool = False                 #   validate); paused = a hardware session owns the
+    arms: list[ArmMonitorTelemetry] = [] #   boxes (monitor connections released)
+    overlays: list[TwinOverlayTelemetry] = []
+
 class TelemetryMsg(BaseModel):
     t: Literal["telemetry"] = "telemetry"
     seq: int; ts: float; epoch: str      # ts = server monotonic, s
@@ -729,7 +791,28 @@ class TelemetryMsg(BaseModel):
     tracker: TrackerTelemetry | None = None     # additive (13-tracker §3.5)
     microphone: MicrophoneTelemetry | None = None   # additive (phase-11); the UI
                                                 #   de-duplicates frames on ``seq``
+    hardware_monitor: HardwareMonitorTelemetry | None = None
+                                                # additive (phase-09a); session-less like
+                                                #   tracker / microphone
 ```
+
+**Hardware monitor / twin overlay (`protocol/hardware_monitor.py`; phase-09a,
+`docs/prompts/phase-09a-hardware-twin-overlay.md`).** While no hardware session
+owns the control boxes the runtime polls both xArm7 controllers *read-only*
+(joints, flange pose, linear-track and gripper registers, error/warn codes)
+and renders the `mavis_v2` digital twin from each wrist camera's viewpoint as
+a tinted overlay on the real frame — the `<camera_id>_align` streams
+(`grip_wrist_align`, `view_wrist_align`), listed in `/api/cameras` with
+`CameraInfo.kind == "twin"` (§12). The block rides
+`TelemetryMsg.hardware_monitor` next to `tracker` / `microphone`; a hardware
+session *pauses* the monitor (connections released — one box is never shared
+between two SDK clients) rather than stopping it, and the Welcome page's arm
+cards take their `error_code` from it. The module is a dependency-free leaf
+(pure pydantic) imported by `telemetry.py`; its three models ride
+`TelemetryMsg`'s `$defs` and none exports top-level (§14). Polling, reconnect
+backoff, the rail fallback and the compositing recipe are hardware / runtime
+territory (02-hardware "read-only monitor", 04-runtime §13.3 / §13.4); core
+only fixes the spellings.
 
 ## 12. Protocol: session & REST models (`protocol/session.py`, `protocol/tracker.py`, `protocol/microphone.py`)
 
@@ -778,9 +861,17 @@ class ArmStatusInfo(BaseModel):          # landing-page card
                                              #   rail arms (joint-panel slider ranges)
 
 class CameraInfo(BaseModel):
-    camera_id: str; kind: Literal["v4l2", "realsense", "sim"]; label: str
+    camera_id: str
+    kind: Literal["v4l2", "realsense", "sim", "twin"]
+                                         # twin = digital-twin overlay stream
+                                         #   "<camera_id>_align" (phase-09a, §11): the twin
+                                         #   rendered from the real wrist camera's viewpoint,
+                                         #   tinted over the real frame; additive
+    label: str
     resolution: tuple[int, int]; fps: int
-    live: bool                           # pre-session preview available (~15 fps)
+    live: bool                           # pre-session preview available (~15 fps); a twin
+                                         #   row is live iff the real camera is live AND the
+                                         #   overlay status is live / stale
 
 class WorkcellStatus(BaseModel):         # GET /api/workcell[?kind=hardware|sim]
     kind: Literal["hardware", "sim"]
@@ -999,7 +1090,8 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   # telemetry: TelemetryMsg (embeds ArmTelemetry/CollisionReport/EpisodeStatus/
   #           DaggerStatus/TrainerStatus/InferenceStatus/TrackerTelemetry/ControllerTelemetry/
   #           TrackerCalibrationStatus/LighthouseStatus/CalibrationValidation/YawGesturePoint/
-  #           MicrophoneTelemetry via $defs)
+  #           MicrophoneTelemetry/HardwareMonitorTelemetry/ArmMonitorTelemetry/
+  #           TwinOverlayTelemetry via $defs)
   # tracker:  TrackerCalibrationStatus, TrackerCalibrationCommand (REST
   #           /api/tracker/calibration; the other protocol.tracker models ride $defs only)
   # session:  SessionSpec, SessionInfo, WorkcellStatus, ArmStatusInfo,
@@ -1158,9 +1250,11 @@ All of core tests with no robot, no MuJoCo, no network.
   `JointTargetArgs` / `SessionSpec.start_from` accept/reject tables;
   `model_fields` pinned per wire model (core is the spelling authority) and
   legacy-dict additivity for every additive field (`TrackerTelemetry.*`,
-  `TelemetryMsg.microphone`, `ArmStatusInfo.reachable`,
-  `WorkcellStatus.hardware_ready`); `MicStatus` identical on
-  `MicrophoneTelemetry` and `MicrophoneInfo`.
+  `TelemetryMsg.microphone`, `TelemetryMsg.hardware_monitor`,
+  `ArmStatusInfo.reachable`, `WorkcellStatus.hardware_ready`); `MicStatus`
+  identical on `MicrophoneTelemetry` and `MicrophoneInfo`; `ArmMonitorStatus` /
+  `TwinOverlayStatus` vocabularies and `CameraInfo.kind` (incl. `"twin"`) pinned
+  as exact tuples.
 - **Keymap**: §13 invariants + literal table equality against spine §5 — any
   keymap edit is a conscious spine change.
 - **Video**: pack/unpack round trip; `struct.calcsize("<dI") == 12`;
@@ -1168,7 +1262,9 @@ All of core tests with no robot, no MuJoCo, no network.
 - **Schema export**: export twice → byte-identical; `--check` vs checked-in
   `schemas/` (drift fails CI); no numpy leakage; `EXPORTED_MODELS` pinned as
   an exact set; per-model property/required/enum/default sets pinned for the
-  tracker, microphone and phase-11 workcell fields.
+  tracker, microphone, hardware-monitor / twin-overlay and phase-11 workcell
+  fields; `CameraInfo.kind` enum incl. `"twin"` in both `CameraInfo.json` and
+  the `WorkcellStatus.json` `$defs`.
 - **Bus**: N producer threads × 1 drainer — every Future resolves exactly
   once, corr_ids match; bus-full immediate nack; handler exception →
   ok=False; `LatestSlot` overwrite + `wait_fresh` timeout semantics.

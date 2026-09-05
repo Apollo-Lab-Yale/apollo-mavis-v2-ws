@@ -38,6 +38,10 @@ phase-01-core ──┬─→ phase-02-sim-workcell ─→ phase-03-ik-twin ─�
 - phase-07/08 顺序依赖 05/06；phase-08 的 trainer 是独立进程
   （`python -m apollo_mavis_v2_runtime.dagger.trainer`，GPU 1，ZMQ 5757）。
 - phase-09 需要全部完成，且需要真机在场。
+- phase-09a（2026-09-04 插入）是 phase-09 的**只读**前置步骤：不发任何运动指令，runtime 无 session 时
+  持续读取两台真机的关节角/导轨/夹爪/错误码（`telemetry.hardware_monitor`），并把 `mavis_v2` 孪生按真机
+  状态渲染、淡黄半透明叠加在两路腕部相机画面上（Hardware 页签 `grip_wrist_align` / `view_wrist_align`）。
+  phase-09 的"twin 渲染 vs 真机相机对拍"验收项以这两个窗口为方法。
 
 > 多 agent 自主开发的编排方案（波次 DAG、验证门、故障恢复）见
 > [ORCHESTRATION.md](ORCHESTRATION.md)。
@@ -54,7 +58,8 @@ phase-01-core ──┬─→ phase-02-sim-workcell ─→ phase-03-ik-twin ─�
 | 06 | `phase-06-ui.md` | apollo-mavis-v2-ui | 05 | [x] 2026-09-01 完成（93 tests，真 runtime 协议闭环验证） |
 | 07 | `phase-07-data-collection.md` | apollo-mavis-v2-runtime (+ui) | 05, 06 | [x] 2026-09-01 完成（105 tests，e2e 录/弃/回读；runtime 需 Py3.12） |
 | 08 | `phase-08-dagger-inference.md` | apollo-mavis-v2-runtime (+ui) | 07 | [x] 2026-09-01 完成（145 tests，真实 trainer 进程集成） |
-| 09 | `phase-09-integration.md` | 全部（真机） | 01–08 | [ ] |
+| 09 | `phase-09-integration.md` | 全部（真机） | 01–08, 09a | [ ] |
+| 09a | `phase-09a-hardware-twin-overlay.md` | 全部五层（core / hardware / runtime / ui / docs）；phase-09 的只读前置步骤 | 01–08, 11；控制盒开着即可（只读，零运动指令） | [ ] 2026-09-04 设计定稿并五层实现完成（core +5 tests、hardware `monitor.py` 18 tests + 首次真机只读接触发现的 6 个 SDK 1.18.5 bug 修复、runtime 21 tests（EGL）、ui tsc/eslint/vitest/gen:check 全绿；01/02/03/04/05 设计文档同步）；真机只读验收（两臂 `running`、`q` 与 `get_servo_angle` 一致、Perception Arm C19、`/api/cameras` 两路 `*_align` kind `twin` live、`/ws/video/grip_wrist_align` 12 fps、监视前后 state/mode/error 不变）待主 agent 现场检查 |
 | 10 | `phase-10-tracker-calibration.md` | apollo-mavis-v2-core / -runtime / -ui | 05, 06（13-tracker v0.1 真机路径可用） | [ ] 2026-09-03 设计定稿（基站标定 + 航向对齐向导，REST + telemetry），三层并行实现中；真机验收待用户在场 |
 | 11 | `phase-11-mavis-ui.md` | 全部五层（core / sim / runtime / ui / docs） | 06, 07, 08, 10 | [ ] 2026-09-03 设计定稿（Welcome 页 APOLLO MAVIS V2、Hardware 与 Sim 两页签、RØDE 麦克风实时声波、单场景 `mavis_v2`、页内 `<dialog>` 启动弹窗、§6 视觉与动效规范），五层并行实现中；真机验收（仅麦克风、无机械臂）待用户在场 |
 

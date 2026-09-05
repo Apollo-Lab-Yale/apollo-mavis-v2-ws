@@ -263,6 +263,10 @@ kept as an alias (`xarm_api.py:120-133`), so both spellings work.
 # presence / identity
 get_linear_motor_version() -> (code, 'a.b.c')
 get_linear_motor_sn()      -> (code, sn)      # 14 chars; product SN prefix encodes travel:
+                                              # !! x3-level only: XArmAPI 1.18.5 exposes NO
+                                              # get_linear_track_sn / get_linear_motor_sn /
+                                              # *_version (alias map wrapper/xarm_api.py:120-133;
+                                              # __getattr__ raises) -- verified 2026-09-04
                                               # AL1300 -> 0..700 mm, AL1301 -> 0..1000 mm, AL1302 -> 0..1500 mm
 # lifecycle
 set_linear_motor_enable(enable) -> code
@@ -297,7 +301,9 @@ def has_linear_track(arm) -> bool:
     return code == 0        # no track -> code 3 (timeout) / 20 HOST_ID_ERR / 23 MODBUS_ERR_LENG
 ```
 
-  Confirm with `get_linear_motor_sn()` (`AL13*` prefix) and read travel from the SN prefix.
+  Confirm with `get_linear_motor_sn()` (`AL13*` prefix) and read travel from the SN prefix
+  — **not possible through `XArmAPI` 1.18.5** (no SN/version passthrough; `rail.detect()`
+  accepts the track on the registers alone and records a warning, 02-hardware §5).
   Also: controller error **111** = control-box external-485 device (track) communication error —
   surfaces in `error_code` if the track drops off mid-session.
 - The track's motion is a separate 1-DoF axis: the controller does **not** fold it into arm

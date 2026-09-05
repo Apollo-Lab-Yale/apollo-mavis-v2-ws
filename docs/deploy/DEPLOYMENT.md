@@ -287,7 +287,8 @@ arm IPs `grip` 192.168.1.201 / `view` 192.168.2.219 (gripper `xarm_g2`, `view`
 `microphone: true`), the two wrist cameras (`grip_wrist` serial `349643062582`,
 `view_wrist` serial `322143060792`; `kind: v4l2`, `fourcc: YUYV`, 640×480 @ 30 — see
 "Cameras" below), `microphone.enabled: true` with `source_match: NT-USB Mini`,
-`hardware_probe` on 502, `egl_device_id: 0`, `control.target_rate`, `tracker.controller_map`,
+`hardware_probe` on 502, the phase-09a `hardware_monitor` / `twin_overlay` blocks and the wrist
+cameras' D435i colour `intrinsics` (2026-09-04), `egl_device_id: 0`, `control.target_rate`, `tracker.controller_map`,
 `filter`, `calibration` blocks (these newer keys are **missing** from the developer's
 `/tmp/mavis_v2_live.yaml`; the render starts from the repo file so they are kept).
 
@@ -505,10 +506,19 @@ timeout 2 bash -c 'echo > /dev/tcp/192.168.2.219/502' && echo view-open
 curl -s 127.0.0.1:8765/api/health                                  # {"status":"ok",...}
 curl -s '127.0.0.1:8765/api/workcell?kind=hardware' | python3 -m json.tool | grep -E '"arm_id"|"reachable"|hardware_ready'
 curl -s 127.0.0.1:8765/api/microphones | python3 -m json.tool | grep -E '"status"|"live"'
-curl -s 127.0.0.1:8765/api/cameras | python3 -c 'import json,sys; [print(c["camera_id"], c["live"]) for c in json.load(sys.stdin) if c["kind"] != "sim"]'   # grip_wrist True / view_wrist True
+curl -s 127.0.0.1:8765/api/cameras | python3 -c 'import json,sys; [print(c["camera_id"], c["live"]) for c in json.load(sys.stdin) if c["kind"] != "sim"]'   # grip_wrist True / grip_wrist_align True / view_wrist True / view_wrist_align True
 curl -s 127.0.0.1:8765/api/tracker/calibration | python3 -m json.tool | grep -E 'yaw_valid|yaw_calibrated_at|applied_yaw'
 curl -s -o /dev/null -w '%{http_code} %{content_type}\n' 127.0.0.1:8765/     # 200 text/html (UI)
 ```
+
+The two `*_align` rows (phase-09a, 2026-09-04) are the digital-twin alignment overlays
+(`kind: twin`, 640×480 @ 12 fps): each is `live: true` only while its real wrist camera is live
+AND the runtime's read-only hardware monitor has samples from that arm's control box and no
+hardware session owns the boxes — a box that is off leaves its overlay `false` while the real
+camera stays `true`. On the Hardware tab expect five tiles (two cameras, two pale-yellow
+overlays with the note `rail not homed · twin assumes 0.65 m` until the tracks are homed, the
+microphone) and, today, a red `C19` chip on the Perception Arm card; `/ws/telemetry`
+`hardware_monitor.arms[].status` should read `running` for both arms.
 
 From a mavis shell additionally (**verify on first deploy**): `pactl list short sources | grep NT-USB`
 must list `alsa_input.usb-R__DE_Microphones_R__DE_NT-USB_Mini_750BFEE8-00.mono-fallback`

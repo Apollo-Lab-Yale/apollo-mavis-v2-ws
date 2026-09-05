@@ -64,6 +64,10 @@ xArm7 驱动（mode-1 servo 流、错误恢复、rail、双种 gripper）、V4L2
     臂继续流。
   - rail（`rail.py::RailController`）：存在性 = `get_linear_track_registers()`
     code==0 **且** `get_linear_track_sn()` 有效（sim 模式控制器会静默吞 track 调用）；
+    ——**2026-09-04 修正**：SDK 1.18.5 的 `XArmAPI` 没有 `get_linear_track_sn` /
+    `get_linear_track_version`（首次真机连接抛 AttributeError），`detect()` 已改为
+    registers 可读且为真 dict 即 present（sim 模式返回 `(0, [])` → absent），SN 校验仅在
+    方法存在时执行，否则记一条 warning（02-hardware §5 / §12）；
     每次上电 `ensure_homed()`（`on_zero == 0` 时 `set_linear_track_back_origin(
     wait=True)`；未归零下发返回 code 82）；目标经 `command_joints` 的 `q[7]` 槽进入，
     5 Hz monitor 线程 `step()` 下发绝对 int mm（钳 [0, 650]、`wait=False`、

@@ -300,7 +300,12 @@ down: `view_wrist_cam.png` shows the table 22 cm below the lens, `grip_wrist_cam
 the gripper over the table's inner edge. `render_mavis_v2.py --microphone` writes the
 hardware-twin variant as `*_mic.png`; in `view_wrist_cam_mic.png` the dark mic housing
 occludes ~12 % of the frame from the bottom edge (an earlier 6.3 cm estimate gave
-~7–8 %), exactly as the physical mount does — do not "fix" it.
+~7–8 %) — by construction of the twin's mic body. The REAL `view_wrist` image
+(measured 2026-09-04, phase-09a) shows **no occlusion at all**, so the modelled
+size / position of the microphone body does not match the physical mount: it is
+to be re-measured in phase-09 (03-sim §4.3 mic bullet), and the phase-09a
+`view_wrist_align` overlay is what makes the difference visible — do not hide it
+in the overlay, fix the scene from measurements.
 
 Rail mesh facts used (mavis asset, unverified vs hardware — phase-09 item):
 across-axis extent `[−0.120, +0.0724]` m about the base line (the −0.120 side is
@@ -487,6 +492,44 @@ depth-1 latest-frame slot (matches runtime's video fanout). Facts:
 - Measured: 0.61 ms/frame 640×480 (~1600 FPS); 3 cameras 1.81 ms/tick;
   1280×720 1.21 ms. 3 sim cams + 2 views @30 Hz ≈ 3 ms/frame-set — encoding
   (runtime side) is the bottleneck. Depth rendering off in v1.
+
+**Overlay rendering recipe (phase-09a, 2026-09-04; consumer = runtime
+`streams/twin_overlay.py`, nothing in this package changed).** The runtime's
+digital-twin alignment overlays (`grip_wrist_align` / `view_wrist_align`,
+04-runtime §13.4) render `mavis_v2` from the real wrist camera's viewpoint and
+need a segmentation mask + per-camera intrinsics, which `RenderService` /
+`StreamSpec` do not offer (RGB only, shared renderer per source). The runtime
+therefore builds its OWN `BuiltScene` via `REGISTRY.build("mavis_v2",
+SceneOverrides(microphones=…, base_pose=…))` and edits the `MjSpec` copy before
+`compile()`; every primitive below was verified on the lab box (MuJoCo 3.12.0 +
+EGL) and is the recipe to reuse for any future segmentation / intrinsics work:
+
+- `spec.visual.quality.offsamples = 0` is **required** for segmentation
+  rendering: the default 4× multisampling blends edge pixels into OTHER valid
+  geom ids (mask area inflated 212 → 432 px on a test sphere, centroid off by
+  37 px). No `OffscreenSpec` knob exists for it (§4.1/§5); set it on the spec.
+- Pinhole intrinsics on a spec camera: `cam.resolution = [640, 480]`,
+  `cam.sensor_size` (any consistent size, e.g. `[640e-5, 480e-5]`),
+  `cam.focal_pixel = [fx, fy]`, `cam.principal_pixel = [W/2 − cx, H/2 − cy]` —
+  **MuJoCo's principal-point offset has the opposite sign of OpenCV's**
+  (verified to < 0.5 px). Render at exactly the intrinsics' resolution. The
+  D435i colour imager at 640×480 is fovy ≈ 43.2° (2·atan(240/fy)); the MJCF
+  `wrist_cam` `fovy=57` is the DEPTH field of view and must not be used for
+  alignment against the colour stream.
+- Robot / environment separation: floor, table and obstacle are
+  `Addressing.env_geom_ids` (geoms 0, 1, 2) and share group 0 with the arm,
+  rail, gripper, microphone and camera bodies, so `geomgroup` alone cannot
+  isolate the robot. Move the env geoms to group 4 after compile
+  (`model.geom_group[env] = 4`) and hide them with `MjvOption.geomgroup[4] = 0`
+  in the robot passes (group 3 = the inflation pads, already hidden), or map
+  the segmentation ids through `geom_bodyid` into the per-arm subtrees.
+- Segmentation output: `Renderer.enable_segmentation_rendering()`, `render()`
+  → int32 `(H, W, 2)`; `[..., 1] == mjOBJ_GEOM` is the object mask and
+  `[..., 0]` the geom id (−1 background). Cost ≈ 1 ms RGB + 4.5 ms segmentation
+  per 640×480 camera on the 4090.
+- Thread affinity as in §12: the overlay's `MjData` and both `Renderer`s (RGB +
+  segmentation) live on the overlay thread and are created/closed there; the
+  phase-09 gate's `DigitalTwin` instance is never shared with it.
 
 ## 8. DigitalTwin — `DigitalTwinInterface` implementation
 

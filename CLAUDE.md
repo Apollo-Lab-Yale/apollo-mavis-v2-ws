@@ -100,8 +100,12 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   on): a cylinder of radius 0.040 m (8 cm diameter) along link7 +z, `size=[0.040,
   0.095]`, `pos=[0, 0, 0.095]` (flange face to 0.14 m beyond the wrist-camera plane
   at z=0.05), mass 0.45 kg (NT-USB Mini ≈0.35 kg + mount — to be weighed), 1.5 cm
-  radial clearance to the side-mounted camera. With the body on, the bottom ~7–8% of
-  the view wrist-cam image is occluded by the mic — that is expected.
+  radial clearance to the side-mounted camera. With the body on, the twin's view wrist-cam image is
+  occluded from the bottom by the mic (~12 % of the 640×480 frame at the MJCF fovy 57, 03-sim
+  §4.3; an earlier estimate said 7–8 %) — expected in the twin. The REAL `view_wrist` image
+  (2026-09-04) shows NO occlusion at all: the mic body's size/position in the twin does not
+  match the real mount, and the `view_wrist_align` overlay shows exactly that; measure the
+  mount before changing the scene, do not "fix" the overlay.
 - Wrist cameras (2026-09-04): BOTH arms carry an Intel RealSense D435i (USB 8086:0b3a),
   used as plain UVC colour cameras (`kind: v4l2`, colour stream is YUYV only, 640×480@30;
   no depth is recorded, pyrealsense2 is not installed). USB serial 349643062582 (PCI bus
@@ -117,7 +121,42 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   installed. `rs-enumerate-devices` prints the ASIC serials (243522071002 fw 5.15.1,
   327122074467 fw 5.17.0.10), NOT the USB serials the config uses. The hardware camera ids
   differ from the twin's `grip_wrist_cam` / `view_wrist_cam` on purpose (both coexist in the
-  VideoHub).
+  VideoHub). D435i COLOUR intrinsics at 640×480 (`rs-enumerate-devices -c`, Inverse
+  Brown-Conrady, distortion ignored; in `configs/mavis_v2.yaml` as `intrinsics:`):
+  `grip_wrist` (ASIC 327122074467) fx 608.19 fy 608.23 cx 327.39 cy 247.90; `view_wrist`
+  (ASIC 243522071002) fx 606.36 fy 606.38 cx 311.90 cy 249.45 → fovy = 2·atan(240/fy) ≈
+  43.2°, NOT the MJCF `wrist_cam` fovy 57 (that is the depth FOV). When rendering the twin
+  from these cameras use `cam.resolution/sensor_size/focal_pixel/principal_pixel` with
+  `principal_pixel = [320 − cx, 240 − cy]` (MuJoCo's sign is the OPPOSITE of OpenCV's) and
+  `offsamples = 0` for segmentation (03-sim §7).
+- Control boxes, read-only facts (phase-09a, 2026-09-04; `docs/prompts/phase-09a-hardware-twin-overlay.md`):
+  both run firmware **v1.12.10** (`7,7,XS1305,MC1303`; below the 2.7.100 gripper-current
+  gate) with xarm-python-sdk **1.18.5** (pinned git rev); both arms `state 4` (not enabled),
+  `mode 0`. The Perception Arm (`view`, 192.168.2.219) persistently reports controller error
+  **C19** (SDK title "End Effector Communication Error"; xArm Studio: "End Module
+  Communication Error" — the end-effector bus); the Manipulation Arm has no error. **Joint
+  convention is an IDENTITY mapping**: the controller's 7 joint radians written verbatim into
+  `mavis_v2`'s `<arm>_joint1..7` reproduce `get_position()` (flange, tcp_offset zero) to
+  0.0 mm / 0.00° on both arms — NO +π on joint 1 (the keyframe's joint1 = π is the real arm's
+  actual posture, not an offset); link7 origin = controller flange TCP, `<arm>_link_tcp` site
+  168.6 mm below it. **Both linear tracks are unhomed and unenabled**:
+  `get_linear_track_registers` → `{pos: 0, status: 2, error: 0, is_enabled: 0, on_zero: 0}`,
+  so `pos` is meaningless (the Manipulation Arm's carriage is physically at the operator's
+  RIGHT end ≈ sim q 0.65 while its register reads 0); homing (`set_linear_track_back_origin`)
+  is a motion command → phase-09. SDK 1.18.5 API gaps (verified in source): `XArmAPI` has NO
+  `get_linear_track_sn` / `get_linear_track_version` (`__getattr__` raises; only
+  `get_linear_track_registers/pos/status/error/is_enabled/on_zero`, `set_linear_track_*`,
+  `clean_linear_track_error`, `get_linear_motor_registers`); `register_report_callback` has
+  NO `report_mode` kwarg; the 30003 report payload carries NO `mode` (use `api.mode`);
+  `api.version` is the RAW string `7,7,XS1305,MC1303,v1.12.10` (use `api.version_number`);
+  G2/classic gripper `set_*` need `wait_motion=False` or they `wait_move()`. The runtime's
+  session-less READ-ONLY monitor (`telemetry.hardware_monitor`, one SDK client per arm,
+  allowlist in hardware `monitor.py`) drives the twin overlays `grip_wrist_align` /
+  `view_wrist_align` (kind `twin`, Hardware tab); it is PAUSED = disconnected while a
+  hardware session owns a box (two SDK clients on one box are unevidenced). Read-only is not
+  side-effect-free: SDK `connect()` runs `clean_warn()` if a warning is latched, and the first
+  track/gripper register read may rewrite the RS-485 baud + soft-reboot the end module if the
+  controller's baud differs from the SDK default (02-hardware §8.5).
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
   hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
   NVIDIA driver 580.173.02 (upgraded 2026-09-01); NVENC works. lerobot's
