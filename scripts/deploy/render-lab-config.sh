@@ -15,7 +15,7 @@
 #   DRY_RUN=1 bash scripts/deploy/render-lab-config.sh  # render + diff only, print YAML
 #   LAB_CONFIG=/tmp/x.yaml ...                          # install somewhere else
 # Knobs (env): TRACKER_BACKEND=libsurvive LIGHTHOUSE_COUNT=3 TRACKER_YAW_DEG=116.3
-#   RAIL_IN_IK=false MIC_ENABLED=true EGL_DEVICE_ID=0 RUNTIME_HOST RUNTIME_PORT UI_DIST
+#   RAIL_IN_IK=false HARDWARE_ARMED=true MIC_ENABLED=true EGL_DEVICE_ID=0 RUNTIME_HOST RUNTIME_PORT UI_DIST
 #   LIBSURVIVE_CONFIG=$DATA_ROOT/libsurvive/config.json GRIP_IP VIEW_IP
 #   CAMERA_SERIALS="grip_wrist=349643062582,view_wrist=322143060792"
 #                       override workcells.hardware.cameras[].serial by camera id (the repo
@@ -40,6 +40,7 @@ export TRACKER_BACKEND="${TRACKER_BACKEND:-libsurvive}"
 export LIGHTHOUSE_COUNT="${LIGHTHOUSE_COUNT:-3}"
 export TRACKER_YAW_DEG="${TRACKER_YAW_DEG:-116.3}"
 export RAIL_IN_IK="${RAIL_IN_IK:-false}"
+export HARDWARE_ARMED="${HARDWARE_ARMED:-true}"
 export MIC_ENABLED="${MIC_ENABLED:-true}"
 export EGL_DEVICE_ID="${EGL_DEVICE_ID:-0}"
 export LIBSURVIVE_CONFIG="${LIBSURVIVE_CONFIG:-$DATA_ROOT/libsurvive/config.json}"
@@ -84,6 +85,10 @@ for key, sub in (("profiles_dir", "profiles"), ("datasets_root", "datasets"),
                  ("checkpoints_root", "checkpoints"), ("calibration_dir", "calibration")):
     setv((key,), f"{env['DATA_ROOT']}/{sub}")
 setv(("control", "rail_in_ik"), flag("RAIL_IN_IK"))
+# Arming switch: the lab config is the ONLY place that lets the runtime connect the
+# real xArm drivers / home the rails (repo default false; HARDWARE_ARMED=false renders
+# a config that still monitors the boxes read-only but refuses sessions and home_rail).
+setv(("hardware_session", "armed"), flag("HARDWARE_ARMED"))
 setv(("tracker", "backend"), env["TRACKER_BACKEND"])
 args = list(data.get("tracker", {}).get("libsurvive_args") or [])
 if "--lighthousecount" in args:

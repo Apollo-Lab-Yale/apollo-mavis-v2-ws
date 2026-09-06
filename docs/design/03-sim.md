@@ -1,6 +1,9 @@
 # 03 — apollo-mavis-v2-sim (`apollo_mavis_v2_sim`)
 
-Status: v0.1 (2026-09-01). Conforms to `00-overview.md` (spine, v0.3). Ground
+Status: v0.1 (2026-09-01; amended 2026-09-05 — phase-09c: §8 the static
+rail-sweep recipe the runtime builds on `check_config_violations` /
+`monitored_pairs` to gate the `home_rail` maintenance op, and the `DigitalTwin`
+API it relies on). Conforms to `00-overview.md` (spine, v0.3). Ground
 truth for numbers: `docs/research/{mujoco-xarm7-sim,xarm7-ik,collision-ik}.md`
 (benchmarked on this machine, 2026-09-01). Depends only on `apollo_mavis_v2_core`
 (+ mujoco, mink, numpy); never imports `hardware`, `runtime`, or FastAPI.
@@ -282,9 +285,9 @@ the opposite-ends factory-zero posture below — user decision.)
 | Perception Arm rail (`view`, camera-only: D435 + microphone) | outer edge 2.6 cm from the table's outer edge | y0 = 0.31 − 0.026 − 0.0724 = **0.2116** |
 | Manipulation Arm rail (`grip`, gripper + wrist cam) | 39.5 cm inward (base lines) | y0 = 0.2116 − 0.395 = **−0.1834**; plate edge 0.66 cm from the inner table edge |
 | channel | between the rail bodies | y ∈ [−0.111, 0.0916] (20.3 cm with the 19.2 cm mavis mesh) |
-| rail placement | the rail's −X end is flush with the table's −X edge (operator's right); the arms' carriage ~14 cm from it at the measured rest (2026-09-02, both arms at q ≈ 0.597) | base centre x0 = **+0.2375** (= −0.6075 + 0.845; mesh: 0.845 m from the base to the −X end, 0.2476 m to the +X/zero end at +0.4851); carriage near edge 15.0 cm, base cylinder 18.5 cm from the −X edge at q ≈ 0.597; at the keyframe's q = 0.65 the mesh carriage edge is 9.7 cm from that edge (phase-09: confirm the real track's far stop) |
-| obstacle | 0.16 × 0.16 × 0.24 m untouchable block, flush against the **+X** edge (operator's left, the empty end) in the channel; near face 27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(**0.5275**, −0.045, 0.855)`, y ∈ [−0.125, 0.035]; its inner face is 1.4 cm past the mesh gripper-rail inner edge and the 1.0926 m mesh rail reaches 3.8 cm into its x-span — a static corner overlap (mesh vs real track), harmless to twin and physics |
-| keyframe = **initial state** (user decision 2026-09-04) | both arms at the xArm7 factory zero posture — joints 2–7 = 0, **joint 1 = π** (the yaw +90 base flip) — with the rails at **opposite ends**: `grip` q = **0.65** (−X, operator's right, link_base x = −0.4125), `view` q = **0** (+X, operator's left, link_base x = +0.2375; its carriage 11.2 cm short of the obstacle's −X face and 9.7 cm outside its y span). The xArm7 zero is a FOLDED pose: forearm hanging beside the upper arm, tool pointing straight down, flange 12.05 cm above the mounting plane and 20.6 cm to the side; joint 1 = π puts that side at −Y (away from the operator) — the gripper hangs at y ≈ −0.39, 8 cm outside the table's inner edge with the finger pads 9.3 cm above the table plane; the D435 hangs into the channel at y ≈ 0.006 looking down at the table 22 cm below. Gripper open | MJCF order (rail FIRST): `view: [0, π, 0, 0, 0, 0, 0, 0]`, `grip: [0.65, π, 0, 0, 0, 0, 0, 0]`, `gripper: 1.0`. Twin audit clean at δ = 0.008 and 0.025, mic off and on, given the link2↔link4 allowed pair below. Smallest monitored clearances: grip finger pads ↔ table 9.3 cm, link_base ↔ table 10.7 cm, `view_d435_mount` ↔ grip rail 12.4 cm, view carriage ↔ obstacle 15.4 cm; mic on: **mic tip ↔ table 3.8 cm** (tip z ≈ 0.773 — the tightest clearance of the initial state, 1.3 cm outside the safety_debug band), mic ↔ grip rail 7.7 cm, mic ↔ own link1 12.4 cm, mic ↔ obstacle 17 cm |
+| rail placement along travel | **MEASURED 2026-09-05, both tracks homed** (supersedes the 2026-09-02 derivation): the extrusion's **+X / travel-zero** end is **14.0 cm** from the table's +X edge and **18.5–19 cm** from the arm base cylinder's centre | base centre x0 = **+0.2800** = 0.6075 − (0.140 + 0.1875), i.e. 32.75 cm from the +X edge (±0.25 cm from the reading spread); rail geom offset y = **0.385093** puts the mesh's zero end 0.1875 m from the base centre, at x = +0.4675. **x0 uses only the SUM of the two readings, so it is independent of which end feature the tape touched** (the mesh zero end is a 3.2 cm-square boss protruding 2.0 cm, then a 14 cm end plate, then the 19.2 cm body; the geom anchors the boss tip — if the tape read the plate face the drawn rail belongs 2.0 cm further +X, cosmetic only). **WAS x0 = +0.2375** with 0.2476 m to the zero end, read off the mavis reference mesh (which centres the carriage at mid-travel) and never verified: a 6.0 cm error that put BOTH arms **4.25 cm too far from the obstacle end**, so every obstacle-side clearance the twin reported was optimistic by that much. Price of anchoring the zero end: the mesh is 1.0926 m against the real 1.075 m, so the drawn rail now passes the table's −X edge by 1.76 cm (deliberate — the zero end is the one with the obstacle). At the keyframe's q = 0.65 the carriage's −X edge is 14.95 cm from the −X edge |
+| obstacle | 0.16 × 0.16 × 0.24 m untouchable block, flush against the **+X** edge (operator's left, the empty end) in the channel; near face 27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(**0.5275**, −0.045, 0.855)`, y ∈ [−0.125, 0.035]; its inner face is 1.4 cm past the mesh gripper-rail inner edge and the 1.0926 m mesh rail reaches 2.0 cm into its x-span (3.8 cm before the 2026-09-05 rail-zero fix) — a static corner overlap (mesh vs real track) that MuJoCo filters, both being welded to the world, so it never reaches the gate or the sweep |
+| keyframe = **initial state** (user decision 2026-09-04) | both arms at the xArm7 factory zero posture — joints 2–7 = 0, **joint 1 = π** (the yaw +90 base flip) — with the rails at **opposite ends**: `grip` q = **0.65** (−X, operator's right, link_base x = −0.3700), `view` q = **0** (+X, operator's left, link_base x = +0.2800; its carriage 6.95 cm short of the obstacle's −X face and 9.7 cm outside its y span). The xArm7 zero is a FOLDED pose: forearm hanging beside the upper arm, tool pointing straight down, flange 12.05 cm above the mounting plane and 20.6 cm to the side; joint 1 = π puts that side at −Y (away from the operator) — the gripper hangs at y ≈ −0.39, 8 cm outside the table's inner edge with the finger pads 9.3 cm above the table plane; the D435 hangs into the channel at y ≈ 0.006 looking down at the table 22 cm below. Gripper open | MJCF order (rail FIRST): `view: [0, π, 0, 0, 0, 0, 0, 0]`, `grip: [0.65, π, 0, 0, 0, 0, 0, 0]`, `gripper: 1.0`. Twin audit clean at δ = 0.008 and 0.025, mic off and on, given the link2↔link4 allowed pair below. Smallest monitored clearances, the obstacle-side ones 4.25 cm tighter since the 2026-09-05 rail-zero measurement: grip finger pads ↔ table 9.3 cm, link_base ↔ table 10.7 cm, view flange (link7) ↔ obstacle 11.6 cm, `view_d435_mount` ↔ grip rail 12.4 cm, view carriage ↔ obstacle 12.4 cm (was 15.4); mic on: **mic tip ↔ table 3.8 cm** (tip z ≈ 0.773 — the tightest clearance of the initial state, 1.3 cm outside the safety_debug band), mic ↔ grip rail 7.7 cm, mic ↔ obstacle 12.75 cm (was 17), mic ↔ own link1 12.4 cm. Nothing monitored within 9 cm with the mic off |
 | microphone (`view`, optional) | RØDE NT-USB Mini + bracket in front of the wrist camera: 8 cm diameter, tip 14 cm past the camera plane; mass ~0.45 kg (to be weighed) | `microphone: false` in the YAML (pure sim); the hardware twin builds with `SceneOverrides(microphones={"view": True})` → body `view_microphone`, cylinder `size [0.040, 0.095]`, `pos [0, 0, 0.095]` in link7 (§3); 1.5 cm radial gap to the D435 block; occludes ~12 % of `view_wrist_cam` (bottom-centre silhouette) by design |
 | `allowed_pairs` | carriages ↔ table (24 mm by construction); per arm **link2 ↔ link4**: at the factory zero the elbow housing sits 1.78 cm from the shoulder housing — inside the safety_debug band (0.025) whenever J4 ≈ 0 (J4 ≥ 0.10 rad opens it past 2.5 cm), so without the whitelist the audit refuses the initial state and the `safety_debug` gate would hold every command from it. The pair can truly meet only near J4's −11° stop with J3 rolled; intra-arm self-collision is the xArm controller's own job | four pairs; the link pairs remove link2↔link4 from the audit and from `check()` (mj_collision's full contact list) — the clearance sweep / IK rows never held intra-arm pairs, and physics still collides. None for the mic (initial-state clearances ≥ 3.8 cm) |
 | cameras / `view` | **operator convention**: every overview is framed as the operator sees the cell — the red obstacle (the +X / empty end, operator's left) and the Perception Arm on the LEFT, the Manipulation Arm (−X end) on the RIGHT, the Perception Arm nearest; all three look from the +Y (operator) side toward −Y, so image right = −X | `cam_front` at `(0, 2.0, 1.9)`, `xyaxes [-1,0,0, 0,-0.55,1]` (looks −Y and down); `cam_top` at `(0, 0, 2.6)`, `xyaxes [-1,0,0, 0,-1,0]` (image up = −Y: near +Y edge at the bottom); `view: {azimuth: -90, elevation: -30}` (free camera at +Y looking −Y — the runtime `sim` stream default) |
@@ -307,15 +310,21 @@ to be re-measured in phase-09 (03-sim §4.3 mic bullet), and the phase-09a
 `view_wrist_align` overlay is what makes the difference visible — do not hide it
 in the overlay, fix the scene from measurements.
 
-Rail mesh facts used (mavis asset, unverified vs hardware — phase-09 item):
-across-axis extent `[−0.120, +0.0724]` m about the base line (the −0.120 side is
-a 3 mm cable-tray plate; main body 14.2 cm), carriage `[−0.080, +0.090]` across /
-`[−0.098, +0.088]` along, 1.0926 m long with 0.2476 m beyond the carriage at
-q = 0. Open items for the phase-09 calibration: the mesh rail length/width vs
-the real track (the obstacle's inner face at 43.5 cm depth is 1.4 cm past the
-mesh gripper-rail edge, and the mesh rail's far +X end reaches 3.8 cm into the
-obstacle's x-span) and the mesh's zero-end overhang (sets x0 from the flush
-−X / operator's-right end).
+Rail mesh facts used (mavis asset): across-axis extent `[−0.120, +0.0724]` m
+about the base line (the −0.120 side is a 3 mm cable-tray plate; main body
+14.2 cm), carriage `[−0.080, +0.090]` across / `[−0.098, +0.088]` along,
+1.0926 m long. **The carriage is 1.0 cm asymmetric about the base**: under the
+yaw +90 flip its **+X (operator's left) edge is base + 0.098** and its
+**−X edge base − 0.088**. Two doc lines used 0.098 on both sides and were 1 cm
+off (fixed 2026-09-05 with the rail-zero measurement); at q = 0 the mesh
+carriage's +X edge stops 8.95 cm short of the mesh zero end, 0.1496 m of rail
+beyond it. **Closed 2026-09-05** by the operator's homed-carriage measurement:
+the zero-end overhang that sets x0 (see the rail-placement row — it was 6.0 cm
+wrong) and the rail length (1.0926 m mesh vs 1.075 m real). Still open, and both
+make the twin OPTIMISTIC rather than conservative: the real carriage stops 5–6 cm
+short of the rail end where the mesh stops 8.95 cm short, so the monitored
+carriage ↔ obstacle gap is ~3.4 cm generous, and the mesh rail width leaves the
+obstacle's inner face 1.4 cm past the mesh gripper-rail edge.
 
 ## 5. Scene composition via `mujoco.MjSpec`
 
@@ -542,10 +551,15 @@ the robot.
 # twin.py
 class DigitalTwin(DigitalTwinInterface):
     def __init__(self, scene: BuiltScene, inflation_m: float = 0.008,
-                 render_service: RenderService | None = None) -> None: ...
+                 render_service: RenderService | None = None,
+                 allowed_pairs_extra: Iterable[tuple[str, str]] = ()) -> None: ...
     def sync(self, states: Mapping[str, ArmState]) -> None: ...
     def check(self, q_by_arm: Mapping[str, np.ndarray]) -> CollisionReport: ...
     def check_config(self, q_full: np.ndarray) -> bool: ...   # planner path (§10)
+    def check_config_violations(self, q_full: np.ndarray, *, data: MjData | None = None
+                                ) -> list[tuple[tuple[str, str], float]]: ...  # (pair, dist) detail
+    def pair_distance(self, pair: tuple[str, str], q_by_arm=None, distmax: float = 0.5) -> float: ...
+    monitored_pairs: list[tuple[int, int]]   # geom-id pairs (arm×arm + arm×env) minus allowed pairs
     def clearance(self, distmax: float = 0.05) -> list[PairClearance]: ...
     def set_grasp_whitelist(self, arm_id: str, bodies: list[str]) -> None: ...
     def plan(self, req: PlanRequest) -> PlanResult: ...  # core §6 shapes; §10
@@ -558,7 +572,8 @@ at construction. Contacts are *detected* at `margin+gap` but generate forces
 only inside `margin` — with margin 0 they are detection-only
 (`efc_address == -1`), zero dynamics effect. Pair thresholds **sum both
 geoms' values**: per-geom `δ/2` yields the full `δ` between inflated geoms
-(default δ = `safety.geom_inflation_m` = 0.008; `safety_debug` uses 0.025).
+(default δ = `safety.geom_inflation_m` = 0.008; `safety_debug` and the runtime's
+`home_rail` sweep twin use 0.025).
 Mesh collisions use convex hulls — already conservative for concave links.
 
 **Per tick** (`sync` then `check`, from runtime's 100 Hz gate):
@@ -608,6 +623,41 @@ ascending.
 Measured ~1 µs/pair; arm0×arm1 sweep (289 pairs) ≈ 0.29 ms — called at
 telemetry rate (20–30 Hz), not in the 100 Hz gate. Requires native CCD
 (3.12 default; legacy CCD gives wrong positive distances).
+
+**Static rail-sweep recipe (phase-09c; runtime `devices/rail_sweep.py`,
+`docs/prompts/phase-09c-hardware-session.md` D4).** Rail homing
+(`set_linear_track_back_origin`) drives the carriage to the track's zero end
+from an UNKNOWN position (the register is meaningless while `on_zero == 0`), so
+it cannot go through the 100 Hz gate; the runtime gates the operator-triggered
+`home_rail` maintenance op with a static sweep on a dedicated `DigitalTwin`
+instead — the sim package ships no sweep of its own (the guardrail's
+`mavis_v2_rail_sweep` scenario, §11, is a closed-loop IK + gate run from a
+teleported pose and is NOT reusable for this). Recipe, all on the API above:
+(1) one private twin per checker, `DigitalTwin(REGISTRY.build(scene,
+SceneOverrides(microphones, base_pose)), inflation_m=0.025,
+allowed_pairs_extra=safety.allowed_pairs_extra)` — the guardrail's debug margin
+rather than the gate's 0.008, because a blind sweep from an unknown start
+deserves more; built lazily, guarded by a lock (one `MjData`, one thread), never
+shared with the gate's or the overlay's twin; (2) `q_full =
+np.array(twin.data.qpos)` (keyframe for unsampled arms), every OTHER arm posed
+via `addr[arm].qpos_adr` from its last read-only-monitor sample — `q[:7]` and
+the rail slot (`rail_pos_m`, or the configured `rail_fallback_m` plus an
+`assumptions` entry when unknown; `rail_flip` = `0.65 − q` applied); (3) the
+target arm gets its sampled `q[:7]` and its rail slot `qpos_adr[7]` steps
+through `linspace(0, 0.65, 131)` (5 mm): at every step
+`check_config_violations(q_full)` decides blocked / clear (any `dist < δ`, the
+first hit recorded as `first_blocked_m` / `first_blocked_pair` = the tightest
+violating pair) and `mj_geomDistance(model, data, g1, g2, 0.10, None)` over
+`monitored_pairs` records the tightest pair (`min_clearance_m` / `_at_m` /
+`_pair`, labels via `allowed.label_of_geom`); measured qpos is restored
+afterwards. Verdict = core `RailSweepVerdict` (01-core §12): `clear` iff no step
+violates — the whole interval must be clear because the start position is
+unknown. Measured on `mavis_v2` with the mic body (310 monitored pairs, `nq`
+22): build 0.8 s, one 131-step sweep **≈ 32 ms**; at the keyframe the tightest
+pair over the Manipulation Arm's travel is `table ↔ view_microphone` at 3.77 cm
+(rail-independent — the Perception Arm's mic tip above the table). A clear
+verdict hands `q_checked` to the hardware monitor, whose poll thread re-samples
+and refuses (zero writes) if the arm moved > 0.02 rad since.
 
 **Measured cost** (3 arms + grippers, one core): `mj_kinematics+mj_collision`
 with gap inflation = **0.24 ms** (home, 37 inactive contacts) to **0.75 ms**

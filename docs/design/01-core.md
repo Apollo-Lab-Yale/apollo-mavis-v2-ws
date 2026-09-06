@@ -14,7 +14,17 @@ amended 2026-09-04 — phase-09b error recovery: `protocol/maintenance.py`
 `MaintenancePath`), `ArmConfig.collision_sensitivity` / `.reduced_tcp_boundary_mm` /
 `.expected_sn`, `ArmMonitorTelemetry` safety read-back + `.maintenance_busy`,
 `ArmTelemetry.fault_detail` / `.recovering`, `WorkcellInterface.drain_events`;
-§5.1, §7, §11, §12, §14, §18 — all additive).
+§5.1, §7, §11, §12, §14, §18 — all additive; amended 2026-09-05 — phase-09c
+hardware session: `ArmMaintenanceOp` `home_rail`, `ArmMaintenanceRequest.dry_run`,
+`RailSweepVerdict` / `ArmMaintenanceResult.rail_sweep`, `SessionSpec.speed_scale`,
+`SessionInfo.kind` / `.speed_scale`, `ArmBringupTelemetry` /
+`SessionTelemetry.bringup`, `RailNotHomedError`; §11, §12, §14, §16, §18 — all
+additive; amended 2026-09-05 — phase-09d rail homing with twin planning:
+`PrePositionPlan` / `RailSweepVerdict.pre_position`, `MaintenanceStatus` /
+`ArmMaintenanceResult.status` / `.job_id`, `MaintenancePhase` /
+`MaintenanceProgress` / `ArmMonitorTelemetry.maintenance` (the shared names
+defined in the `hardware_monitor` leaf, re-exported by `maintenance`); §11,
+§12, §14, §18 — all additive).
 Conforms to `00-overview.md` v0.3 (binding spine).
 Research ground truth: `docs/research/{dagger-online-training, lerobot-data,
 xarm-python-sdk, xarm7-ik}.md`. Message shapes mirror `05-ui.md` §2 exactly.
@@ -695,10 +705,22 @@ class InferenceStatus(BaseModel):        # same gate machinery; takeover = SAFET
     engaged_arm: str | None = None       # additive vs 05-ui
     policy_version: str | None
 
+class ArmBringupTelemetry(BaseModel):    # one hardware bring-up step of one arm (phase-09c)
+    arm_id: str
+    step: str                            # stage: monitor / network / connect / rail / gripper /
+                                         #   report / warnings / gate / frozen / loop (the hardware
+                                         #   ArmBringupStatus stages + the runtime's own rows)
+    status: Literal["pending", "ok", "warning", "error"]
+    detail: str = ""                     # e.g. "Perception Arm frozen at last sample"
+
 class SessionTelemetry(BaseModel):       # additive block (04-runtime §13.3)
     state: str                           # SessionState value
     start_from_progress: float | None = None    # 0-1 during START_FROM
     plan_status: str | None = None; trainer_alive: bool | None = None
+    bringup: list[ArmBringupTelemetry] | None = None
+                                         # hardware bring-up progress fed from the workcell's
+                                         #   status_cb while state == "bringup"; None for sim
+                                         #   sessions / once running (additive, phase-09c)
 
 class TrackerSettingsMsg(BaseModel):     # live tracker settings (13-tracker §3.5, §4)
     yaw_deg: float; pos_scale: float; follow_rotation: bool
@@ -762,6 +784,35 @@ ArmMonitorStatus  = Literal["off", "connecting", "running", "stale", "paused", "
     # a hardware session owns the box (connection RELEASED, never shared); error =
     # connect / read failure (runtime retries with exponential backoff)
 
+ArmMaintenanceOp  = Literal["clear_errors", "apply_backstops", "recover", "home_rail"]
+    # the §12 maintenance-op vocabulary. DEFINED in protocol/hardware_monitor.py (the leaf)
+    # and re-exported by protocol/maintenance.py because MaintenanceProgress.op below needs
+    # it here while maintenance.py embeds ArmMonitorTelemetry - the two modules would
+    # otherwise import each other (phase-09d); import it from either module
+
+MaintenancePhase  = Literal["queued", "sweeping", "planning", "connecting", "positioning",
+                            "homing", "verifying", "done", "failed"]
+    # phase-09d: phases of the asynchronous RailHomingJob (one arm at a time), in execution
+    # order - queued = accepted (202), thread not started; sweeping = full-travel twin sweep
+    # at the CURRENT posture; planning = twin RRT-Connect to a rail-safe posture + the
+    # position-agnostic path check (every waypoint clear for EVERY rail position);
+    # connecting = monitor paused + joined, this arm's driver connected with the rail still
+    # unhomed at speed_scale 0.1, the other arm frozen at its last sample (09c D1);
+    # positioning = the planned path executes under the gate (ControlLoop._op_execute_plan);
+    # homing = driver.home_rail(), joints held; verifying = registers homed + enabled + no
+    # error, monitor sample, driver torn down (state 4 + brakes -> posture HELD), monitor
+    # resumed; done / failed = terminal, the final ArmMaintenanceResult (§12) is at
+    # GET .../maintenance/last
+
+class MaintenanceProgress(BaseModel):    # phase-09d: rides ArmMonitorTelemetry.maintenance
+    op: ArmMaintenanceOp                 #   while a RailHomingJob runs (None otherwise)
+    job_id: str                          # matches the 202 ArmMaintenanceResult.job_id
+    phase: MaintenancePhase
+    detail: str = ""                     # operator-facing progress / failure reason
+    progress: float = 0.0                # 0..1 coarse estimate (phase index + waypoint
+                                         #   fraction while positioning)
+    started_at: float | None = None      # unix s
+
 class ArmMonitorTelemetry(BaseModel):    # one arm as seen by the READ-ONLY monitor
     arm_id: str                          # the only required field
     status: ArmMonitorStatus = "off"
@@ -795,6 +846,11 @@ class ArmMonitorTelemetry(BaseModel):    # one arm as seen by the READ-ONLY moni
                                          #   |Δ load| <= 0.05 kg, |Δ cog| <= 10 mm); None = not
                                          #   compared yet
     maintenance_busy: bool = False       # a maintenance op (§12) is executing on this arm
+                                         #   (true for a RailHomingJob's whole life)
+    maintenance: MaintenanceProgress | None = None
+                                         # phase-09d: live progress of the asynchronous
+                                         #   RailHomingJob on this arm; None = no job
+                                         #   (additive - every pre-09d row still parses)
 
 TwinOverlayStatus = Literal["off", "waiting", "live", "stale", "error"]
     # off = overlay disabled / twin scene failed to build; waiting = nothing published (no
@@ -854,7 +910,10 @@ a tinted overlay on the real frame — the `<camera_id>_align` streams
 session *pauses* the monitor (connections released — one box is never shared
 between two SDK clients) rather than stopping it, and the Welcome page's arm
 cards take their `error_code` from it. The module is a dependency-free leaf
-(pure pydantic) imported by `telemetry.py`; its three models ride
+(pure pydantic) imported by `telemetry.py` and `maintenance.py`; its models
+(the three phase-09a blocks plus, since phase-09d, `MaintenanceProgress` and
+the `ArmMaintenanceOp` / `MaintenancePhase` vocabularies, kept in the leaf so
+`maintenance.py` and `hardware_monitor.py` never import each other) ride
 `TelemetryMsg`'s `$defs` and none exports top-level (§14). Polling, reconnect
 backoff, the rail fallback and the compositing recipe are hardware / runtime
 territory (02-hardware "read-only monitor", 04-runtime §13.3 / §13.4); core
@@ -877,14 +936,36 @@ unrecoverable code, the e-stop) only the operator's `recover` click recovers,
 and motion never resumes before the operator releases every input / re-grips
 the clutch.
 
+**Phase-09c (`docs/prompts/phase-09c-hardware-session.md`, D5).** A hardware
+session's bring-up is observable: `GET /api/session` already answers `state:
+bringup` while the drivers connect, and `SessionTelemetry.bringup` carries one
+`ArmBringupTelemetry` row per arm / step (`status_cb` of the hardware workcell
+plus the runtime's own rows — in 09c e.g. the then-unselected arm "frozen at
+last sample"; since 09d every arm connects and that row is not produced);
+the Cockpit lists them until `running`. `SessionInfo.kind` / `.speed_scale`
+(§12) echo what the session drives and how fast.
+
+**Phase-09d (`docs/prompts/phase-09d-rail-homing-planning.md`).** Rail homing
+may now be preceded by a twin-planned pre-positioning motion, executed as an
+asynchronous per-arm `RailHomingJob`; its live phase rides
+`ArmMonitorTelemetry.maintenance` (`MaintenanceProgress`, above) so the UI's
+Home-rail sheet lists queued → sweeping → planning → connecting → positioning
+→ homing → verifying → done / failed as they happen, with `maintenance_busy`
+true throughout and the monitor `paused` while the job's driver owns the box
+(the other arm reports "frozen at last sample"). The `job_id` ties the rows to
+the `202` response and to the final `ArmMaintenanceResult` at
+`GET .../maintenance/last` (§12). A hardware session always includes BOTH arms
+since 09d (`SessionSpec.arms` must equal every configured arm — runtime 409
+otherwise; the model is unchanged).
+
 ## 12. Protocol: session & REST models (`protocol/session.py`, `protocol/tracker.py`, `protocol/microphone.py`, `protocol/maintenance.py`)
 
 Bodies for the `/api` surface (04-runtime §13.1); runtime defines no wire
 model of its own. Session models live in `protocol/session.py`; the phase-10
 tracker-calibration models in `protocol/tracker.py`, the phase-11
 microphone row + `MicStatus` vocabulary in `protocol/microphone.py` and the
-phase-09b arm-maintenance request / result in `protocol/maintenance.py`
-(all below).
+phase-09b/09c/09d arm-maintenance request / result / plan models in
+`protocol/maintenance.py` (all below).
 
 ```python
 Mode = Literal["teleop", "collect", "dagger", "inference"]
@@ -904,11 +985,30 @@ class SessionSpec(BaseModel):            # POST /api/session body
     policy: str | None = None            # checkpoint id (dagger/inference); None = latest
                                          #   (dagger) / promoted deploy ckpt (inference;
                                          #   409 if none promoted — 12-dagger §9)
+    speed_scale: float = Field(1.0, gt=0, le=1)
+                                         # phase-09c (D2): multiplies the host-side
+                                         #   teleop.linear_mps/angular_rps/rail_mps,
+                                         #   target_rate.v_mps/w_radps, dq_max_rad,
+                                         #   jog.slew_rad_per_tick/rail_m_per_tick AND the
+                                         #   driver-side servo.max_joint_vel /
+                                         #   max_cart_step_m / rail_speed_mm_s; 0 and > 1
+                                         #   are 422. Hardware tab offers 10 / 30 / 100 %,
+                                         #   default 0.1; additive (runtime applies it when
+                                         #   building the session's control config, 04-runtime
+                                         #   §5; pre-09c bodies parse at 1.0)
 
 class SessionInfo(BaseModel):            # POST/GET /api/session response
     session_id: str; epoch: str; mode: Mode; arms: list[str]
     streams: list[str]                   # video ids: camera ids + "sim" and/or "twin"
     state: str                           # SessionState value
+    kind: Literal["hardware", "sim"] = "sim"
+                                         # which workcell the session drives; defaults to
+                                         #   "sim" because every pre-09c session was one
+                                         #   (hardware was 409) — the UI no longer infers
+                                         #   it from hardware_monitor.paused; additive,
+                                         #   phase-09c
+    speed_scale: float = Field(1.0, gt=0, le=1)   # echo of SessionSpec.speed_scale
+                                         #   (additive, phase-09c; the Cockpit header shows it)
 
 class ArmStatusInfo(BaseModel):          # landing-page card
     arm_id: str; ip: str | None
@@ -968,7 +1068,14 @@ class PolicyInfo(BaseModel):             # GET /api/policies rows (04-runtime §
 ```
 
 `SessionSpec` validators: `start_from` matches the regex; `frames` keys ⊆
-`arms`; each value `parse_frame()`s and is not `ee:`; collect/dagger ⇒ `task`.
+`arms`; each value `parse_frame()`s and is not `ee:`; collect/dagger ⇒ `task`;
+`speed_scale` ∈ (0, 1] (pydantic `Field` bounds → 422). The hardware-session
+refusal matrix (rail not homed, no monitor sample, rail homing job in
+progress, `arms` ≠ every configured hardware arm — since phase-09d both arms
+are ALWAYS in a hardware session, the 09c subset switch is gone —, error
+latched, box unreachable, teleop-only, `start_from=profile:<id>` not
+collision-free in the twin) is runtime territory (04-runtime §13.1); core only
+fixes the spellings.
 
 **Tracker calibration (`protocol/tracker.py`; phase-10, 13-tracker §3/§4).**
 Two calibrations share one REST endpoint — `GET /api/tracker/calibration ->
@@ -1077,22 +1184,81 @@ Capture backends, source resolution, envelope binning and stall detection are
 runtime territory (04-runtime §13.1/§13.3/§14); core only fixes the spellings.
 
 **Arm maintenance (`protocol/maintenance.py`; phase-09b,
-`docs/prompts/phase-09b-error-recovery.md`).** `POST
+`docs/prompts/phase-09b-error-recovery.md`; phase-09c
+`docs/prompts/phase-09c-hardware-session.md`; phase-09d
+`docs/prompts/phase-09d-rail-homing-planning.md`).** `POST
 /api/hardware/arms/{arm_id}/maintenance (ArmMaintenanceRequest) ->
-ArmMaintenanceResult` lets the operator clear xArm controller errors and
-(re)apply the controller-side safety parameters (§7) from the UI **without
-producing motion** — measured 2026-09-04 on the Perception Arm: `clean_error`
-cleared C19 and moved no joint by more than 5e-5 rad; the full recovery
-sequence (`clean_error → clean_warn → motion_enable(True) → set_mode →
-set_state(0)`) only puts the arm in ready / servo state. Linear-track homing
-IS motion and is not a maintenance op (phase-09). 404 = unknown arm; 409 = the
-op is not available on the current path (below) or the monitor is off / paused
-/ not connected; otherwise 200 with the result whether or not `ok`. The module
-is a pure-pydantic leaf importing `ArmMonitorTelemetry` (§11); both models
-export top-level (§14).
+ArmMaintenanceResult` lets the operator clear xArm controller errors,
+(re)apply the controller-side safety parameters (§7) and home the linear
+track from the UI. Three of the four ops produce **no motion** — measured
+2026-09-04 on the Perception Arm: `clean_error` cleared C19 and moved no joint
+by more than 5e-5 rad; the full recovery sequence (`clean_error → clean_warn →
+motion_enable(True) → set_mode → set_state(0)`) only puts the arm in ready /
+servo state. **`home_rail` is the ONE motion op: operator-triggered,
+twin-gated, session-less** (phase-09c, user rule 1 — no implicit motion; the
+driver's connect never homes). The carriage drives to the homing end (the
+operator's LEFT, +X) at the track's own homing speed (no SDK setter; the
+positioning cap `rail_speed_mm_s` is written after homing), so before a single write the
+runtime sweeps a dedicated digital twin over the full 0–0.65 m travel at the
+arm's CURRENT 7-joint posture, the other arm posed at its last monitor sample,
+and refuses unless every step is clear (D4: `inflation 0.025 m`, `step 0.005 m`
+→ 131 positions). `dry_run: true` returns that verdict alone (zero writes) so
+the UI's `HomeRailSheet` can show it before the destructive confirm; the real
+op re-samples on the monitor thread and refuses if the joints moved
+(`q_checked`) or an error is latched, then judges success from the track
+registers only (`on_zero == 1`, `is_enabled == 1`, `error == 0`). A hardware
+session is refused while any arm's rail is unhomed (since phase-09d every
+configured arm is in the session; position unknown → the gate twin cannot be
+posed), so this op is how the operator makes a session possible. 404 = unknown arm; 409 = the op is not available on the
+current path (below), the monitor is off / paused / not connected, or (for
+`home_rail`) a hardware session exists ("end the session first") / the sweep
+cannot run (no monitor sample, no track on the arm, a controller error latched
+— "clear errors first", no twin scene); otherwise 200 with the result whether
+or not `ok` — a BLOCKED sweep is `ok=False` with the verdict and empty
+`sdk_codes` (zero writes). The REST handler blocks up to 45 s for a
+synchronous `home_rail` (D3); the UI gives that POST a 60 s client deadline.
+
+*Planning before homing (phase-09d).* A posture that is not sweep-clear is no
+longer a flat refusal. The runtime tries candidate postures in order — the
+scene keyframe's 7 joints for the arm, then the `<arm>_home` keyframe
+(`"search"`, a sampled posture around a candidate, is reserved) — and keeps
+the first that is sweep-clear over the full travel AND reachable by a twin
+RRT-Connect plan (`DigitalTwin.plan`) from the current posture whose EVERY
+waypoint is collision-free for EVERY one of the 131 rail positions (the
+carriage is unknown, so the path must be position-agnostic; that check is the
+ONLY safety basis of the motion — a gate-twin "pass" never replaces it). The
+outcome rides `RailSweepVerdict.pre_position` (`PrePositionPlan`): `needed ==
+False` → the 09c synchronous path (joints untouched, 200); `needed and clear`
+→ on the operator's confirm the op starts an asynchronous per-arm
+`RailHomingJob` and answers **202** with `status: "accepted"` + `job_id`
+(nothing written yet); `needed and not clear` → `status: "refused"`,
+`ok=False`, an operator suggestion in `detail` (e.g. fold the arm toward the
+factory-zero posture in Studio and retry). The job connects that arm's driver
+alone (rail still unhomed, `speed_scale` 0.1, the other arm frozen at its last
+sample — 09c D1 now serves maintenance motion only), executes the planned path
+under the gate (`ControlLoop._op_execute_plan`), homes the rail with the joints
+held, verifies the registers, tears the driver down (state 4 + brakes → the
+folded posture is HELD; no automatic return) and resumes the monitor; its
+phases ride `ArmMonitorTelemetry.maintenance` (§11) and its final result — an
+`ArmMaintenanceResult` with `status: "done"` and the same `job_id` — is
+`GET /api/hardware/arms/{arm_id}/maintenance/last -> ArmMaintenanceResult |
+404`. While a job runs `POST /api/session` and every other maintenance op are
+409 "rail homing in progress". `dry_run` returns the verdict with
+`pre_position` filled (zero writes) so the sheet can announce the motion
+before the destructive confirm.
+
+The module is pure pydantic; the request and result export top-level (§14)
+while `RailSweepVerdict`, `PrePositionPlan` and (via the embedded monitor row)
+`MaintenanceProgress` ride the result's `$defs`. `ArmMaintenanceOp`,
+`MaintenancePhase` and `MaintenanceProgress` are *defined* in
+`protocol/hardware_monitor.py` (the dependency-free leaf, §11) and re-exported
+here: the progress block rides `ArmMonitorTelemetry.maintenance` while this
+module embeds `ArmMonitorTelemetry` in the result, so defining them here would
+make the two modules import each other. Import them from either module.
 
 ```python
-ArmMaintenanceOp = Literal["clear_errors", "apply_backstops", "recover"]
+ArmMaintenanceOp = Literal["clear_errors", "apply_backstops", "recover", "home_rail"]
+    # (defined in protocol/hardware_monitor.py, re-exported here - §11)
     # clear_errors:    no session: clean_error + clean_warn, NEVER motion_enable — on the
     #                  read-only monitor's polling thread (its zero-write guarantee becomes
     #                  "zero writes unless an explicit maintenance request"); INSIDE a hardware
@@ -1104,23 +1270,87 @@ ArmMaintenanceOp = Literal["clear_errors", "apply_backstops", "recover"]
     # recover:         the driver's full user-initiated recovery + reseed from the MEASURED
     #                  position — hardware session only; 409 without one ("no hardware
     #                  session - use clear_errors"); the operator re-grips the clutch after
-MaintenancePath = Literal["monitor", "session"]   # which thread executed the op
+    # home_rail:       set_linear_track_back_origin(wait, auto_enable=False) ->
+    #                  set_linear_track_enable(True) -> set_linear_track_speed on the monitor
+    #                  thread (never motion_enable) — no session; 409 inside a hardware
+    #                  session ("end the session first"); twin-gated (RailSweepVerdict);
+    #                  the ONE op that moves a mechanical part (phase-09c); since phase-09d
+    #                  it may first run a planned pre-positioning motion as an asynchronous
+    #                  RailHomingJob (status "accepted", 202)
+MaintenancePath = Literal["monitor", "session"]   # which thread executed the op (the
+                                                  #   RailHomingJob drives the arm through
+                                                  #   its own driver connection; no "job"
+                                                  #   value - runtime picks the spelling)
+MaintenanceStatus = Literal["done", "accepted", "refused"]   # phase-09d, how the op ran
+    # done:     ran to completion synchronously (ok says whether it succeeded; dry-run
+    #           verdicts are "done" too) - 200
+    # accepted: an asynchronous RailHomingJob was started (the posture needs a planned
+    #           pre-positioning motion first) - 202, job_id set, progress on
+    #           ArmMonitorTelemetry.maintenance (§11), final result at GET .../maintenance/last
+    # refused:  nothing ran, nothing written (the sweep is blocked and no rail-safe plan was
+    #           found) - ok False, an operator suggestion in detail
 
 class ArmMaintenanceRequest(BaseModel):  # POST body
     op: ArmMaintenanceOp
+    dry_run: bool = False                # home_rail only: sweep verdict alone, zero writes
+                                         #   (additive, phase-09c)
 
-class ArmMaintenanceResult(BaseModel):   # response (200 whether or not ok)
+class PrePositionPlan(BaseModel):        # phase-09d: twin-planned motion before homing
+    needed: bool                         # False = current posture already sweep-clear
+    source: Literal["current", "keyframe", "home", "search"] = "current"
+                                         # which candidate posture won: the scene keyframe's
+                                         #   7 joints / the <arm>_home keyframe; "search"
+                                         #   (sampled around a candidate) is reserved
+    target_q: list[float] = []           # 7 joints, rad - the posture the arm HOLDS after
+                                         #   homing
+    waypoints: int = 0                   # planned joint-space waypoints (0 = not needed)
+    duration_s: float = 0.0              # estimated execution time at speed_scale 0.1
+    checked_rail_positions: int = 0      # 131 when the position-agnostic validation ran
+    clear: bool = True                   # path clear for EVERY rail position (the ONLY
+                                         #   safety basis); needed and not clear = refused
+    detail: str = ""                     # operator-facing summary / why no plan was found
+
+class RailSweepVerdict(BaseModel):       # twin sweep that gates home_rail (phase-09c, D4)
+    scene_id: str                        # twin scene swept (mavis_v2)
+    inflation_m: float; step_m: float    # 0.025 m debug margin; 5 mm steps (131 positions)
+    travel_m: float = 0.65               # full rail travel swept (carriage position unknown)
+    clear: bool                          # no step violates -> the op may write
+    first_blocked_m: float | None = None          # rail position of the first violation
+    first_blocked_pair: list[str] = []            #   and its [geom_a, geom_b]
+    min_clearance_m: float | None = None          # tightest pair over the sweep
+    min_clearance_at_m: float | None = None       #   (rail position; None = none measured)
+    min_clearance_pair: list[str] = []
+    q_checked: list[float] = []          # the 7 joints the sweep assumed (must match at
+                                         #   execution: the monitor re-samples, q_tol 0.02 rad)
+    other_arms: dict[str, list[float]] = {}       # arm_id -> q7 + rail used for the other
+                                                  #   arm(s) (last monitor sample)
+    assumptions: list[str] = []          # e.g. "view rail unknown - used fallback 0.00 m"
+    sample_seq: int = 0                  # monitor sample the posture came from
+    pre_position: PrePositionPlan | None = None   # phase-09d plan / "not needed"; None =
+                                                  #   pre-09d producer / not evaluated
+
+class ArmMaintenanceResult(BaseModel):   # response (200 / 202 whether or not ok)
     arm_id: str; op: ArmMaintenanceOp; path: MaintenancePath; ok: bool
     detail: str = ""                     # human-readable outcome
     sdk_codes: dict[str, int] = {}       # SDK call -> return code, in call order
     warnings: list[str] = []             # apply_backstops non-fatal codes
     before: ArmMonitorTelemetry | None = None   # monitor samples around the op (None on
     after: ArmMonitorTelemetry | None = None    #   the session path / monitor unconnected)
+    rail_sweep: RailSweepVerdict | None = None  # home_rail verdict, dry-run or real (None
+                                                #   for the other ops; additive, phase-09c)
+    status: MaintenanceStatus = "done"   # phase-09d: accepted = async job started (202);
+                                         #   the job's final result is "done" again
+    job_id: str | None = None            # RailHomingJob id when status == "accepted" and on
+                                         #   the job's final result (additive, phase-09d)
 ```
 
-Queueing on the monitor thread, the recovery budget, the 409 matrix and the
-INFO audit line are hardware / runtime territory (02-hardware "maintenance
-channel", 04-runtime §13.1 / §15); core only fixes the spellings.
+Queueing on the monitor thread, the recovery budget, the 409 matrix, the
+`home_rail` sweep recipe (`RailSweepChecker` on `check_config_violations` /
+`pair_distance`, 03-sim §8), the position-agnostic path check
+(`RailSweepChecker.check_path`), the candidate order and the `RailHomingJob`
+state machine, the `job_id` format, the 45 s synchronous timeout and the INFO
+audit line are hardware / runtime territory (02-hardware "maintenance channel"
++ §5, 04-runtime §5 / §13.1 / §15); core only fixes the spellings.
 
 ## 13. Protocol: video framing & keymap (`protocol/video.py`, `protocol/keymap.py`)
 
@@ -1202,7 +1432,7 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   #           DaggerStatus/TrainerStatus/InferenceStatus/TrackerTelemetry/ControllerTelemetry/
   #           TrackerCalibrationStatus/LighthouseStatus/CalibrationValidation/YawGesturePoint/
   #           MicrophoneTelemetry/HardwareMonitorTelemetry/ArmMonitorTelemetry/
-  #           TwinOverlayTelemetry via $defs)
+  #           TwinOverlayTelemetry/SessionTelemetry/ArmBringupTelemetry via $defs)
   # tracker:  TrackerCalibrationStatus, TrackerCalibrationCommand (REST
   #           /api/tracker/calibration; the other protocol.tracker models ride $defs only)
   # session:  SessionSpec, SessionInfo, WorkcellStatus, ArmStatusInfo,
@@ -1211,7 +1441,11 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   #           rides TelemetryMsg $defs only)
   # maintenance: ArmMaintenanceRequest, ArmMaintenanceResult (REST POST
   #           /api/hardware/arms/{arm_id}/maintenance; phase-09b — the result embeds
-  #           ArmMonitorTelemetry via $defs, the same class TelemetryMsg nests)
+  #           ArmMonitorTelemetry via $defs, the same class TelemetryMsg nests, and
+  #           RailSweepVerdict via $defs; phase-09c — EXPORTED_MODELS unchanged;
+  #           phase-09d — PrePositionPlan + MaintenanceProgress join the result's $defs and
+  #           MaintenanceProgress the TelemetryMsg $defs; EXPORTED_MODELS / index.json
+  #           unchanged again)
   # misc:     StateProfile, KeymapEntry, CollisionEvent
 }
 def export(out_dir: Path) -> list[Path]
@@ -1291,12 +1525,19 @@ class BringupError(ApolloError): step: str       # raised by hardware/sim impls;
 class ArmConnectError(BringupError): ...         #   here so runtime catches without
 class ArmIdentityError(BringupError): ...        #   importing hardware
 class RailExpectedError(BringupError): ...
+class RailNotHomedError(BringupError): ...       # track detected but on_zero == 0: position
+                                                 #   unknown -> connect fails at step "rail"
+                                                 #   (default), the hardware session is
+                                                 #   refused, the operator homes from the UI
+                                                 #   (home_rail, §12); phase-09c
 class GripperInitError(BringupError): ...
 class CameraInitError(BringupError): ...
 class WorkcellBringupError(ApolloError):
     statuses: dict[str, BringupError | None]     # per-arm/camera (landing page)
 ```
 
+`BringupError` subclasses take `(step, message)` positionally; `RailNotHomedError`
+defaults `step` to `"rail"` so `RailNotHomedError(message=...)` reads naturally.
 Rules: typed exceptions for *caller* mistakes (shape, range, missing
 capability); degraded-but-valid data for *environment* problems
 (`ArmState.stale=True`, `latest() -> None`) — the control loop must keep
@@ -1376,7 +1617,23 @@ All of core tests with no robot, no MuJoCo, no network.
   `CameraInfo.kind` (incl. `"twin"`) pinned as exact tuples;
   `ArmMaintenanceResult` fixtures pin the `clear_errors` write set
   (`clean_error`, `clean_warn` — never `motion_enable`) and the
-  `apply_backstops` call order.
+  `apply_backstops` call order; phase-09c: `ArmMaintenanceOp` incl.
+  `home_rail`, `ArmMaintenanceRequest.dry_run` default, `RailSweepVerdict`
+  fields / defaults / D4 numbers, `home_rail` fixtures (dry-run = verdict +
+  empty `sdk_codes`; real = exactly the three track methods; blocked = `ok
+  False` + verdict), `SessionSpec.speed_scale` accept / reject table (0 and 1.5
+  are rejected), `SessionInfo.kind` / `.speed_scale` and
+  `SessionTelemetry.bringup` / `ArmBringupTelemetry` additivity; phase-09d:
+  exact field sets + defaults of `PrePositionPlan`, `MaintenanceProgress`,
+  `MaintenanceStatus` / `MaintenancePhase`, `ArmMaintenanceResult.status` /
+  `.job_id` and `ArmMonitorTelemetry.maintenance`, wire fixtures for a
+  dry-run-planned verdict, a 202 `accepted` result, a job's `done` (ok / failed)
+  result, a `refused` result and progress rows, and that every name imports
+  from both `protocol.maintenance` and `protocol.hardware_monitor`.
+- **Errors** (`tests/test_errors.py`): `BringupError` `(step, message)`
+  convention; `RailNotHomedError` defaults `step="rail"`, is a `BringupError`
+  distinct from `RailExpectedError`, aggregates in `WorkcellBringupError` and
+  is exported at the package top level.
 - **Keymap**: §13 invariants + literal table equality against spine §5 — any
   keymap edit is a conscious spine change.
 - **Video**: pack/unpack round trip; `struct.calcsize("<dI") == 12`;
@@ -1385,9 +1642,16 @@ All of core tests with no robot, no MuJoCo, no network.
   `schemas/` (drift fails CI); no numpy leakage; `EXPORTED_MODELS` pinned as
   an exact set; per-model property/required/enum/default sets pinned for the
   tracker, microphone, hardware-monitor / twin-overlay, arm-maintenance
-  (`ArmMaintenanceRequest.json` flat, `ArmMaintenanceResult.json` nesting the
-  same `ArmMonitorTelemetry` `$defs` as `TelemetryMsg.json`), `ArmTelemetry`
-  fault and phase-11 workcell fields; `CameraInfo.kind` enum incl. `"twin"` in both `CameraInfo.json` and
+  (`ArmMaintenanceRequest.json` flat incl. `dry_run`, `ArmMaintenanceResult.json`
+  nesting the same `ArmMonitorTelemetry` `$defs` as `TelemetryMsg.json` plus
+  `RailSweepVerdict`), `SessionSpec.speed_scale` (`exclusiveMinimum 0`,
+  `maximum 1`, default 1.0) and `SessionInfo.kind` / `.speed_scale`,
+  `SessionTelemetry.bringup` / `ArmBringupTelemetry` in the telemetry `$defs`
+  (neither `RailSweepVerdict` nor `ArmBringupTelemetry` exports top-level),
+  phase-09d: `PrePositionPlan` + `MaintenanceProgress` in the
+  `ArmMaintenanceResult.json` `$defs` and `MaintenanceProgress` in the
+  `TelemetryMsg.json` `$defs` with `index.json` unchanged,
+  `ArmTelemetry` fault and phase-11 workcell fields; `CameraInfo.kind` enum incl. `"twin"` in both `CameraInfo.json` and
   the `WorkcellStatus.json` `$defs`.
 - **Bus**: N producer threads × 1 drainer — every Future resolves exactly
   once, corr_ids match; bus-full immediate nack; handler exception →

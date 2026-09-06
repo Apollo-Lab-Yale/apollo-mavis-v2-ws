@@ -7,7 +7,19 @@ Status: v0.1 (2026-09-01; amended 2026-09-03 — phase-10 tracker calibration:
 phase-09b error recovery: §5 FAULT/RECOVERING implemented, §13.1
 `POST /api/hardware/arms/{arm_id}/maintenance`, §13.3 `arms[*].fault_detail` /
 `.recovering` + `hardware_monitor.arms[*]` safety read-backs, §14 per-arm
-backstop parameters, §15 driver-event consumption, §16 `tests/fakes.py`). Conforms to
+backstop parameters, §15 driver-event consumption, §16 `tests/fakes.py`;
+amended 2026-09-05 — phase-09c hardware session: §5 BRINGUP / TEARDOWN for the
+real cell (`_bringup_hardware`: monitor hand-over, subset workcell, camera
+adoption, unconditional gate, frozen arm, speed scale), §13.1 hardware 409
+matrix + `home_rail` maintenance op, §13.3 `session.bringup` / `SessionInfo.kind`
+/ `speed_scale`, §13.4 adoption + overlay state provider, §14
+`hardware_session`, §15 rail-not-homed row; amended 2026-09-05 — phase-09d
+rail homing with twin planning: §5 every configured arm in a hardware session
+(`default_arms` gone, D1 for the maintenance motion only), `connect_hardware_rig`,
+the `RailHomingJob` motion, `start_from=profile` planned inside bring-up,
+`PlanExecutor` straight-segment slew; §13.1 `pre_position` / 202 / `refused` /
+`GET …/maintenance/last` / the every-arm 409; §13.3 `arms[*].maintenance`; §14;
+§15 job rows). Conforms to
 `00-overview.md` (spine, v0.3) and mirrors `05-ui.md` protocol shapes exactly. Research ground truth: `web-teleop-stack.md`,
 `lerobot-data.md`, `dagger-online-training.md`, `xarm-python-sdk.md`.
 
@@ -195,17 +207,169 @@ Phase behavior (identical skeleton for all four modes; overview §4):
    set mode 1 + state 0 per arm, seed servo streams from `get_state()`; start
    Render/Encoder/Recorder/Policy threads as the mode requires. Composed
    twin/sim `spec.to_xml()` is persisted in the session dir.
+
+   **Hardware bring-up (phase-09c/09d, `SessionManager._bringup_hardware` over
+   `SessionManager.connect_hardware_rig`; `docs/prompts/phase-09c-hardware-session.md`,
+   `docs/prompts/phase-09d-rail-homing-planning.md`; teleop only for now — other
+   modes 409 `"hardware sessions support teleop only (phase-09c)"`).** Since
+   phase-09d a hardware session ALWAYS includes every configured arm
+   (`SessionSpec.arms` must equal `workcells.hardware.arms`, else 409
+   `"hardware sessions include every configured arm (Manipulation Arm, Perception
+   Arm) - missing ['view'] …"`; the Hardware tab has no per-arm "Include in
+   session" switch and `hardware_session.default_arms` is gone); steps 2-11 live
+   in `connect_hardware_rig(arms, …) -> HardwareRig` (connected drivers behind
+   their adapters, the FRESH gate twin + `SafetyGate`, the supervisor and a NOT yet
+   started `ControlLoop`), which the phase-09d rail-homing job reuses for ONE arm
+   (§13.1 `home_rail`). Order, each step mirroring `_bringup_sim`:
+   1. *Refusal matrix first* (`_validate_hardware`, §13.1) — nothing is
+      touched until every check passes. `hardware_session_active` (the
+      monitor's / probe's / overlay's hand-over predicate) turns TRUE right
+      after the matrix passed — `create()` records `_creating_kind = spec.kind`
+      under `_lock` before step 2 — and stays true until the session ends or
+      the bring-up aborts, so the monitor's 0.5 s supervisor round can never
+      reconnect a control box mid-bring-up (a bare `pause()` would be undone);
+      a refused request never flips it (§13.1).
+   2. *Monitor hand-over* (user rule 3): `hardware_monitor.pause()` releases
+      EVERY arm's read-only SDK client (all arms together, D1), then `join(15 s)`
+      per arm waits for the poll threads to really exit (`disconnect()` may return
+      while a thread is still inside a blocking SDK call); a thread still alive →
+      409 `"read-only monitor of the … is still inside the SDK after 15 s - retry"`.
+   3. *Session `WorkcellConfig`*: `wc.model_copy(arms=[the connected arms],
+      cameras=[])` — every configured arm for a session (phase-09d), ONE arm
+      for the rail-homing job; the preview cameras stay manager-owned (rule 4).
+   4. *`HardwareWorkcell(session_cfg, driver_factory=<speed-scaled XArmDriver>,
+      netsetup=None)`* — the closure applies `SessionSpec.speed_scale` (D2) to
+      the driver caps (`servo.max_joint_vel`, `servo.max_cart_step_m`,
+      `rail_speed_mm_s`; `session/hardware.py::scale_driver_config`); no NIC
+      matching inside a POST (reachability comes from the probe).
+      `SessionManager.workcell_factory` / `driver_api_factory` are the test seams.
+   5. *`bring_up(status_cb, hardware_session.bringup_timeout_s)`* (never
+      `start()`: one arm failing must not abort the report); every
+      `ArmBringupStatus` transition becomes `SessionTelemetry.bringup` rows
+      (`session/hardware.py::bringup_rows`; `GET /api/session` already answers
+      `state: bringup`, D5). Any arm of the rig with `error` / not `connected` →
+      teardown + 409 `"hardware bring-up failed: Manipulation Arm: rail - [rail]
+      …"` (user-facing arm name + stage + the driver's message); a CONNECTED arm
+      whose `rail` is not `ready` on a railed twin arm (`error` / `detected` /
+      `unhomed`: the carriage position is unverifiable) → teardown + 409
+      `"… rail - linear track error after connect (carriage position unknown, the
+      digital twin cannot gate it)"` (`none` is the dof mismatch of step 6). The
+      driver never homes: an unhomed track is `rail: unhomed` + `RailNotHomedError`.
+   6. *Consistency*: `driver.dof == twin dof` per arm (a 7-dof driver on a railed
+      twin arm would make every `twin.sync` raise → silent hold of ALL arms) and
+      the first `states()` not stale.
+   7. *`hardware_session.rail_flip`*: when set, the workcell is wrapped in
+      `RailFlipWorkcell` (`q_sim = 0.65 − q_track` on every state, mapped back
+      on every command), so twin, IK, gate and loop share ONE rail convention
+      and the transform is applied before every `twin.sync`; the overlay reads
+      the inner workcell and applies the flip itself as before.
+   8. *FRESH gate twin*: `DigitalTwin(REGISTRY.build(twin_scene,
+      SceneOverrides(microphones, base_pose)), inflation_m=safety.geom_inflation_m,
+      allowed_pairs_extra)` — the same overrides as the overlay twin; never the
+      cached status scene (inflation mutates the model), never the overlay's or
+      the sweep's twin (three independent `MjData`s / threads).
+   9. *Gate UNCONDITIONAL*: `SafetyGate(twin, safety)` + `default_collision_pairs`;
+      `ControlLoop.__init__` raises `SafetyConfigError` for `workcell_kind ==
+      "hardware"` without a `SafetyGate` bound to a live twin (11-safety §4 item 4;
+      REST maps it to 409). A start posture already inside the inflation only
+      adds a `gate` warning row — the gate holds until the clearance opens.
+   10. *D1 — arms not connected frozen*: every twin arm not among the connected
+       arms is posed ONCE from its last monitor sample (q7 + `rail_pos_m`, or
+       `twin_overlay.rail_fallback_m[arm]` when the track is unknown, `rail_flip`
+       applied; `session/hardware.py::frozen_state`) via `twin.sync` and
+       `ik.sync_passive`, then never updated (its brakes are engaged, it is not
+       commanded; the operator must not move it from xArm Studio — telemetry row
+       `frozen: "Perception Arm frozen at last sample (monitor seq N)"`, an
+       unsampled arm keeps the keyframe with a warning row). Since phase-09d a
+       teleop session connects both arms, so this mechanism serves the
+       rail-homing maintenance motion alone (the other arm is the static obstacle).
+   11. *`MinkIKSolver` (`lock_rail = not control.rail_in_ik`), `SceneKinematics`,
+       `SafetySupervisor(gate, InputWatchdog, twin, ArmReportWatchdog)`*, then
+       *`ControlLoop(workcell, scale_control_config(control, speed_scale), …,
+       workcell_kind="hardware", gripper_arms=[ArmConfig.gripper != none])`* —
+       host-side D2: `teleop.linear_mps/angular_rps/rail_mps`,
+       `target_rate.v_mps/w_radps`, `dq_max_rad`, `jog.slew_rad_per_tick/
+       rail_m_per_tick` × scale (the rig ends here) — then, phase-09d,
+       *`start_from=profile:<id>` is PLANNED NOW* (`_plan_profile_start`: the
+       gate twin synced with the measured states, `twin.plan(PlanRequest)` —
+       RRT-Connect, frozen arms as obstacles, the rail slot follows the profile
+       or stays; the same `execute_plan` path as sim, executed by the start_from
+       worker from `ActiveSession.planned_start` without planning again). A
+       failed plan tears the session down with 409 `"profile motion not
+       collision-free: goal_in_collision (grip_right_inner_knuckle / table) - …"`
+       — a hardware session never starts with a motion the twin refused. Then
+       `loop.start()`.
+   12. *Camera adoption* (rule 4): for every open preview camera
+       `hub.set_fps(cam_id, video.session_fps)`; the ids go to
+       `ActiveSession.adopted_streams` (NOT `streams`: `SessionInfo.streams` is
+       `[]`, teardown restores the fps instead of removing the stream, the UVC
+       node is never re-opened, `hardware_camera()` keeps returning the same
+       object). The `<id>_align` overlays keep running: the monitor is paused, so
+       `TwinOverlayRenderer.set_state_provider(SessionStateProvider(inner
+       workcell, session arms, frozen samples))` feeds them from the driver's
+       `states()` (live tint) and any frozen sample (grey, "frozen at last
+       sample").
+   Every failure path (`_abort_hardware_bringup` → `stop_rig`) stops the loop
+   and the workcell (drivers hand the arms back stopped + braked, D6; the
+   workcell owns no cameras), restores the adopted fps, drops the overlay
+   provider, clears `_creating_kind` and `resume()`s the monitor — nothing stays
+   half-connected.
+
+   **Rail-homing maintenance motion (phase-09d, `devices/rail_homing.py`;
+   NOT a session).** When `home_rail`'s full-travel sweep is blocked at the
+   arm's current posture, the `RailHomingJob` (one arm, one thread, REST 202)
+   runs `sweeping → planning → connecting → positioning → homing → verifying →
+   done|failed` on `ArmMonitorTelemetry.maintenance`: `connecting` takes the
+   manager's lock (exclusive with `create()` / `teardown()`; a session that
+   exists or is starting fails the job) and calls `connect_hardware_rig` for
+   THIS arm alone with `speed_scale` 0.1, `allow_unhomed_rail` (driver config
+   `rail_homing: allow_unhomed` → `ArmBringupStatus.rail == "unhomed"` accepted)
+   and `rail_hold` (`RailHoldWorkcell`: the twin sees `rail_fallback_m` instead of
+   the driver's 0.0 placeholder while `rail_position_known` is false, and every
+   rail command is pinned to the reported slot — the job never moves the
+   carriage), the other arm frozen (D1), a PRIVATE `RuntimeBus` and no tracker
+   (`loop.active_arm = None`: the loop only holds and executes plans; no WS or
+   device input can reach it); the measured posture must match the sweep's
+   within 0.02 rad. `positioning` = `execute_plan` with the position-agnostic
+   waypoints (§13.1) and a wait for the executor (a driver fault or the 30 s /
+   3× estimate timeout aborts; the measured joints must reach the target within
+   0.05 rad); `homing` stops the loop FIRST (the driver's servo stream holds the
+   joints; no 8-dof hold can move the freshly homed carriage) and calls
+   `XArmDriver.home_rail()` on the job thread; `verifying` = registers homed +
+   enabled + no error, `rail_position_known`, phase `READY`, raw `rail_pos_m`
+   0.0; then `stop_rig` (D6: the arm HOLDS the folded posture — no automatic
+   return), `hardware_monitor.resume()`, a fresh monitor sample awaited (≤ 5 s),
+   and the final `ArmMaintenanceResult` (`status: done`, the 202's `job_id`) at
+   `GET .../maintenance/last`. Any failure → `failed` with the same teardown +
+   resume. `Runtime._hardware_session_active` is also true while the job's
+   driver holds a box (`RailHomingService.owns_boxes`), so the monitor's
+   supervisor never reconnects mid-job; `maintenance_busy` is true for the job's
+   whole life, `POST /api/session` and every other maintenance op are 409 "rail
+   homing in progress" meanwhile.
 2. **START_FROM** — `keep_current`: no motion, targets seed from measured
    state. `profile:<id>`: twin planner (`DigitalTwinInterface.plan`,
    RRT-Connect on inflated geoms, per-arm sequential with others as static
    obstacles) → waypoints through the normal gated servo path (§9). Never
    xArm native gohome. Progress → telemetry `session.start_from_progress`.
+   Hardware (phase-09d): the plan was made INSIDE bring-up (item 11 above); the
+   worker only executes `ActiveSession.planned_start`. The `PlanExecutor` moves
+   along the STRAIGHT joint-space segment between waypoints (every joint by the
+   same fraction of its remaining delta, the fastest at `jog.slew_rad_per_tick`)
+   — exactly the segments the planner edge-checked; a per-joint clip would bend
+   the path off the validated line and the hardware gate would hold it for good.
 3. **RUNNING** — the mode loop (§6–§7, §10–§12). Modes differ only in action
    sources (human/policy), recorder on/off, and takeover semantics.
 4. **TEARDOWN** (DELETE /api/session, fatal error, SIGTERM) — stop policy
    runner, zero-twist ramp, `recorder.finalize()` (§10.4), stop trainer
    process, stop encoders/renderer, `arm.stop()` + `disconnect()`; clients
-   detect the released session via hello epoch/`session_id`.
+   detect the released session via hello epoch/`session_id`. Hardware
+   (phase-09c, the mirror of the bring-up): `loop.stop()` → `workcell.stop()`
+   (`XArmDriver.disconnect()` ends with `set_mode(0)`, `set_state(4)`,
+   `motion_enable(False)` — the arm is handed back as found after power-on,
+   stopped and braked, D6; the track keeps its homed flag and enable, no
+   re-homing between sessions) → adopted previews back to `video.preview_fps`
+   → overlay provider removed → `session = None` → `hardware_monitor.resume()`
+   (reconnects every arm) → `start_previews()` (no camera is re-opened).
 5. **FAULT/RECOVERING** — per-arm SDK error recovery (§15; implemented
    phase-09b, fake-tested). The control loop drains the workcell's driver
    events every tick: a `FaultEvent` stops THAT arm (its `ArmSender` is
@@ -812,12 +976,13 @@ generated from them — 05-ui §2). Errors: `{"detail": str}` with 4xx/5xx.
 | `DELETE /api/profiles/{id}` | → 204 | 409 if it is the designated initial condition |
 | `GET /api/policies` | → `PolicyInfo[]{policy_id, path, action_space, action_frame, policy_version, promoted}` | checkpoint registry for dagger/inference (core §12 model) |
 | `GET /api/session` | → `SessionInfo` \| 404 | reconnect resync |
-| `POST /api/session` | `SessionSpec` → `SessionInfo{session_id, epoch, mode, arms, streams, state}` | 409 if a session exists, a tracker calibration is in progress (`"tracker calibration in progress"`, phase-10), requested `kind` unavailable, scene/arm mismatch, dagger without a policy, or inference with no promoted deploy checkpoint (`policy=None` resolves to latest for dagger, promoted deploy for inference — 12-dagger §9). Returns after BRINGUP; START_FROM progress via telemetry. `streams` = camera ids + `"sim"` and/or `"twin"` |
+| `POST /api/session` | `SessionSpec{…, speed_scale}` → `SessionInfo{session_id, epoch, mode, arms, streams, state, kind, speed_scale}` | 409 if a session exists, a tracker calibration is in progress (`"tracker calibration in progress"`, phase-10), requested `kind` unavailable, scene/arm mismatch, dagger without a policy, or inference with no promoted deploy checkpoint (`policy=None` resolves to latest for dagger, promoted deploy for inference — 12-dagger §9). Returns after BRINGUP; START_FROM progress via telemetry. `streams` = camera ids + `"sim"` and/or `"twin"` (sim); `[]` for a hardware session (the preview cameras are ADOPTED, not re-added — §13.4). **Hardware refusal matrix (phase-09c/09d, `SessionManager._validate_hardware`, all before anything is touched; `detail` substrings):** `mode != teleop` → `"hardware sessions support teleop only (phase-09c)"`; empty arms → `"session needs at least one arm"`; an arm outside `workcells.hardware.arms` / outside the twin scene → `"arms [...] not in the hardware workcell"` / `"… not in scene"`; **not EVERY configured arm (phase-09d)** → `"hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing ['view'] (phase-09d: both arms are always part of the session)"`; no / unknown `digital_twin_scene` (or the `[sim]` extra missing); no read-only monitor configured → `"no read-only hardware monitor - the digital twin cannot be posed for the gate"`; a rail homing in flight on ANY arm (`maintenance_busy`: the monitor op OR a phase-09d `RailHomingJob`) → `"rail homing in progress on the Perception Arm - wait for it to finish"`; per selected arm (user-facing name first): the read-only monitor not `running`/`stale` or without a sample → `"Manipulation Arm: no monitor sample (monitor error: …) - the read-only monitor must be connected before a hardware session (the digital twin cannot be posed)"`; probe `refused`/`unreachable` → `"…: control box 192.168.1.201 is unreachable - power it on / check the network first"`; `error_code != 0` → `"…: controller error 31 is latched - clear errors first"`; the twin expects a rail the monitor did not find → `"…: the digital twin 'mavis_v2' expects a linear track but the monitor found none"`; `rail_present and not (rail_homed and rail_enabled)` → **`"Manipulation Arm: rail not homed - home it from the Hardware tab (Home rail) before starting a session (carriage position unknown)"`**; `start_from` profile not covering the arms. Post-connect: a monitor poll thread still inside the SDK after 15 s, a per-arm bring-up error (`"hardware bring-up failed: Manipulation Arm: rail - [rail] …"`), a connected arm whose track is not `ready` (`"… rail - linear track error after connect (carriage position unknown …)"`), a dof mismatch with the twin, a stale first state, or — phase-09d — a `start_from` profile motion the gate twin cannot plan (`"profile motion not collision-free: goal_in_collision (grip_right_inner_knuckle / table) - the digital twin found no safe path from the measured posture to profile '…'"`) → teardown + 409. `hardware_session_active` (the monitor hand-over predicate) turns true only AFTER this matrix passed, right before `_bringup_hardware` pauses the monitor: a refused request never flips it (a supervisor round inside the validation window would otherwise disconnect the monitors and 409 with "monitor paused"). `speed_scale` outside (0, 1] is pydantic's 422. `GET /api/session` answers `state: bringup` while the hardware bring-up runs (D5) |
 | `DELETE /api/session` | → 204 | TEARDOWN (idempotent) |
 | `GET /api/episodes` | → `{repo_id, total_episodes, total_frames}` | current dataset counters (collect/dagger) |
 | `GET /api/tracker/calibration` | → `TrackerCalibrationStatus` | phase-10 (13-tracker §3 item 8); idle snapshot (`kind: none, phase: idle` + persisted `yaw_valid` / dates) when nothing runs; the same object rides `telemetry.tracker.calibration` |
 | `POST /api/tracker/calibration` | `TrackerCalibrationCommand{kind: base_station\|yaw, op: start\|capture\|validate\|install\|apply\|abort, point?}` → `TrackerCalibrationStatus` | 409 `{detail}` on an illegal transition (`CalibrationError`): `"stop the session first"`, `"backend is not libsurvive"`, too few scenes for `validate`, `install` without `validation.passed`, `apply` with non-empty `fit_checks`, `capture` after all seven points, a second `start` while one runs. Returns the post-command snapshot; progress via telemetry (§6 "Tracker calibration modes") |
-| `POST /api/hardware/arms/{arm_id}/maintenance` | `ArmMaintenanceRequest{op: clear_errors\|apply_backstops\|recover}` → `ArmMaintenanceResult{arm_id, op, path: monitor\|session, ok, detail, sdk_codes, warnings, before?, after?}` | phase-09b (core §12 `protocol/maintenance.py`; `docs/prompts/phase-09b-error-recovery.md`). **No op produces motion.** Routing (`Runtime.arm_maintenance`): 404 = `arm_id` not in `workcells.hardware`; **a hardware session owns the boxes** → the *session path* (`SessionManager.session_recovery`): `clear_errors` and `recover` both run the driver's user-initiated recovery on ITS monitor thread (`HardwareWorkcell.request_recovery(arm_id)`: `clean_error → clean_warn → motion_enable(True) → set_mode(1) → set_state(0)` → re-seed from the MEASURED position; the handler waits ≤ 10 s for a `recovery_result()` with a higher `seq` AND `user_initiated` — the driver bumps `seq` for its own auto recoveries too, and an auto sequence already running when the operator clicked completes first and must not be reported as the operator's outcome — and reports `ok` / the latch reason, e.g. `controller error 1: … - motion_enable failed (release the physical e-stop?)`), `apply_backstops` → 409 (the driver applied the volatile settings at connect), an arm outside `SessionSpec.arms` → 409; **no hardware session** → the *monitor path* (`HardwareStateMonitor.maintenance`): `clear_errors` = `clean_error` + `clean_warn` and NEVER `motion_enable`, `apply_backstops` = `backstops.apply_backstops(api, XArmDriverConfig)` with the arm's `ArmConfig` mapped through the hardware package's own `workcell._driver_cfg` (identical values to the connect-time call; §14), both queued to the arm monitor's poll thread (one `XArmAPI`, one thread; the REST threadpool thread only waits ≤ 10 s), `recover` → 409 `"no hardware session - use clear_errors"`, monitor off / paused / connecting / error → 409 (`"… needs the read-only monitor connected to 'view' (monitor error: …)"`), a second op on the same arm while one runs → 409 (`"a maintenance op is already running on 'view'"`; per-arm lock + the monitor's `maintenance_busy`). 200 whether or not `ok` (a failed `clean_error` code, a re-latched error, a timed-out poll thread all come back as `ok: false` + `detail`). `before` / `after` (monitor path only) are `ArmMonitorTelemetry` rows sampled right before / after the op with `backstops_match` computed against the config, so the UI can show `error_code` → 0 and `collision_sensitivity` / `tcp_load_kg` landing. `sdk_codes` preserves call order (`{clean_error, clean_warn}`; the `backstops.py` sequence). One INFO audit line per call: `maintenance <op> on arm <id> from <client host> via <path>: ok|FAILED - <detail>` (refusals: `refused - <detail>`) |
+| `POST /api/hardware/arms/{arm_id}/maintenance` | `ArmMaintenanceRequest{op: clear_errors\|apply_backstops\|recover\|home_rail, dry_run}` → `ArmMaintenanceResult{arm_id, op, path: monitor\|session, ok, detail, sdk_codes, warnings, before?, after?, rail_sweep?, status: done\|accepted\|refused, job_id?}` (200; **202** when `status == accepted`) | phase-09b (core §12 `protocol/maintenance.py`; `docs/prompts/phase-09b-error-recovery.md`). **Three of the four ops produce no motion; `home_rail` (phase-09c, below) is THE ONE op that moves a mechanical part.** Routing (`Runtime.arm_maintenance`): 404 = `arm_id` not in `workcells.hardware`; **a hardware session owns the boxes** → the *session path* (`SessionManager.session_recovery`): `clear_errors` and `recover` both run the driver's user-initiated recovery on ITS monitor thread (`HardwareWorkcell.request_recovery(arm_id)`: `clean_error → clean_warn → motion_enable(True) → set_mode(1) → set_state(0)` → re-seed from the MEASURED position; the handler waits ≤ 10 s for a `recovery_result()` with a higher `seq` AND `user_initiated` — the driver bumps `seq` for its own auto recoveries too, and an auto sequence already running when the operator clicked completes first and must not be reported as the operator's outcome — and reports `ok` / the latch reason, e.g. `controller error 1: … - motion_enable failed (release the physical e-stop?)`), `apply_backstops` → 409 (the driver applied the volatile settings at connect), an arm outside `SessionSpec.arms` → 409; **no hardware session** → the *monitor path* (`HardwareStateMonitor.maintenance`): `clear_errors` = `clean_error` + `clean_warn` and NEVER `motion_enable`, `apply_backstops` = `backstops.apply_backstops(api, XArmDriverConfig)` with the arm's `ArmConfig` mapped through the hardware package's own `workcell._driver_cfg` (identical values to the connect-time call; §14), both queued to the arm monitor's poll thread (one `XArmAPI`, one thread; the REST threadpool thread only waits ≤ 10 s), `recover` → 409 `"no hardware session - use clear_errors"`, monitor off / paused / connecting / error → 409 (`"… needs the read-only monitor connected to 'view' (monitor error: …)"`), a second op on the same arm while one runs → 409 (`"a maintenance op is already running on 'view'"`; per-arm lock + the monitor's `maintenance_busy`). 200 whether or not `ok` (a failed `clean_error` code, a re-latched error, a timed-out poll thread all come back as `ok: false` + `detail`). `before` / `after` (monitor path only) are `ArmMonitorTelemetry` rows sampled right before / after the op with `backstops_match` computed against the config, so the UI can show `error_code` → 0 and `collision_sensitivity` / `tcp_load_kg` landing. `sdk_codes` preserves call order (`{clean_error, clean_warn}`; the `backstops.py` sequence). One INFO audit line per call: `maintenance <op> on arm <id> from <client host> via <path>: ok|FAILED - <detail>` (refusals: `refused - <detail>`). **`home_rail` (phase-09c; `docs/prompts/phase-09c-hardware-session.md`, user rule 1 "no implicit motion"):** `set_linear_track_back_origin` drives the carriage to the track's zero end (the operator's LEFT, +X) at the track's OWN homing speed (no SDK setter, duration unmeasured; the positioning cap `rail_speed_mm_s` 50 is written AFTER homing for later moves — 02-hardware §8.6), so it is operator-triggered from the arm card only, **session-less only** (a hardware session exists → 409 `"home_rail is not available while a hardware session owns the arms - end the session first"`; a session is refused while the rail is unhomed, so homing is never needed inside one) and **twin-gated**: `HardwareStateMonitor.maintenance(…, dry_run)` first runs `devices/rail_sweep.py::RailSweepChecker.check` — a dedicated `DigitalTwin` (never the overlay's or a session's; `SceneOverrides(microphones, base_pose)`, `hardware_session.home_rail_inflation_m` 0.025 m = the guardrail's debug margin for a blind sweep from an unknown start, D4) posed with the target arm at its CURRENT 7 joints and the other arm at ITS last sample (rail → `rail_fallback_m` + an `assumptions` entry when unknown, `rail_flip` applied), sweeping the target's rail slot `linspace(0, 0.65, 131)` (`home_rail_step_m` 5 mm) with `check_config_violations` (blocked / clear) and `mj_geomDistance` over the monitored pairs (`min_clearance_*`) → `RailSweepVerdict{scene_id, inflation_m, step_m, travel_m, clear, first_blocked_m/pair, min_clearance_m/at_m/pair, q_checked[7], other_arms, assumptions, sample_seq}` in `rail_sweep`. `dry_run: true` → 200 with the verdict alone, `ok = clear`, `sdk_codes {}` (the HomeRailSheet shows it before the operator confirms); a blocked sweep → 200 `ok: false`, `detail "home_rail refused: rail sweep blocked at 0.000 m (grip_right_inner_knuckle / table) - fold the arm into a tighter posture (xArm Studio) and retry; nothing was written"`, zero writes; a clear sweep → the hardware monitor's `home_rail` op with `expected_q = q_checked` (its poll thread re-samples and refuses, zero writes, if any joint moved > 0.02 rad or an error is latched), writing exactly `set_linear_track_back_origin(wait=True, timeout=30, auto_enable=False)` → `set_linear_track_enable(True)` → `set_linear_track_speed(50)` and judging `ok` from the after-sample registers only (`on_zero == 1 and is_enabled == 1 and error == 0`; the SDK's return code is untrustworthy with `auto_enable`) — `detail "rail homed: carriage at 0.000 m (register 0 mm), track enabled, positioning speed 50 mm/s"`. The REST handler blocks up to **45 s** for this op (D3; `HOME_RAIL_TIMEOUT_S`, 10 s for the others); while it runs the arm reads `stale` with `maintenance_busy: true` and `POST /api/session` is 409 `"rail homing in progress on the …"`. 409s before any write: monitor not connected, a sample missing, `rail_present` false (`"no linear track detected"`), `error_code != 0` (`"clear errors first"`), no twin (`"home_rail needs the digital twin to gate the sweep"`), another op running, **a homing in flight on the OTHER arm** (`"home_rail refused: rail homing in progress on the Perception Arm - wait for it to finish"` — its monitor publishes nothing while the carriage travels, so its sample would pose it pre-homing), **the target's monitor `stale`** (`"… sample of 'grip' is stale … retry when it reads running"` — the sweep needs the CURRENT posture; the hardware monitor re-samples before the write and refuses too when that read fails). Another arm whose monitor is not `running` is still posed from its last sample, with the `assumptions` entry `"view: monitor stale - posed from its last sample, which may not be its current posture"`. **Phase-09d (`docs/prompts/phase-09d-rail-homing-planning.md`; `devices/rail_homing.py::RailHomingService.request`):** a blocked sweep is no longer a flat refusal. The service runs `HardwareStateMonitor.home_rail_preflight` (the refusals + sweep above, zero writes) and then `PrePositionPlanner.evaluate`: candidate postures in order — the scene keyframe's 7 joints for the arm (`source: keyframe`, the folded factory zero), then the `<arm>_home` key (`home`) — each must be sweep-clear itself, reachable by the sweep twin's RRT-Connect from the current posture with the rail slot LOCKED at `rail_fallback_m` (`RailSweepChecker.plan_path`: the carriage is unknown, the job never moves it) AND pass the position-agnostic `RailSweepChecker.check_path`: the path densified to 0.05 rad, EVERY configuration checked at EVERY one of the 131 rail positions at the 0.025 m sweep margin under the planner's start-posture hysteresis (a pair the current posture already violates at a position may only open up; any new violation blocks) — this check is the ONLY safety basis of the motion. The verdict rides `rail_sweep.pre_position: PrePositionPlan{needed, source, target_q[7], waypoints, duration_s (at 10 %), checked_rail_positions (131), clear, detail}` and decides the response: `pre_position.needed == false` (sweep clear) → the synchronous monitor-path homing above (200, `status: done`); `dry_run` → 200 with the verdict + plan only (`ok` = the op can proceed, zero writes); `needed and clear` → a `RailHomingJob` starts (§5 "Rail-homing maintenance motion") and the reply is **202** `status: accepted`, `ok: true`, `job_id`, `sdk_codes {}`, `path: session` (the job connects this arm's driver) — progress on `telemetry.hardware_monitor.arms[].maintenance` (§13.3), the final `ArmMaintenanceResult` (`status: done`, same `job_id`, `ok` true/false, the driver's `sdk_codes`, `after` = the first monitor sample after the resume) at `GET …/maintenance/last`; `needed and not clear` → 200 `status: refused`, `ok: false`, `detail "home_rail refused: … no rail-safe pre-positioning path: keyframe: …; home: … - fold the arm toward the factory zero posture in xArm Studio (joints 2-7 near 0) and retry"`, zero writes. While a job runs on ANY arm every maintenance op is 409 `"<op> refused: rail homing in progress on the Manipulation Arm - wait for it to finish"` and `POST /api/session` is 409 (`maintenance_busy` covers the job's whole life) |
+| `GET /api/hardware/arms/{arm_id}/maintenance/last` | → `ArmMaintenanceResult` \| 404 | phase-09d: the last result of the last `home_rail` on this arm — while a `RailHomingJob` runs the 202's `accepted` result (same `job_id`), afterwards its final result, else a synchronous homing's or a refused real op's; 404 until one exists (also for an unknown arm). The HomeRailSheet fetches it when the job's phase reaches `done` / `failed` (polling past `accepted`), and polls it itself when telemetry never shows the job; it only settles on a result carrying ITS `job_id` |
 
 **Not REST** (binding decision, 05-ui §4): episode new/save/discard, profile
 save / set-as-initial, joint targets, switch_arm, takeover — all ride
@@ -882,8 +1047,17 @@ the `snapshot` slot, builds `TelemetryMsg` (shape exactly as 05-ui §2:
 collision: CollisionReport, clearances, episode, dagger, inference`), and fans out with
 per-client latest-wins: a slow consumer gets frames dropped, never
 back-pressures control. Runtime-side additions inside the same message:
-`session: {state, start_from_progress?, plan_status?, trainer_alive?}` —
-additive, UI ignores unknown fields. `ee_pose` is m + **wxyz**;
+`session: {state, start_from_progress?, plan_status?, trainer_alive?, bringup?}` —
+additive, UI ignores unknown fields. **`session.bringup:
+ArmBringupTelemetry[] | null`** (phase-09c, D5; core §11): one row per
+`(arm_id, step, status: pending|ok|warning|error, detail)` while a HARDWARE
+bring-up is in flight and until the session is `running` — the `monitor`
+hand-over, the workcell's `ArmBringupStatus` stages (`network` / `connect` /
+`rail` / `gripper` / `report` / `warnings`), `gate`, `frozen`
+(`"Perception Arm frozen at last sample (monitor seq 5)"`, D1) and `loop`; `null`
+for sim sessions, after RUNNING and after a failed bring-up. `session.state` is
+`bringup` during that window although `arms` is still empty (no snapshot yet);
+`SessionInfo` (REST) carries `kind` and `speed_scale` for the same reason. `ee_pose` is m + **wxyz**;
 `rail_pos_m: null` for rail-less arms; `dagger: null` outside DAgger;
 `episode: null` in teleop/inference. **`arms[*].fault_detail` /
 `arms[*].recovering`** (additive, phase-09b; core §11): the control loop's
@@ -949,7 +1123,17 @@ Runtime-owned objects, session-less and pre-session:
   equal AND `|Δ tcp_load| ≤ 0.05 kg` AND every centre-of-gravity component
   within 10 mm (`null` until the first read-back) — the Hardware tab's
   "differs from config" amber; **`maintenance_busy`** = a maintenance op is
-  queued / executing on that arm's monitor (§13.1). **Zero writes unless an
+  queued / executing on that arm's monitor (§13.1) OR a phase-09d
+  `RailHomingJob` owns the arm (true for the job's whole life);
+  **`maintenance: MaintenanceProgress | null`** (phase-09d, additive) = the
+  job's live progress `{op: home_rail, job_id, phase: queued | sweeping |
+  planning | connecting | positioning | homing | verifying | done | failed,
+  detail, progress 0..1 (phase index + the waypoint fraction while
+  positioning), started_at}` — `null` when no job exists; a terminal phase
+  lingers for 60 s (`rail_homing.PROGRESS_LINGER_S`) so the HomeRailSheet sees
+  `done` / `failed` and then fetches `GET …/maintenance/last`. During the
+  `connecting…verifying` phases the arm's `status` reads `paused` (the job's
+  driver holds the box) and `paused` is true for the block. **Zero writes unless an
   explicit maintenance request**: the polling allowlist is
   `apollo_mavis_v2_hardware.monitor.READ_ONLY_SDK_METHODS` /
   `READ_ONLY_SDK_ATTRS`, the per-op write sets `MAINTENANCE_SDK_METHODS`
@@ -963,9 +1147,17 @@ Runtime-owned objects, session-less and pre-session:
   `paused`, last sample kept), `start()`s them again on the falling edge; two
   SDK clients on one control box are unevidenced, so the monitor and a
   session driver never hold the same box. `HardwareStateMonitor.pause() /
-  resume()` are the synchronous seams a hardware bring-up (phase-09) calls
-  around its own connect; whole transitions are serialized (`_apply_lock`) so
-  a supervisor edge and a seam call never interleave their per-arm walks.
+  resume()` are the synchronous seams the hardware bring-up (phase-09c, §5)
+  calls around its own connect, and `join(timeout_s)` waits for the poll
+  threads to really exit (the arm ids still alive are returned; the bring-up
+  refuses on any); the predicate itself is
+  `SessionManager.hardware_session_active` = a hardware session exists OR a
+  hardware `create()` is in flight (`_creating_kind`), so `pause()` is never
+  undone by the next supervisor round; whole transitions are serialized
+  (`_apply_lock`) so a supervisor edge and a seam call never interleave their
+  per-arm walks. During a hardware session every arm's row reads `paused`
+  (all arms release together, D1) and the session arms' live data ride
+  `arms[*]` from the control loop instead.
   `ArmStateMonitor.disconnect()` returns False when its poll thread is still
   inside a blocking SDK call (`connect()` can exceed the 2 s join budget) —
   the runtime logs it; the thread then releases that client itself and never
@@ -1007,7 +1199,12 @@ paced at stream fps) → encoded[stream_id]: LatestSlot[bytes(header+jpeg)]
   knob and a colliding id is skipped with an error log.
 - **Pre-session previews**: real-camera streams are available with no
   session, encoded at **~15 fps** (landing-page grid); on session start the
-  session's cameras switch to configured fps, on teardown back to 15.
+  session's cameras switch to configured fps, on teardown back to 15. Hardware
+  (phase-09c): the switch IS the adoption — `hub.set_fps(cam_id,
+  video.session_fps)` on every open preview camera, ids recorded in
+  `ActiveSession.adopted_streams`, the same `OpenCVCamera` object keeps the UVC
+  node (never re-opened, `hardware_camera()` unchanged), `set_fps(…,
+  preview_fps)` at teardown; `SessionInfo.streams` stays `[]`.
 - Sender: `await slot_fresh(); await ws.send_bytes(buf)` — a slow client
   skips frames (client also drops while a decode is in flight, 05-ui §5.4).
 - 640×480@30 ⇒ 25–60 KB/frame, 6–15 Mbps/stream; encode 1–3 ms/frame
@@ -1023,8 +1220,9 @@ the `[hardware]` extra missing, duplicate stream id) marks that camera
 nothing else; failed cameras are retried on the next `start_previews()` (after
 every session). `stop_previews()` — called when a sim session starts — stops
 only the sim preview sources; hardware previews survive sim sessions and are
-torn down by `stop_hardware_previews()` at process exit (or handed over when a
-hardware session starts, phase-09). Hardware camera ids must not collide with
+torn down by `stop_hardware_previews()` at process exit (a hardware session
+ADOPTS them in place — fps switch only — instead of taking them over, phase-09c
+above). Hardware camera ids must not collide with
 sim scene camera names (one VideoHub namespace).
 `SessionManager.hardware_camera(cam_id)` returns the started preview camera
 (or `None`): a UVC node cannot be opened twice, so every other consumer of a
@@ -1043,7 +1241,7 @@ camera and composited as a pale-yellow translucent silhouette. It is a visual
 tool to judge the twin against the cell (rail position and direction, base
 pose, camera extrinsics, joint convention) — not a calibration, and not shown
 in the Cockpit. One thread owns a PRIVATE `BuiltScene` copy (never the
-phase-09 gate's `DigitalTwin`) with these compile-time edits, all verified on
+gate's `DigitalTwin`, nor the `home_rail` sweep's) with these compile-time edits, all verified on
 the lab box (MuJoCo 3.12.0 + EGL): `spec.visual.quality.offsamples = 0`
 (multisampling blends segmentation ids at edges into OTHER valid geom ids —
 mask area inflates, centroid off by 37 px); per wrist camera
@@ -1071,8 +1269,17 @@ reading); an arm the monitor never sampled (box off, still connecting) →
 `waiting` with detail `no sample from <arm> yet - monitor <status>: …`
 (nothing published, `/api/cameras` `live: false`) rather than a grey twin at
 the keyframe posture nobody measured; no real frame → `waiting` (nothing
-published); a hardware session (`paused()`) → `waiting` with detail `paused -
-a hardware session owns the arms`. The published `CameraFrame` keeps the real frame's `t_mono` /
+published); a hardware session (`paused()`) WITHOUT a state provider → `waiting`
+with detail `paused - a hardware session owns the arms`. **During a hardware
+session (phase-09c)** the bring-up installs
+`TwinOverlayRenderer.set_state_provider(SessionStateProvider)`: the session
+arms are posed from the driver's `workcell.states()` (inner workcell, track rail
+convention — the overlay applies `rail_flip` itself; status `running`, or
+`stale` when the 30003 stream is), the unselected arms from their frozen last
+monitor sample (status `stale`, detail `Perception Arm frozen at last sample
+(hardware session)`, grey tint); `paused()` is ignored while a provider is
+installed and teardown removes it, so the `*_align` streams keep their ids and
+stay `live` through the session. The published `CameraFrame` keeps the real frame's `t_mono` /
 `wallclock_ns`; each stream is an ordinary `VideoHub` FrameSource
 (`TwinOverlaySource`, JPEG q80 over `/ws/video/<id>_align`). GL contexts are
 thread-affine: both `mujoco.Renderer`s (RGB + segmentation) and the `MjData`
@@ -1237,10 +1444,27 @@ twin_overlay:                # phase-09a (§13.4 `<camera_id>_align` streams)
   env_rgb: [90, 200, 250]
   stale_tint_rgb: [170, 170, 170]   # monitor stale / error -> grey twin
   joint1_offset_rad: 0.0     # diagnostic knob only; the identity convention is verified
-  rail_flip: false           # true: q_sim = 0.65 - q_track
+  rail_flip: false           # DEPRECATED alias of hardware_session.rail_flip (phase-09c; either
+                             #   key set -> both true, one convention for overlay + gate + sweep)
   rail_fallback_m: {grip: 0.65, view: 0.0}  # rail position the twin assumes while the
-                                            #   track is not homed (its register is meaningless)
+                                            #   track is not homed (its register is meaningless);
+                                            #   also the home_rail sweep's / frozen arm's assumption
   stream_suffix: _align      # grip_wrist_align / view_wrist_align (reservation rules §13.4)
+hardware_session:            # phase-09c/09d (§5 hardware BRINGUP, §13.1 home_rail)
+                             #   (phase-09d removed default_arms: a session always includes
+                             #   every configured arm; an old key in a YAML is ignored)
+  armed: false               # ARMING SWITCH (2026-09-05): real drivers connect / rails home only
+                             #   when true; repo default false -> tests, dev instances and a
+                             #   forgotten render refuse hardware sessions + home_rail with 409
+                             #   "hardware not armed" (the lab render sets true, HARDWARE_ARMED)
+  default_speed_scale: 0.1   # Hardware-tab default (D2: 10 % / 30 % / 100 % segmented control)
+  rail_flip: false           # q_sim = 0.65 - q_track for the overlay AND the gate / sweep twins;
+                             #   verify with the *_align overlay right after the first home_rail
+  home_rail_inflation_m: 0.025  # D4: blind-sweep margin (the guardrail's debug inflation);
+                             #   also the margin of the 09d pre-positioning plan + path check
+  home_rail_step_m: 0.005    # D4: 5 mm -> 131 checks over the 0.65 m travel
+  bringup_timeout_s: 60.0    # HardwareWorkcell.bring_up budget inside POST /api/session
+                             #   and inside the rail-homing job's connect
 egl_device_id: 0
 ```
 
@@ -1283,11 +1507,14 @@ previews); `Runtime.stop()` stops overlay → monitor before everything else.
 package's `ArmStateMonitor`. `CameraConfig.intrinsics` on the hardware wrist
 cameras are the D435i **colour** intrinsics (the depth stream is not used);
 without them the overlay renders with fovy 43.2° and logs a warning. Both lab
-tracks are unhomed today, so `rail_fallback_m` (grip 0.65 = the operator's
+tracks are unhomed at power-on, so `rail_fallback_m` (grip 0.65 = the operator's
 right end, view 0.0 = the left end, matching the `mavis_v2` keyframe) is what
-the twin shows until phase-09 homes them; `joint1_offset_rad` / `rail_flip`
-exist only to diagnose a convention mismatch on the live cell and stay at their
-identity defaults.
+the twin shows until the operator homes them (`home_rail`, §13.1);
+`joint1_offset_rad` / `hardware_session.rail_flip` exist only to diagnose a
+convention mismatch on the live cell and stay at their identity defaults.
+`hardware_session.*` (phase-09c) holds the Hardware-tab defaults, the shared
+rail convention and the `home_rail` sweep margins (§5, §13.1); `Runtime` builds
+one `RailSweepChecker` from it and hands it to the `HardwareStateMonitor`.
 
 **Controller-side backstops per arm (phase-09b; core §7, 02-hardware §6).**
 `workcells.hardware.arms[*].tcp_load_kg` / `tcp_load_cog_mm` /
@@ -1332,7 +1559,8 @@ mink 1.3.0, lerobot ≥0.6 pinned, xArm-Python-SDK 1.18.5.
 Status (phase-09b, 2026-09-04): the first two rows and the Studio-conflict
 row are **implemented and fake-tested** (`tests/test_fault_recovery_loop.py`,
 `tests/test_maintenance_api.py` over `tests/fakes.EventFakeWorkcell`); the
-hardware session itself still lands with phase-09. Mechanism: every tick the
+hardware session itself landed with phase-09c (§5; `tests/test_hardware_session.py`,
+fakes only — the first live run is the phase-09c acceptance). Mechanism: every tick the
 loop calls `workcell.drain_events()` (core `WorkcellInterface`, default `[]`;
 `HardwareWorkcell` returns every driver's events in `t_mono` order) and
 dispatches BY CLASS NAME (`control.loop.FAULT_EVENT_NAMES`; the runtime never
@@ -1343,7 +1571,10 @@ field-for-field and a test pins the names against the hardware package).
 |---|---|---|
 | xArm controller error (C22 self-collision, C24 speed, C31 collision, C35 boundary…) | driver `FaultEvent` via `workcell.drain_events()` (the driver's 5 Hz monitor / servo return code 1 funnel into it; `ArmState.error_code` ≠ 0 holds the arm meanwhile) | THAT arm → FAULT: `ArmSender.pause()` (drains its slot, dispatches nothing), the loop holds it (`arm_stopped`) and publishes no target for it, drops its plan / jog / teleop seed, releases the clutch anchors if it was the clutched arm; `session.state = fault`, `arms[*].fault_detail` = the SDK `x_code` title (+ the driver's latch reason); **other arms keep running**. Recovery is the driver's (auto within its 3/30 s budget for RECOVERABLE codes, else the operator's `recover` click, §13.1): `clean_error → clean_warn → motion_enable(True) → set_mode(1) → set_state(0)` → `ReseedEvent` + `RecoveredEvent` → the loop **re-seeds** from `get_state()` (`_last_cmd`, IK warm state, gate `_last_safe`, watchdog AWAIT_EMPTY), resumes the sender and holds the arm in RECOVERING until the first tick whose inputs hold nothing live (clutch released / keys up or watchdog-latched) → RUNNING; a latch `FaultEvent` (`motion_enable failed (release the physical e-stop?)`, budget exhausted, …) keeps FAULT until the next click |
 | Command return 9 / −2 (state not ready) | per-command code → driver `FaultEvent(source="servo")` | same recovery path (controller silently drops to mode 0 on error) |
-| Operator "Clear errors & resume" (Cockpit) / "Clear errors" (Hardware tab) | `POST /api/hardware/arms/{arm_id}/maintenance` | session: `request_recovery` on the driver's monitor thread, result awaited ≤ 10 s via `recovery_result()`; no session: `clean_error` + `clean_warn` on the read-only monitor's poll thread, never `motion_enable` (§13.1). Neither moves the arm; the linear-track homing IS motion and is not a maintenance op (phase-09) |
+| Operator "Clear errors & resume" (Cockpit) / "Clear errors" (Hardware tab) | `POST /api/hardware/arms/{arm_id}/maintenance` | session: `request_recovery` on the driver's monitor thread, result awaited ≤ 10 s via `recovery_result()`; no session: `clean_error` + `clean_warn` on the read-only monitor's poll thread, never `motion_enable` (§13.1). Neither moves the arm |
+| Linear track not homed at power-on (`on_zero == 0`: carriage position unknown, the twin cannot gate) | monitor sample `rail_present and not (rail_homed and rail_enabled)`; the driver's `connect()` raises `RailNotHomedError` (never homes) | `POST /api/session kind=hardware` → 409 `"… rail not homed - home it from the Hardware tab (Home rail) …"` for any arm; the operator runs `home_rail` (§13.1) — the ONE motion-class maintenance op: dry-run sweep verdict (+ `pre_position` plan, phase-09d) in the HomeRailSheet → confirm → posture sweep-clear: `set_linear_track_back_origin` on the monitor's thread (≤ 45 s, `maintenance_busy`, session POST 409 meanwhile); posture blocked but plannable: the `RailHomingJob` (202) connects that arm alone, drives the planned rail-position-agnostic path to the keyframe / home posture at 10 % under the gate, homes, verifies, hands the arm back braked in that posture and resumes the monitor (§5; progress on `hardware_monitor.arms[].maintenance`, result at `GET …/maintenance/last`) → the card reads `rail 0.000 m` → check the `*_align` overlay (`hardware_session.rail_flip` if mirrored) → the session may start. The track keeps its homed flag across sessions (D6: `disconnect()` never disables it) |
+| Rail-homing job fails half-way (arm moved since the sweep, a session slipped in first, a driver fault during the pre-positioning motion, the executor times out / the posture is not reached, `home_rail()` not ok, register verification fails) | `RailHomingJob` phase handlers (`JobFailed`) | phase `failed` on telemetry with the reason (`"rail homing job failed during positioning: …"`, incl. the gate verdict and the commanded posture on a timeout), the rig torn down (`stop_rig`: loop → drivers, D6 hand-back, the arm holds where it stopped), the monitor resumed, the final `ArmMaintenanceResult` (`ok: false`, `status: done`, same `job_id`) at `GET …/maintenance/last`; nothing half-connected, the carriage never commanded by the job (`RailHoldArm`) |
+| Hardware bring-up fails half-way (monitor thread stuck in the SDK, a driver's `BringupError`, dof mismatch, stale first report) | `_bringup_hardware` (§5) | `_abort_hardware_bringup`: loop stopped, `workcell.stop()` (drivers hand back stopped + braked), adopted previews back to preview fps, overlay provider dropped, monitor resumed; 409 with the arm's user-facing name + stage + the driver's message; nothing half-connected |
 | UFACTORY Studio "Live control" grabs mode/state (no error code) | driver `StudioConflictWarning` (it pauses, re-enters mode 1 once, re-seeds; a second grab within 5 s latches) | telemetry warning: `arms[*].fault_detail = "warning: close UFACTORY Studio live control"` for 5 s, nothing stopped; the eventual latch arrives as a `FaultEvent` (row 1) |
 | Rail comm loss (controller error 111) | error code | rail target frozen; arm control continues; telemetry flags rail fault |
 | Control WS silent > 0.2 s | InputWatchdog | ramp twist → 0 over 0.1 s; resume needs empty held set (§8) |

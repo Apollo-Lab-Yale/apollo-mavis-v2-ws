@@ -1,6 +1,15 @@
 # 02 — apollo-mavis-v2-hardware (`apollo_mavis_v2_hardware`)
 
-Status: v0.4 (2026-09-04 phase-09b: §8.6 explicit maintenance channel on the
+Status: v0.6 (2026-09-05 phase-09d: §3.1 `rail_homing: "allow_unhomed"` connect
+for the runtime's rail-homing maintenance motion — position UNKNOWN, 0.0
+placeholder + `rail_position_known`, §5 `XArmDriver.home_rail() ->
+RailHomeOutcome` on a CONNECTED driver with the joints held, judged from the
+registers, §9 `rail: "unhomed"` + connected, §10, §15; v0.5 2026-09-05
+phase-09c: connect NEVER homes — §3.2/§5
+`require_homed()` + `RailNotHomedError`, §8.6 `home_rail` = the ONE motion
+maintenance op (operator-triggered, twin-gated, judged from registers), §3.1 D2
+speed caps, §3.6 D6 hand-back, §9 `rail: "unhomed"`, §14; v0.4 2026-09-04
+phase-09b: §8.6 explicit maintenance channel on the
 monitor — "zero writes unless an explicit maintenance request", §3.5/§3.6
 `request_recovery()` / `recovery_result()`, §6 backstop parameters from core
 `ArmConfig` + read-back, §9 `drain_events()` / `request_recovery(arm_id)`, §13;
@@ -78,12 +87,12 @@ instance owns its 502 socket, report socket, lock).
 
 ```python
 # config.py
-class ServoLimits(BaseModel):
+class ServoLimits(BaseModel):              # defaults = HARDWARE CAPS at speed_scale 1.0 (09c D2)
     rate_hz: float = 100.0
-    max_joint_vel: NDArray7 = [1.0]*7      # rad/s (per-tick slew = vel*dt)
+    max_joint_vel: NDArray7 = [0.3]*7      # rad/s cap (per-tick slew = vel*dt)
     max_joint_acc: NDArray7 = [20.0]*7     # rad/s^2 (prevents C24 on step changes)
     lever_arm_m: NDArray7 = [1.20, 1.20, 1.00, 0.75, 0.44, 0.30, 0.10]
-    max_cart_step_m: float = 0.009         # firmware hard limit 10 mm/tick; keep margin
+    max_cart_step_m: float = 0.002         # 0.2 m/s TCP cap; firmware hard limit 10 mm/tick
     joint_limit_margin_rad: float = 0.0087 # 0.5 deg inside limits (avoids -8 OUT_OF_RANGE)
 
 class XArmDriverConfig(BaseModel):
@@ -96,7 +105,11 @@ class XArmDriverConfig(BaseModel):
     reduced_tcp_boundary_mm: tuple[int, int, int, int, int, int] | None = None
         # optional [x_max,x_min,y_max,y_min,z_max,z_min] base-frame envelope
         # (11-safety §11); None = reduced mode off
-    rail_speed_mm_s: int = 200; servo: ServoLimits = ServoLimits()
+    rail_speed_mm_s: int = 50; servo: ServoLimits = ServoLimits()   # 50 mm/s cap (D2)
+    rail_homing: Literal["require_homed", "allow_unhomed"] = "require_homed"
+        # 09d: "allow_unhomed" ONLY for the runtime's rail-homing maintenance motion —
+        # connect proceeds with an unhomed track (dof 8, rail DETECTED, position UNKNOWN,
+        # q[7] a 0.0 placeholder) and XArmDriver.home_rail() homes it later (§5)
     monitor_rate_hz: float = 5.0; stale_after_s: float = 0.15  # 30003 silence => stale
     expected_sn: str | None = None         # assert vs arm.sn (cabling swaps)
 
@@ -110,6 +123,9 @@ class XArmDriver(ArmInterface):
     def request_recovery(self) -> None: ...           # phase-09b: user recovery on the
                                                       #   monitor thread (§3.5, §3.6)
     def recovery_result(self) -> RecoveryResult | None: ...  # last sequence's outcome
+    def home_rail(self) -> RailHomeOutcome: ...       # phase-09d: MOTION, caller's thread,
+                                                      #   joints held by the stream (§5)
+    rail_position_known: bool   # property: False = q[7]/rail_pos_m is the 0.0 placeholder
     tick_stats: TickStats       # property: jitter p50/p99, late ticks, faults
 
 @dataclass(frozen=True)
@@ -117,6 +133,15 @@ class RecoveryResult:           # set at the end of every recovery sequence
     seq: int; ok: bool; error_code: int; detail: str = ""   # detail = latch reason
     user_initiated: bool = False; t_mono: float = 0.0
 ```
+
+**Speed caps (phase-09c D2).** `servo.max_joint_vel` (0.3 rad/s),
+`servo.max_cart_step_m` (2 mm per 10 ms tick = 0.2 m/s TCP) and
+`rail_speed_mm_s` (50) are the hardware caps at `SessionSpec.speed_scale == 1.0`;
+the runtime multiplies all three by the session's `speed_scale` (default 0.1 on
+the Hardware tab) inside its `driver_factory` closure before constructing the
+driver, so the first live runs stream at 0.03 rad/s / 0.2 mm per tick / 5 mm/s.
+`ServoLimits` values are per-driver constants for the life of a connection
+(`_ServoStreamer.set_scale` is internal to the C24 back-off).
 
 `dof` = 8 if `has_rail` else 7; `gripper_force_capable` True only for
 `xarm_g2`. `command_joints(q)` (len == dof, `q[7]` = rail, m) is
@@ -139,13 +164,37 @@ joints 0–6 as the streamer target (latest-wins), forward `q[7]` to
    string `7,7,XS1305,MC1303,v1.12.10` (axes, type, arm SN, box SN, fw) and
    parsing it gave a bogus major so every gate passed (fixed 2026-09-04, §12).
 3. `api.clean_warn(); api.clean_error()` (a latched prior error makes every
-   call return 1); apply backstops (§6); then `api.motion_enable(True);
-   api.set_mode(0); api.set_state(0)` — required order; every `set_mode`
-   must be followed by `set_state(0)`.
+   call return 1); apply backstops (§6). The enable — `api.motion_enable(True);
+   api.set_mode(0); api.set_state(0)`, required order, every `set_mode`
+   followed by `set_state(0)` — comes AFTER the rail gate of step 4 (review
+   fix 2026-09-05): register reads need no enable, so a rail refusal leaves the
+   arm exactly as found (state 4, brakes engaged) — zero writes to the arm.
 4. Rail detection per `expect_rail` (`auto` → `RailController.detect()`;
    `yes` → absent raises `RailExpectedError`; `no` → skip); fixes `dof`;
    `rail.warnings` (e.g. "SN not verified", §5) are appended to
-   `connect_warnings`.
+   `connect_warnings`. With a track present: `rail.require_homed()` —
+   **connect never homes** (phase-09c, user rule "no implicit motion"). It
+   reads `get_linear_track_registers`; `on_zero == 0` raises
+   `RailNotHomedError(step="rail")` with nothing written (the workcell maps it
+   to `ArmBringupStatus.rail = "unhomed"`, the runtime refuses the session and
+   the operator homes from the Hardware tab via the monitor's `home_rail` op,
+   §8.6); `on_zero == 1` → `set_linear_track_enable(True)` +
+   `set_linear_track_speed(cfg.rail_speed_mm_s)` (non-motion) and `pos_m` is
+   SEEDED from the register (`get_linear_track_pos` after the enable), so the
+   gate twin sees the true carriage position before the first 5 Hz `step()`.
+   A failing register read, or a non-zero code from the enable / speed write,
+   raises `BringupError(step="rail")` (phase `RAIL_ERROR`, `RailEvent`): the
+   carriage position is unverifiable / the track is not enabled, so the
+   connect is REFUSED (`ArmBringupStatus.rail = "error"` + `error`) — never a
+   connected arm whose rail silently reports `pos_m == 0.0` (the gate twin would
+   be off by up to the full travel). Exception (phase-09d, maintenance motion
+   ONLY): with `cfg.rail_homing == "allow_unhomed"` the call is
+   `rail.require_homed(allow_unhomed=True)` and `on_zero == 0` is ACCEPTED, still
+   with nothing written — phase `DETECTED`, `pos_known False`, `dof` 8, the rail
+   slot a 0.0 placeholder flagged by `XArmDriver.rail_position_known == False`,
+   a "position UNKNOWN" `connect_warnings` entry + `RailEvent`; the runtime's job
+   pre-positions the arm and then calls `home_rail()` (§5). An unreadable
+   track is refused in both modes. Then the enable of step 3.
 5. Gripper backend init (§4); `register_report_callback(self._on_report,
    report_cartesian=True, report_joints=True, report_state=True,
    report_error_code=False, report_warn_code=False, report_mtable=False,
@@ -158,8 +207,11 @@ joints 0–6 as the streamer target (latest-wins), forward `q[7]` to
    `_ServoStreamer` + `_MonitorThread`. Phase → `STREAMING`.
 
 Failures raise typed exceptions (`ArmConnectError`, `ArmIdentityError`,
-`RailExpectedError`, `GripperInitError`) carrying the step name; the
-workcell turns them into per-arm statuses (§9), never aborting other arms.
+`RailExpectedError`, `RailNotHomedError`, `GripperInitError`) carrying the
+step name; the workcell turns them into per-arm statuses (§9), never aborting
+other arms. A connect that fails after step 3 has already enabled the arm;
+`disconnect()` (§3.6) hands it back stopped and braked — the runtime tears the
+workcell down on any per-arm error.
 
 ### 3.3 Servo streaming thread (`_ServoStreamer`)
 
@@ -187,12 +239,35 @@ loop while running:
     q_cmd = clip(last_sent + dq, joint_lo + margin, joint_hi - margin)
     code = api.set_servo_angle_j(list(q_cmd), is_radian=True)  # blocking, sub-ms LAN
     if code == 0: last_sent, prev_dq = q_cmd, dq
+    elif code == 9 and now < grace_until: not_ready_ticks += 1   # still entering mode 1
     else: on_fault(code, q_cmd); pause()       # §3.5 takes over
     record tick latency into stats (EWMA + p99 ring)
 ```
 
-The lever-arm bound keeps worst-case TCP step ≤ 9 mm with all joints slewing
-(no MuJoCo/Jacobian in `hardware` — fixed conservative radii). Jitter:
+**Entering servo mode is not instantaneous.** `set_mode(1); set_state(0)`
+returns before the control box will accept `move_servoj`: its replies still
+carry the "not ready to move" bit (0x10), which the SDK turns into APIState
+**9** (`_check_code(is_move_cmd=True)` → `STATE_NOT_READY`; the reported state
+code is NOT what gates the move). A blind `sleep(0.1)` raced it on the real
+boxes — the FIRST servo tick of the first live hardware session returned 9 and
+faulted the arm mid-bring-up (2026-09-05, §14.4). Two guards, both bounded:
+
+1. `XArmDriver._enter_servo_mode()` is the single place the driver enters mode
+   1 (connect step 6, `_recover`, `_handle_external`): `set_mode(1)`,
+   `set_state(0)`, then `_await_servo_ready()` POLLS `get_state()` every
+   `SERVO_READY_POLL_S` (20 ms) for up to `SERVO_READY_TIMEOUT_S` (1.5 s) until
+   the state is in `SERVO_HEALTHY_STATES`. Read-only polling, and each reply
+   also refreshes the SDK's ready flag. A timeout does not fault — guard 2 owns
+   that decision.
+2. `resume()` opens a `SERVO_NOT_READY_GRACE_S` (0.3 s) window in which a code
+   **9** is retried on the next tick instead of faulting (`last_sent` is not
+   advanced — nothing moved — and `not_ready_ticks` counts them). Past the
+   window a 9 faults like any other bad return, so a box that stays not-ready
+   still surfaces within ~0.3 s.
+
+The lever-arm bound keeps worst-case TCP step ≤ `max_cart_step_m` (2 mm per
+tick at `speed_scale` 1.0, i.e. 0.2 m/s; scaled with the session, D2) with all
+joints slewing (no MuJoCo/Jacobian in `hardware` — fixed conservative radii). Jitter:
 deadline scheduling on `monotonic()`; sustained p99 > 3 ms emits a
 `DriverEvent` warning (GIL-pressure cue, overview §2). The stale-input
 deadman (~0.2 s) is runtime's job (overview §6): runtime ramps targets; the
@@ -256,9 +331,19 @@ Classification (controller error codes):
   auto-resume), 10–17 servo motor, 19/28 end-module comms, 110 baseboard.
   **111** (rail dropped off RS-485) latches only the rail (`RAIL_ERROR`);
   the arm keeps streaming, rail frozen.
-- **EXTERNAL** (mode/state changed under us, no error code — Studio, §9):
-  pause, emit `StudioConflictWarning`, retry mode 1 once; again in 5 s →
-  `LATCHED`.
+- **EXTERNAL** (the arm LEFT SERVO MODE with no error code, §9): pause, emit
+  `StudioConflictWarning`, retry mode 1 once; again in 5 s → `LATCHED`. "Left
+  servo mode" = `mode != 1` **or** `state in SERVO_CONFLICT_STATES = {3, 4, 5,
+  6}` (paused / stopped / decelerating). `SERVO_HEALTHY_STATES = {0, 1, 2}`:
+  **state 2 (standby, "sleeping") is the state a HELD mode-1 arm reports** —
+  re-sending the same posture is not motion, and both lab boxes sit in `mode 1
+  state 2` for a whole session. The SDK agrees (`ready = state not in (4, 5)`,
+  `x3/base.py` `__handle_report_real`); we additionally count 3/6 as a conflict
+  because a paused arm silently ignores servo ticks. Accepting only `{0, 1}`
+  latched BOTH arms with "external mode/state conflict persisted (UFACTORY
+  Studio?)" ~0.5 s after every connect and every recovery, with no Studio
+  running, on the first live session (2026-09-05, §14.4). The latch text now
+  reports the MEASURED mode/state instead of asserting a cause.
 
 `LATCHED`: streamer paused, gripper/rail queues cleared, every `command_*`
 raises `ArmFaultedError` (hardware-local, subclasses core `CommandError`);
@@ -292,8 +377,14 @@ engaged, `motion_enable` fails and it stays `LATCHED` ("release e-stop"
 event). From another thread (the runtime's REST handler) use
 `request_recovery()` instead: one `XArmAPI` must not be driven from two
 threads, so the sequence runs on the driver's monitor thread (§3.5). `disconnect()`: stop streamer +
-monitor (join, 0.5 s timeouts), best-effort `set_mode(0); set_state(0)`,
-gripper `close()`, `api.disconnect()`; idempotent, never raises (logs).
+monitor (join, 0.5 s timeouts), then best-effort `set_mode(0); set_state(4);
+motion_enable(False)` — the arm is handed back in the power-on posture
+"stopped, brakes engaged" (phase-09c D6; before 09c it was left enabled in
+mode 0) — gripper `close()`, `api.disconnect()`; idempotent, never raises
+(logs). The linear track is deliberately left alone: it keeps its homed flag
+and its enable (no `set_linear_track_enable(False)`), so the next session
+needs no re-homing. A finished session therefore leaves the cell as found
+except for the track state, and the physical e-stop remains the only hard stop.
 
 ## 4. Gripper backends (`grippers.py`)
 
@@ -337,13 +428,25 @@ kinematics/collision — the driver folds measured rail position into
 `ArmState.q[7]`; runtime folds it into world TF / twin.
 
 ```python
-class RailPhase(Enum): ABSENT; DETECTED; HOMING; READY; RAIL_ERROR
+HOME_RAIL_SDK_WAIT_S = 30.0      # SDK homing-wait timeout (shared with the monitor op, §8.6)
+UNKNOWN_RAIL_POS_M = 0.0         # placeholder published while the track is unhomed (09d)
+class RailPhase(Enum): ABSENT; DETECTED; READY; RAIL_ERROR   # no HOMING: homing is a latch, not a phase
 class RailController:
-    def __init__(self, api: Any, speed_mm_s: int = 200) -> None: ...
-    def detect(self) -> bool: ...  /  def ensure_homed(self) -> None: ...
-    def set_target(self, pos_m: float) -> None   # thread-safe, latest-wins
-    def step(self) -> None                       # 5 Hz on monitor thread
-    pos_m: float; phase: RailPhase               # properties
+    def __init__(self, api: Any, speed_mm_s: int = 50, arm_id: str = "") -> None: ...
+    def detect(self) -> bool: ...
+    def require_homed(self, allow_unhomed: bool = False) -> None: ...  # raises RailNotHomedError
+    def home(self) -> RailHomeOutcome            # 09d: MOTION, caller's thread, ≤ 30 s + reads
+    def set_target(self, pos_m: float) -> None   # thread-safe, latest-wins; DROPPED unless READY
+    def step(self) -> None                       # 5 Hz on monitor thread; no-op while homing
+    pos_m: float; pos_known: bool; homing: bool; phase: RailPhase   # properties
+
+@dataclass(frozen=True)
+class RailHomeOutcome:           # judged from the REGISTERS, never from SDK return codes
+    ok: bool; detail: str; written: bool = False      # written False = refused, nothing moved
+    phase: str = "ABSENT"        # RailPhase.name after the attempt
+    on_zero: int | None = None; is_enabled: int | None = None; error: int | None = None
+    pos_m: float | None = None   # seeded position when ok (0.0); None = still unknown
+    sdk_codes: dict[str, int] | None = None; duration_s: float = 0.0
 ```
 
 `detect()`: present = `get_linear_track_registers()` code == 0 AND the reply
@@ -366,19 +469,94 @@ on_zero: 0}` — the tracks are NOT homed and NOT enabled, so `pos` is
 meaningless (the Manipulation Arm's carriage is physically at the operator's
 right end ≈ sim q 0.65 while its register reads 0). `pos` becomes a position
 only after `on_zero == 1` AND `is_enabled == 1`; the read-only monitor (§8.5)
-reports `rail_pos_m = None` until then and `rail_raw_mm` always. Homing
-(`set_linear_track_back_origin`) is a MOTION command and belongs to the
-session bring-up (phase-09), never to the monitor. `ensure_homed()`: if `get_linear_track_on_zero()`
-is 0 → `set_linear_track_back_origin(wait=True, timeout=30)` — REQUIRED once
-per power-on (commanding unhomed returns APIState 82); then
-`set_linear_track_enable(True)` + `set_linear_track_speed(speed_mm_s)`.
-`step()`: poll `get_linear_track_pos()` → `pos_m`; if new target and
+reports `rail_pos_m = None` until then and `rail_raw_mm` always.
+
+**Homing is MOTION and the driver never issues it (phase-09c).**
+`set_linear_track_back_origin` drives the carriage to the track's zero end
+(the operator's LEFT, +X). Since the carriage position is unknown until the
+track is homed, the twin cannot gate an unhomed arm — so homing must happen
+BEFORE a session, explicitly: the operator presses "Home rail" on the
+Hardware tab, the runtime checks a full-travel sweep of the twin at the arm's
+CURRENT posture, and only then the read-only monitor executes the `home_rail`
+maintenance op (§8.6) — the ONE maintenance op that moves anything. Homing is
+required once per power-on (commanding an unhomed track returns APIState 82).
+`require_homed()` (connect, §3.2 step 4): `get_linear_track_registers` →
+`on_zero == 0` → `RailNotHomedError` (core `errors.py`, `step="rail"`), phase
+stays `DETECTED`, nothing written; `on_zero == 1` → `set_linear_track_enable(True)`
++ `set_linear_track_speed(speed_mm_s)` (non-motion) → `pos_m` seeded from the
+register (`get_linear_track_pos` after the enable) → `READY` + `RailEvent`
+"rail ready at X m". A failing register read, or a non-zero enable / speed
+code → `RAIL_ERROR` + `BringupError(step="rail")`: the connect is REFUSED
+(`rail: "error"` + `error`; the runtime 409s) — a carriage of unverifiable
+position must never be gated at a guessed 0.0 m (review fix 2026-09-05; before,
+connect continued). `RailPhase.HOMING` no longer exists.
+`step()` (only in `READY`): poll `get_linear_track_pos()` → `pos_m`; if new target and
 `|Δ| >= 1 mm` → `set_linear_track_pos(units.rail_m_to_mm(target),
 wait=False)` (absolute int mm, clamped [0, 650]); nonzero track error →
 `clean_linear_track_error()` once + re-enable, repeated → `RAIL_ERROR` +
 `RailEvent`. Teleop rail keys (←/→) arrive as the rail slot of
 `command_joints`; ~5 Hz absolute re-targeting is smooth — the track plans
-its own motion at `rail_speed_mm_s`.
+its own motion at `rail_speed_mm_s`. `set_target()` DROPS (does not queue) a
+target unless the track is `READY` and not homing (09d): a target parked while
+the track was not commandable must never fire the moment it becomes so.
+
+**Connecting with an unhomed track — `rail_homing: "allow_unhomed"` (phase-09d,
+maintenance motion ONLY).** When the arm's CURRENT posture does not clear the
+whole rail travel, the runtime's rail-homing job must first move the arm along
+a twin-planned, rail-position-agnostic path, which needs a connected driver
+BEFORE the track is homed. `require_homed(allow_unhomed=True)` (set by
+`XArmDriverConfig.rail_homing == "allow_unhomed"`, which the job puts on its
+speed-scaled driver config; normal sessions keep the default `"require_homed"`
+and are refused exactly as before) accepts `on_zero == 0` with still NOTHING
+written: phase stays `DETECTED` (never commanded — the rail slot of
+`command_joints` is dropped silently so the loop's hold target keeps flowing,
+an explicit `command_rail` raises `CommandError`), `pos_known == False`, one
+`connect_warnings` entry + one `RailEvent(DETECTED)` "position UNKNOWN".
+`dof` stays 8 and `ArmState.q[7] == rail_pos_m == UNKNOWN_RAIL_POS_M (0.0)`:
+core's `ArmState` requires a finite `q[7]` equal to `rail_pos_m`, so
+NaN/None cannot be published — **the 0.0 is a PLACEHOLDER, not a measurement;
+consumers MUST check `XArmDriver.rail_position_known`** (the runtime job feeds
+the twin its own fallback and validates the path for all 131 rail positions).
+0.0 is also the zero end the homing drives to, so a hold target the loop
+derives from the published state is motionless once the track is homed.
+`ArmBringupStatus.rail == "unhomed"` with `connected == True` and no `error` is
+this state (§9). An unreadable track still refuses the connect (it could not be
+homed either).
+
+**Homing on a connected driver — `XArmDriver.home_rail() -> RailHomeOutcome`
+(phase-09d).** Called by the runtime's rail-homing job on ITS OWN thread after
+the pre-positioning motion finished, while the 100 Hz servo stream keeps
+holding the joints; blocks ≤ `HOME_RAIL_SDK_WAIT_S` (30 s) + a few register
+round-trips. Driver-level refusals (`written False`, nothing moved): not
+connected → `CommandError`; no track → `RailUnavailableError`; driver not
+`STREAMING` (FAULT / LATCHED: the stream is not holding the joints) or a
+controller error cached by the monitor poll → refused outcome. Then
+`RailController.home()`: raise the `homing` latch (under `_lock`; the pending
+target is dropped) → take `_io_lock` once as a barrier so a `step()` already on
+the bus finishes (every later `step()` sees the latch and returns without any
+SDK call) → pre-read `get_linear_track_registers` (unreadable → failed,
+`RAIL_ERROR`; a latched track `error != 0` → REFUSED, zero writes) →
+`set_linear_track_back_origin(wait=True, timeout=HOME_RAIL_SDK_WAIT_S,
+auto_enable=False)` → `set_linear_track_enable(True)` →
+`set_linear_track_speed(speed_mm_s)` (the job's config is speed-scaled, so
+5 mm/s at 10 %) → register read-back, **judged from the registers only**
+(`on_zero == 1 and is_enabled == 1 and error == 0`; the three SDK codes are
+kept in `sdk_codes` — 1.18.5 returns 0 for a homing that did not finish and
+nonzero for one that did). Success: `pos_m` seeded from the register (0.0),
+`pos_known True`, target + last-sent cleared, `READY`, `RailEvent(READY)`
+"rail homed: carriage at 0.000 m, …"; the track is commandable again for a
+FRESH target — the driver does no re-anchoring of the loop's target on its
+own. Failure: `RAIL_ERROR` + `RailEvent`, position still UNKNOWN (`pos_m None`
+in the outcome, `rail_position_known False`), the ARM unaffected (still
+streaming). Re-homing a `READY` track is allowed. `RailEvent`s are emitted
+both by `home_rail()` itself (so the caller sees them right after it returns)
+and by the 5 Hz monitor tick (lock-protected drain, no double emission). The
+SDK's per-instance command lock serialises the homing's modbus calls with the
+streamer's `set_servo_angle_j`; the SDK homing wait is a 10 Hz register poll,
+not a held lock, so the stream is not starved. After the homing the runtime
+tears the driver down as usual (§3.6 D6: stopped + braked, posture kept, track
+left homed + enabled) — there is no automatic "return to the previous posture".
+The monitor-path `home_rail` op (§8.6, joints braked, session-less) is unchanged.
 
 ## 6. Controller-side safety backstops (`backstops.py`)
 
@@ -793,22 +971,33 @@ class ArmStateMonitor:
 ## 8.6 Maintenance channel (`ArmStateMonitor.maintenance`, phase-09b)
 
 Operator-triggered, session-less controller maintenance for the UI's Hardware
-tab ("Clear errors", "Apply safety settings"). Design rules: (a) **nothing
-moves** — `clear_errors` never enables (brakes stay engaged; measured
-2026-09-04: `clean_error()` on the Perception Arm cleared C19 with ≤ 5e-5 rad
-joint change), and enabling + servo mode (`recover`) is refused here because it
-needs a session driver; (b) **one `XArmAPI`, one thread** — the request is
-queued and executed by the poll thread between polls, the caller only waits;
-(c) **auditable** — the outcome lists every SDK return code in call order plus
-a sample right before and right after the operation.
+tab ("Clear errors", "Apply safety settings", "Home rail"). Design rules: (a)
+**nothing moves except `home_rail`** — `clear_errors` never enables (brakes
+stay engaged; measured 2026-09-04: `clean_error()` on the Perception Arm
+cleared C19 with ≤ 5e-5 rad joint change), enabling + servo mode (`recover`) is
+refused here because it needs a session driver, and `home_rail` (phase-09c) is
+the ONE op that moves a mechanical part — the track carriage — and is therefore
+operator-triggered, twin-gated by the runtime and posture-checked here before
+its first write; (b) **one `XArmAPI`, one thread** — the request is queued and
+executed by the poll thread between polls, the caller only waits; (c)
+**auditable** — the outcome lists every SDK return code in call order plus a
+sample right before and right after the operation.
 
 ```python
-MaintenanceOp = Literal["clear_errors", "apply_backstops", "recover"]
+MaintenanceOp = Literal["clear_errors", "apply_backstops", "recover", "home_rail"]
 MAINTENANCE_SDK_METHODS = {
     "clear_errors":    {"clean_error", "clean_warn"},          # in that order
     "apply_backstops": set(backstops.BACKSTOP_SDK_METHODS),   # §6 order, cfg-dependent
     "recover":         set(),                                  # refused: needs a session
+    "home_rail":       {"set_linear_track_back_origin",       # MOTION: carriage -> zero end
+                        "set_linear_track_enable", "set_linear_track_speed"},  # no motion_enable
 }
+DEFAULT_MAINTENANCE_TIMEOUT_S = 10.0; HOME_RAIL_SDK_WAIT_S = 30.0
+HOME_RAIL_TIMEOUT_S = 45.0; HOME_RAIL_Q_TOL_RAD = 0.02
+
+def maintenance(self, op, driver_cfg=None, timeout_s=None, *,
+                expected_q=None, q_tol_rad=HOME_RAIL_Q_TOL_RAD) -> MaintenanceOutcome
+    # timeout_s None -> per-op default (10 s; 45 s for home_rail)
 
 @dataclass(frozen=True)
 class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtime adds path)
@@ -825,19 +1014,75 @@ class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtim
   sensitivity, payload refreshed at once); complete the request; back to polling
   without a sleep. `maintenance()` wakes the poll thread immediately instead of
   waiting out the current period.
-- **Outcome**: `clear_errors` — `ok` iff both codes are 0 AND `after.error_code
-  == 0` (a controller error that re-latches right away — a persisting hardware
-  fault — is reported as `ok=False`, "… re-latched right after clearing");
+- **Outcome**: `clear_errors` — `ok` iff neither code is a real failure AND
+  `after.error_code == 0` (a controller error that re-latches right away — a
+  persisting hardware fault — is reported as `ok=False`, "… re-latched right
+  after clearing"). `clean_error` / `clean_warn` are the ONLY writes here that
+  return the raw reply, skipping the SDK's `_check_code`
+  (`x3/base.py:2394-2413`), so a box with something latched answers with the
+  **status echo** `STATUS_ECHO_CODES = {1 ERR_CODE, 2 WAR_CODE, 9
+  STATE_NOT_READY}` — the very codes `_check_code` maps to 0 for every non-move
+  call. Those are not failures: judging on them reported "FAILED - clean_error
+  returned 2" for the operator's **Clear errors** click on 2026-09-05 while the
+  error HAD been cleared (the after-sample read `error_code` 0, §14.4). Like
+  `home_rail`, the verdict comes from the READ-BACK; the codes stay in
+  `sdk_codes` for diagnosis. Any other nonzero code (3 timeout, -1 not
+  connected, …) still fails the op;
   `detail` names what was cleared (`cleared controller error 19: End Effector
   Communication Error and controller warning 11`) or says nothing was latched.
   `apply_backstops` — `ok` iff every code is 0 (`warnings` lists the nonzero
   ones; `detail` = "safety settings applied: sensitivity 3, payload 0.95 kg at
   (0, 0, 60) mm" [+ ", reduced-mode boundary on"], with a read-back note if the
   frame has not caught up yet).
+- **`home_rail` (phase-09c) — the one motion op.** Request: `driver_cfg`
+  (`rail_speed_mm_s`) + `expected_q` (the 7 joint angles the runtime's twin
+  sweep was checked at; `q_tol_rad` default 0.02). Before-sample → refuse with
+  ZERO writes unless: a track is present, `error_code == 0` ("… is latched;
+  clear errors first"), track `error == 0`, and every joint is within
+  `q_tol_rad` of `expected_q` ("the arm moved since the sweep was checked (joint
+  4 differs by 0.050 rad, tolerance 0.02 rad); re-run the check"). Then exactly
+  `set_linear_track_back_origin(wait=True, timeout=HOME_RAIL_SDK_WAIT_S,
+  auto_enable=False)` — the SDK blocks until `on_zero` (or 30 s) —
+  → `set_linear_track_enable(True)` → `set_linear_track_speed(cfg.rail_speed_mm_s)`
+  (both non-motion, always issued once homing started) → one direct
+  `get_linear_track_registers` read-back (taken even when a hand-over landed
+  during the travel — the client is still the monitor's until the op returns)
+  → after-sample. **Judged from the registers only**: `ok` iff that read-back
+  says `on_zero == 1 and is_enabled == 1 and error == 0`; detail "rail homed:
+  carriage at 0.000 m (register 0 mm), track enabled, positioning speed 50 mm/s"
+  or "rail homing failed: on_zero still 0 (…), track not enabled, linear track
+  error N (set_linear_track_back_origin returned 100)". The SDK return codes are
+  reported, never trusted — **SDK 1.18.5 `auto_enable` masking**
+  (`x3/linear_motor.py:131-148`, verified): `set_linear_motor_back_origin`
+  waits (0 on `on_zero`, 80 track fault, 81 SCI low, 101 ten failed reads, 100
+  timeout — and 100 as soon as `connected` drops) and then, when `auto_enable`
+  (default True), OVERWRITES that result with `set_linear_motor_enable(True)`'s
+  code, so a timed-out homing comes back as 0; the monitor's `auto_enable=False`
+  keeps the wait code honest but the registers still decide. Re-homing an
+  already homed track is allowed ("rail re-homed …": the twin sweep assumed an
+  unknown start anyway). While the op runs the poll thread is inside the SDK
+  wait: no sample is published, the arm's status reads **`stale`**,
+  `maintenance_busy` is true — expected; the runtime refuses `POST /api/session`
+  meanwhile. Caller timeout `HOME_RAIL_TIMEOUT_S` (45 s; the REST handler uses
+  the same); a timed-out caller abandons the result but the op completes on the
+  poll thread. `stop()`/`disconnect()` during a homing wait for the op up to
+  `HOME_RAIL_TIMEOUT_S` (not the generic `STALE_THREAD_JOIN_S`) before
+  releasing the client — the SDK wait loop exits on `connected == False` and
+  whether the carriage then keeps travelling is unknown, so the monitor never
+  disconnects mid-homing. Homing duration on the lab tracks is unmeasured; the
+  track's own homing speed register has no public SDK setter (out of scope).
 - **Refusals** (`ok=False`, no SDK call): `recover` ("recover needs a session");
-  `apply_backstops` without a `driver_cfg`; monitor `off` / `paused` /
-  `connecting` / `error` ("not connected to <ip> (monitor paused: released for
-  hand-over)"); unknown op → `ValueError`.
+  `apply_backstops` / `home_rail` without a `driver_cfg`; `home_rail` without a
+  7-vector `expected_q`, with `q_tol_rad <= 0`, or on a monitor that does not
+  poll a rail; monitor `off` / `paused` / `connecting` / `error` ("not connected
+  to <ip> (monitor paused: released for hand-over)"); unknown op → `ValueError`.
+  On the poll thread, `home_rail` additionally refuses (zero writes; the sample
+  it was judged on rides along as `before`) when the before-sample is not FRESH
+  — `_poll` publishes nothing when `get_servo_angle` fails, so `before` would
+  silently be the previous sample, equal to `expected_q` by construction,
+  although the arm may have moved ("could not take a fresh sample of the arm
+  (get_servo_angle failed)"; judged by `seq` against the newest sample before
+  the re-read) or is older than `stale_s` (review fix 2026-09-05).
 - **Failure paths**: an SDK exception inside the op completes the request with
   `ok=False` (`"clear_errors failed: Exception: …"`, codes so far) and the
   monitor treats the box as lost (client released, reconnect with backoff).
@@ -849,11 +1094,15 @@ class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtim
   it skips the after-sample and reports them (`after=None`, detail suffixed
   "(monitor paused: released for hand-over before the read-back)"). The shutdown
   itself never disconnects the client under a mid-write op — it waits for the op
-  (bounded by `STALE_THREAD_JOIN_S`) before releasing the box, so a session
-  driver taking over never finds the monitor still writing. A caller timeout (`timeout_s`, default 10 s)
+  (bounded by `STALE_THREAD_JOIN_S`; `HOME_RAIL_TIMEOUT_S` for a `home_rail` in
+  flight) before releasing the box, so a session driver taking over never finds
+  the monitor still writing and no homing is cut mid-travel. A caller timeout
+  (`timeout_s`, default 10 s / 45 s for `home_rail`)
   abandons the request: `ok=False` "… timed out …", the late result is dropped,
   polling continues. `maintenance_busy` is true while a request is queued or
-  executing (telemetry `maintenance_busy`).
+  executing (telemetry `maintenance_busy`). `ArmMonitorSample.rail_error`
+  (track error register, phase-09c) feeds both the `home_rail` pre-check and
+  its judge.
 
 ## 9. HardwareWorkcell assembly & bring-up (`workcell.py`)
 
@@ -862,7 +1111,11 @@ class ArmBringupStatus(BaseModel):        # streamed to the UI landing page
     arm_id: str
     network: Literal["pending", "probing", "ok", "booting", "failed"]
     connected: bool = False; fw_version: str | None = None; sn: str | None = None
-    rail: Literal["unknown", "none", "detected", "homing", "ready", "error"] = "unknown"
+    rail: Literal["unknown", "none", "detected", "unhomed", "ready", "error"] = "unknown"
+        # "unhomed" (09c): track detected, on_zero 0 — connect refused (RailNotHomedError,
+        # connected False + error) with the default rail_homing; with "allow_unhomed" (09d)
+        # the arm IS connected (connected True, no error), position unknown until
+        # XArmDriver.home_rail(); no "homing" value — bring-up never homes
     gripper: Literal["unknown", "xarm", "xarm_g2", "none", "error"] = "unknown"
     warnings: list[str] = []; error: str | None = None
 
@@ -902,19 +1155,40 @@ on miss `match()` (`probing`); probe `refused` → `booting`: poll TCP 502
 every 2 s within `timeout_s` — never re-probe NICs. (2) **connect** each arm
 in its own thread (§3.2 steps updating statuses; `driver.connect_warnings` —
 backstop set_* return codes, rail SN not verifiable — are copied into
-`ArmBringupStatus.warnings`, fixed 2026-09-04: they were dropped before). (3) **rail detect + home**
-(inside connect; ~10 s, once per power-on). (4) **report stream**: require
+`ArmBringupStatus.warnings`, fixed 2026-09-04: they were dropped before). (3) **rail detect +
+require homed** (inside connect, §3.2 step 4, BEFORE `motion_enable`; bring-up NEVER homes — an
+unhomed track ends the arm's bring-up with `rail: "unhomed"` + `error`
+"[rail] grip: linear track not homed …", `RailNotHomedError` in
+`WorkcellBringupError.statuses`, and the session layer refuses until the
+operator has run `home_rail`, §8.6; an unverifiable track — register read /
+enable / speed failed — ends it with `rail: "error"` + `error`, a plain
+`BringupError(step="rail")`; in both cases the arm was never enabled. With
+`rail_homing: "allow_unhomed"` on the driver config — phase-09d, the runtime's
+rail-homing job only — an unhomed track instead yields `connected: True`,
+`rail: "unhomed"`, NO `error` and a "position UNKNOWN" warning; the job then
+pre-positions the arm and calls `XArmDriver.home_rail()`, §5). (4) **report stream**: require
 one fresh 30003 snapshot (`stale == False`) before declaring `connected`.
 (5) **cameras**: `start_cameras()` if not running. Partial failure: one arm
 failing never aborts the others; the session layer decides whether the
-surviving subset satisfies the requested arm list.
+surviving subset satisfies the requested arm list. Only the arms in
+`cfg.arms` get a driver, so a runtime config listing a subset constructs — and
+connects — only those (since phase-09d a teleop session always lists EVERY
+configured arm; the rail-homing maintenance job lists the ONE arm it homes,
+§15). `shutdown()` hands every connected arm back stopped + braked (§3.6 D6).
 
 **UFACTORY-Studio conflict detection**: Studio "Live control" (arm web UI,
 port 18333) grabs mode/state and fights the SDK stream. Detectors: (a)
 mode/state change between our `set_mode(1)` and the first stream tick, no
 error code → `EXTERNAL` fault (§3.5); (b) in-session uncommanded mode change
 in `state_mode` → `StudioConflictWarning` UI banner ("close UFACTORY Studio
-live control"). Behavioral only — who holds 18333 is invisible to the host.
+live control"). Behavioral only — who holds 18333 is invisible to the host,
+so this is a HINT, never a diagnosis: the fault text states the measured
+`mode`/`state` and only *suggests* closing Studio. The predicate is "left
+servo mode" (§3.5), NOT `state not in {0, 1}` — a held healthy arm reports
+state 2 and the strict form produced a permanent false-positive latch on both
+arms (2026-09-05, §14.4). Studio's real grabs still trip it: Live control
+switches the box to mode 0 (position) or 2 (teach), and its stop button leaves
+state 4.
 
 ## 10. Threading model summary
 
@@ -927,6 +1201,8 @@ Per arm (daemon threads, named `hw.{arm_id}.{role}` for py-spy):
 | `_MonitorThread` | 5 Hz | err/warn poll, rail `step()`, gripper poll + queued gripper/rail commands, recovery | few ms bursts |
 | `_Port30000Reader` (opt) | 10 Hz push | gripper current fields | none |
 | `hw.{arm_id}.monitor-ro` (§8.5, session-less; never coexists with the above) | 10 Hz + 2 Hz | `ArmMonitorSample` swap; queued maintenance ops (§8.6) run here, never on the requester's thread | 3 reads/tick + 2 modbus reads per slow tick (+ the op's writes on request) |
+| `hw.{arm_id}.monitor-ro` during `home_rail` (§8.6) | blocked ≤ 30 s in the SDK homing wait, then the enable + speed writes and one register read-back | the same thread; no sample published → status `stale`, `maintenance_busy` true; `stop()`/`disconnect()` wait ≤ 45 s for it | the SDK's 10 Hz register polls |
+| caller of `XArmDriver.home_rail()` (§5, phase-09d; the runtime's rail-homing job thread) | once; blocked ≤ 30 s in the SDK homing wait + 3 writes + 2 register reads | `RailController.home()`: homing latch, the track writes, `pos_m`/`pos_known`/phase, its `RailEvent`s | the SDK's 10 Hz register polls, interleaved with the streamer's ticks (per-instance command lock); `_MonitorThread.step()` keeps running, its `rail.step()` is a no-op meanwhile |
 
 Plus one capture thread per camera (workcell-scoped). `_StateSnap` swap =
 single reference assignment; targets are latest-wins slots under a `Lock`
@@ -954,7 +1230,22 @@ into those properties like the controller's report frame does); records
 `sent_joints` + full `calls` log; `emit_report(q, tcp, ...)` fires report callbacks. It encodes
 the SDK gotchas as behavior: errors reset mode to 0; `set_servo_angle_j`
 returns 1 latched / 9 not-ready / -8 joint-limit; `clean_error()` alone ≠
-readiness; unhomed rail → 82; absent rail → code 3. Key tests: recovery
+readiness; unhomed rail → 82; absent rail → code 3. **`set_state(0)` settles the
+box in `state 2` (standby), never 0** (2026-09-05, §14.4): readiness is the
+separate `ready_to_move` flag standing in for the reply's 0x10 bit — exactly the
+split the real SDK has (the `state` enum vs `UxbusCmd.state_is_ready`) — so no
+test can pass by assuming a held arm reports state 0, and `set_mode` still
+requires its `set_state(0)`. `get_state()` exists (recorded, so tests can pin
+"readiness is polled, not slept for") and `FaultScript.not_ready_ticks` scripts
+the servo-mode entry race. **Homing (phase-09c)**
+mirrors `x3/linear_motor.py`: `set_linear_track_back_origin(wait, **kwargs)`
+blocks for `homing_duration_s` honouring the `timeout` kwarg (SDK default 10)
+and `.connected` (100 on either), 80 on a track error, `homing_result_code`
+forces the wait result, and `auto_enable` (SDK default True) OVERWRITES the
+code with the enable's — the masking the monitor works around;
+`inject_track_error(code)` latches the track error register (enable → 80,
+homing → 80), `rail_homed` / `rail_enabled` are settable properties,
+`homing_started` / `homing_completed` count. Key tests: recovery
 order (clean_error → motion_enable → set_mode(1) → set_state(0) → reseed
 from measured q); C24 backoff; budget → LATCHED; per-tick clamps (assert
 |Δq|, accel, lever-arm bound on `sent_joints`); re-anchor (mocked
@@ -973,6 +1264,22 @@ in `after`; nonzero codes → `ok=False` + `warnings`; refusals (`recover`, no
 cfg, off/paused/error) never touch the SDK; caller timeout drops the late result
 while polling continues; an SDK exception fails the request and reconnects; a
 request pending during `disconnect()` fails with "monitor paused".
+**`home_rail`** (phase-09c): write set exactly `[set_linear_track_back_origin,
+set_linear_track_enable, set_linear_track_speed]` with `wait=True, timeout=30,
+auto_enable=False`, on the poll thread, arm state untouched; posture mismatch /
+controller error / track error / no track / no cfg / no `expected_q` → refused
+before the first write; judged from the registers in both directions (code 101
+with `on_zero` 1 → ok; code 0 with `on_zero` 0 → not ok; honest 100; track
+error mid-travel); the fake's `auto_enable` masking pinned; `disconnect()`
+during the travel waits for the op (45 s budget, not 15 s) and releases after;
+status `stale` + `maintenance_busy` while homing; a caller timeout abandons the
+result while the homing still completes. **Driver/rail**: connect with an
+unhomed track raises `RailNotHomedError(step="rail")` and never calls
+`set_linear_track_back_origin`; homed → enable + speed + `pos_m` seeded;
+`disconnect()` = `set_mode(0), set_state(4), motion_enable(False)` and nothing
+to the track; default caps 0.3 rad/s / 2 mm / 50 mm/s honoured on the wire.
+**Workcell**: unhomed → `rail: "unhomed"`, sibling untouched, `start()` carries
+the typed error; a subset config builds only the selected drivers.
 
 **Report-stream replayer**: TCP server on `127.0.0.1:<ephemeral>` replaying
 `fixtures/report/*.bin` (captured 30003 streams; 87-byte frames: big-endian
@@ -1064,8 +1371,76 @@ the `mavis_v2` twin (no +π on joint 1; see `docs/prompts/phase-09a-*.md`).
   (provisional lab payloads), `apply_backstops(api, cfg, codes=None)` records
   return codes, `BACKSTOP_SDK_METHODS` / `expected_backstop_sequence(cfg)`
   pin the write order for the maintenance tests.
-- Out of scope here (phase-09): rail homing (motion), `_bringup_hardware`,
-  changing backstops inside a session.
+- Out of scope here (phase-09b): rail homing (done in phase-09c as the
+  `home_rail` maintenance op, §8.6/§14), `_bringup_hardware` (runtime,
+  phase-09c), changing backstops inside a session.
+
+## 14. Phase-09c (2026-09-05) — connect never homes; `home_rail`; caps; hand-back
+
+- Rail (§5, §3.2): `RailController.ensure_homed()` → `require_homed()`: reads the
+  registers, `on_zero == 0` → `RailNotHomedError` (core, `step="rail"`) with
+  zero writes; `on_zero == 1` → enable + speed + `pos_m` seeded from the
+  register. `RailPhase.HOMING` removed; `step()` never commands a `DETECTED`
+  track. `ArmBringupStatus.rail` gains `"unhomed"` and loses `"homing"` (§9).
+- Monitor (§8.6): `home_rail` = `set_linear_track_back_origin(wait=True,
+  timeout=30, auto_enable=False)` → `set_linear_track_enable(True)` →
+  `set_linear_track_speed(cfg.rail_speed_mm_s)`, refused before the first write
+  on posture mismatch (`expected_q`, `q_tol_rad = 0.02`), controller error or
+  track error; `ok` from the registers only (`on_zero`, `is_enabled`, `error`);
+  `HOME_RAIL_TIMEOUT_S = 45`; shutdown waits that long for a homing in flight;
+  status `stale` + `maintenance_busy` while homing. `ArmMonitorSample.rail_error`
+  added. `maintenance(timeout_s=None)` → per-op default.
+- Driver (§3.1, §3.6): D2 caps `max_joint_vel 0.3 rad/s`, `max_cart_step_m
+  0.002`, `rail_speed_mm_s 50` at `speed_scale 1.0` (runtime scales); D6
+  `disconnect()` = `set_mode(0)`, `set_state(4)`, `motion_enable(False)`, track
+  untouched.
+- Fake (§11): `homing_duration_s`, `homing_result_code`, SDK-faithful
+  `auto_enable` masking, `inject_track_error`, settable `rail_homed`.
+- Out of scope here: the runtime's twin sweep gate, REST/UI for `home_rail`,
+  the track's homing-speed register (no public SDK setter), per-arm monitor
+  pause, detecting an unselected arm moved from Studio during a session (its
+  monitor is paused with the others; the UI tells the operator not to touch
+  it), collect / DAgger / inference on hardware.
+
+## 15. Phase-09d (2026-09-05) — pre-positioning before homing: `allow_unhomed` connect + `home_rail()` on a connected driver
+
+- Contract: `docs/prompts/phase-09d-rail-homing-planning.md` §2. When the arm's
+  current posture does not clear the whole rail travel, the runtime plans a
+  rail-position-agnostic path in the twin, connects ONLY that arm, executes the
+  path at 10 % under the gate, homes the track with the joints held, then hands
+  the arm back braked in the folded posture. The two driver-side pieces:
+- Config (§3.1): `XArmDriverConfig.rail_homing: Literal["require_homed",
+  "allow_unhomed"] = "require_homed"` — chosen over a `connect(allow_unhomed_rail=)`
+  kwarg because `HardwareWorkcell._bring_up_arm` calls the core
+  `ArmInterface.connect()` with no arguments and the runtime already derives a
+  per-job driver config (`model_copy` for the speed scale carries the literal).
+- Connect (§3.2 step 4, §5): `RailController.require_homed(allow_unhomed=True)`
+  accepts `on_zero == 0` with zero writes; phase `DETECTED`, `pos_known False`,
+  `dof` 8, `ArmState.q[7] == rail_pos_m == UNKNOWN_RAIL_POS_M (0.0)` as a
+  placeholder (core's `ArmState` forbids NaN and requires `rail_pos_m == q[7]`,
+  so the contract's "None/NaN" marker became the flag
+  `XArmDriver.rail_position_known`); `command_joints` drops the rail slot,
+  `command_rail` raises `CommandError`; `ArmBringupStatus.rail == "unhomed"` with
+  `connected True` and no `error` (§9).
+- `XArmDriver.home_rail() -> RailHomeOutcome` (§5, §10): caller's thread;
+  refused unless `STREAMING` with no controller error; `RailController.home()` =
+  homing latch (5 Hz `step()` no-op, targets dropped, barrier on `_io_lock`) →
+  pre-read (track error → refused, zero writes) → `set_linear_track_back_origin
+  (wait=True, timeout=HOME_RAIL_SDK_WAIT_S, auto_enable=False)` → enable →
+  speed → read-back judged from the registers only → `READY` + `pos_m` seeded
+  + target cleared (+ `RailEvent`) or `RAIL_ERROR` + `RailEvent`, position
+  still unknown. `HOME_RAIL_SDK_WAIT_S` moved to `rail.py` (the monitor imports
+  it). `set_target()` now drops targets unless `READY` and not homing;
+  `drain_events()` is lock-protected (drained from two threads).
+- Fake (§11): `homing_track_error` (trip a track error when the carriage would
+  reach the zero end). Tests: `tests/test_rail.py` (controller: allow_unhomed
+  gate, exact write set, register judge vs SDK code, refusals, mid-travel
+  failure, re-homing, latch vs `step()` on two threads) and
+  `tests/test_rail_homing.py` (driver: default still refuses, allow_unhomed
+  connect, `home_rail` keeps streaming and holds the posture, failure, refusals,
+  job thread vs control loop; workcell status mapping).
+- Out of scope here: the runtime job / REST / UI (contract §3–§4), homing both
+  tracks at once, the homing-speed register.
 
 
 > **SDK 1.18.5 quirks met live (2026-09-04):** `set_collision_rebound` returns the raw
@@ -1076,3 +1451,44 @@ the `mavis_v2` twin (no +π on joint 1; see `docs/prompts/phase-09a-*.md`).
 > because the SDK defaults would `wait_move()` in the stopped state. After
 > `apply_backstops` both controllers reported state 5 instead of 4 (both "stopped / not
 > ready" for the SDK; no joint moved).
+
+## 14.4 Fixed 2026-09-05 — first live hardware session: three false alarms
+
+The first real teleop session (both arms, 10 %, after both tracks homed) came up
+and then latched BOTH arms within a second, repeatedly, with
+`CONTROLLER FAULT — <Arm> external mode/state conflict persisted (UFACTORY
+Studio?)`. **No UFACTORY Studio was running** (nothing on port 18333; `ss`
+showed the runtime process as the only client on 502/30003 of either box). Three
+independent defects, all "our code misreading a healthy controller":
+
+1. **State 2 is healthy, not a Studio grab** (§3.5, §9). The detector accepted
+   only `state in {0, 1}`. A held mode-1 arm reports **state 2** (standby): the
+   Manipulation Arm sat at `mode 1 state 2` with `error_code 0` and still
+   latched. Across the whole session the boxes reported exactly two pairs —
+   `mode 1 state 2` (15×) and one `mode 1 state 4` — i.e. never a Studio-shaped
+   mode grab. Fix: `SERVO_HEALTHY_STATES = {0, 1, 2}` /
+   `SERVO_CONFLICT_STATES = {3, 4, 5, 6}`, and the latch text now reports the
+   measured mode/state instead of naming a cause it cannot observe. The 5 s
+   re-trip rule turned the false positive into a permanent latch, so every
+   **Clear errors & resume** click re-latched ~0.5 s later.
+2. **The servo-mode entry race** (§3.3). The Perception Arm's FIRST fault was
+   `source servo, code 9` on the very first tick after `set_state(0)`: the box
+   had not finished entering servo mode. Fix: `_enter_servo_mode()` polls
+   `get_state()` for readiness, and the streamer retries a code 9 inside a
+   bounded 0.3 s post-`resume()` grace.
+3. **`clean_error` returning 2 is not a failure** (§8.6). `clear_errors` on the
+   Perception Arm reported `FAILED - clean_error returned 2` while the error was
+   in fact cleared (`error_code` 0 in the very next sample). 2 = `WAR_CODE`, a
+   status echo; `clean_error`/`clean_warn` are the only writes that skip
+   `_check_code`. Fix: `STATUS_ECHO_CODES` are tolerated and the verdict comes
+   from the read-back.
+
+Regression coverage (hardware-free) in `tests/test_driver_recovery.py`
+(standby-is-not-a-conflict, external state 4 / persistent state 3 still detected
+and the latch text carries no accusation, the mode-entry race does not fault,
+readiness is polled not slept for, not-ready past the grace still faults) and
+`tests/test_monitor.py::test_clear_errors_status_echo_codes_are_not_failures`.
+The fake had hidden all three: it moved to `state 0` on `set_state(0)` and gated
+`set_servo_angle_j` on `state == 0`. It now mirrors the box — `set_state(0)` →
+**state 2** plus a separate `ready_to_move` flag standing in for the reply's
+0x10 bit (`FaultScript.not_ready_ticks` scripts the entry race).

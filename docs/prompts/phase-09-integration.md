@@ -20,6 +20,20 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
   `backstops_match`）；真机 session 中 Cockpit 故障横幅 **Clear errors & resume**（驱动
   `request_recovery`：清错 → 使能 → servo → 从实测位置重播种，之后重新握持 clutch 才恢复运动）。
   三者都不产生运动（2026-09-04 实测）。
+- **phase-09c**（`phase-09c-hardware-session.md`，2026-09-05：真机 session bring-up）已落地（fake 全链路；真机
+  从未跑过）——本阶段"硬件逐级点亮"的 session 都由它启动：Hardware 页签 **Speed** 10% / 30% / 100%（默认 10%）
+  → Teleop（**phase-09d 起两臂常驻 session**：无 Include 开关，`SessionSpec.arms` 不等于全部臂时 409）；
+  `POST /api/session kind=hardware` 只支持 teleop，在任一臂导轨未归零、控制器有错误、监视器无样本或归零进行中时
+  409。**导轨归零不再隐式发生**：驱动
+  connect 见 `on_zero == 0` 直接拒绝（`RailNotHomedError`），归零只能由操作员在臂卡片点 **Home rail** 触发
+  （维护操作 `home_rail`，仓库里唯一会让机械部件运动的维护操作）：先 dry-run 显示孪生对整段 0–0.65 m 行程、
+  以该臂当前姿态、0.025 m 余量的扫掠判定，clear 才有确认按钮，滑台开到操作员**左**端（+X），≤ 45 s，
+  只按寄存器（`on_zero`/`is_enabled`/`error`）判定成功。**phase-09d**（`phase-09d-rail-homing-planning.md`）：当前
+  姿态挡住扫掠时不再直接拒绝——dry-run 同时用孪生规划一条与导轨位置无关的路径（每个路点对全部 131 个导轨位置
+  无碰撞），面板说明"臂先按规划路径以 10% 折叠、再归零、然后保持该姿态"，确认后 `RailHomingJob`（REST 202，
+  进度实时可见）只连该臂执行；D1"按最后一次监视样本冻结另一臂"只用于这一维护运动（teleop session 没有未选中臂）。
+  session 结束时驱动 `set_mode(0) → set_state(4) → motion_enable(False)`，臂交还为停止、抱闸（D6），导轨保持
+  归零标志。首次真机运行严格按 09c 文件末尾的"真机验收步骤"（按其 09d 头注修订）。
 - 必读设计文档：
   - `docs/design/00-overview.md` §6（安全分层）、§7（bring-up）、§9（性能目标）
   - `docs/design/02-hardware.md`（netsetup/驱动真机行为）
@@ -42,7 +56,10 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
   venv，部署到 ops 账号时要重跑 install）。
 - **硬件逐级点亮**（每步通过才进下一步；顺序 = 风险递增；对照 11-safety §14.3
   硬件验收清单执行）：
-  1. 单臂、无 rail、低速：bring-up、controller backstops 生效并**回读**
+  1. 只动 Manipulation Arm、不动导轨、低速（phase-09c/09d：Hardware 页签 **Speed** 10%；09d 起 session 必含
+     两臂——Perception Arm 一起连上、由门禁孪生看护、不握 clutch 就只保持，其 C19 须先清掉；两条导轨都必须先按
+     步骤 2 归零，否则 session 409 "rail not homed"——所以步骤 2 的归零在时间上先于首次 session）：bring-up、
+     controller backstops 生效并**回读**
      （`set_tcp_load` 最先 → `set_collision_sensitivity(3)` → self-collision +
      tool model → 可选 reduced-mode TCP boundary → `set_collision_rebound(False)`；
      参数来自 `ArmConfig`（phase-09b：`configs/mavis_v2.yaml` grip 0.95 kg @ (0, 0, 60) mm、
@@ -50,7 +67,11 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
      **Apply safety settings** 一键应用，监视器回读 `hardware_monitor.arms[*].collision_sensitivity /
      tcp_load_kg / backstops_match`；会话中 `get_reduced_states()` 回读入会话记录、手拍触发 C31）、
      100 Hz servo 流稳定性。
-  2. rail 自动探测 + 归零 + `command_rail` 钳制验证。
+  2. rail 自动探测 + **操作员触发归零**（phase-09c：臂卡片 **Home rail** → `HomeRailSheet` dry-run 扫掠判定
+     clear → 确认 → 滑台开到操作员左端，卡片显示 `rail 0.000 m`；09d：判定不 clear 时面板给出预定位规划，确认后
+     臂先以 10% 沿位置无关路径折叠、再归零、归零后保持该姿态——看面板里的阶段进度；**立刻看 `*_align` 叠加窗口**，孪生导轨/基座
+     与真机不重合、镜像则改 `hardware_session.rail_flip: true` 重启再看；两臂各归零一次，每次上电后重做）+
+     `command_rail` 钳制验证（session 中，导轨跟随留到步骤 7 之后）。
   3. gripper（classic 与 G2 各验一台，若在场）。
   4. 数字孪生对真机：twin fidelity — 6 个示教位姿（贴近桌面/rail/他臂），twin
      `clearance()` 与卷尺实测一致到 **δ/2（4 mm）以内**，否则先修外参/网格；twin
@@ -60,7 +81,8 @@ hardware-in-the-loop 验证：跑通 netsetup reconcile、逐级点亮硬件 tel
      真机画面上；蓝色细线 = 孪生的桌沿/障碍物边缘）。导轨归零 + 使能后叠加窗口下沿的小字
      "rail not homed · twin assumes 0.65 m" 应消失（`rail_pos_m` 取代 `rail_fallback_m`）；
      若孪生臂整体转 180° 或导轨方向反了，用 `twin_overlay.joint1_offset_rad` /
-     `rail_flip` 诊断（默认恒等，关节约定已在 2026-09-04 验证为恒等）。
+     `hardware_session.rail_flip`（phase-09c 起叠加与门禁 / 扫掠孪生共用一个键，旧键
+     `twin_overlay.rail_flip` 仍作别名）诊断（默认恒等，关节约定已在 2026-09-04 验证为恒等）。
   5. 双臂 + gate：10% 速度逼近课目验证 clamp/block 在接触前发生；
      deep-penetration 课目 — free-drive 进膨胀带后重新使能，IK 恢复梯退出且无
      C24/C31。
@@ -115,8 +137,11 @@ NVENC 视频编码优化（除非验收不达标）。
 
 - [ ] 100 Hz servo 流 30 min 无 C24（速度超限）/无静默 mode 0 掉落未被恢复；
       每 tick cartesian 步进实测 < 10 mm（日志统计）。
-- [ ] rail：`get_linear_track_registers` 探测正确；每次上电归零一次；
-      command 0.7 m 被钳到 0.650 m；rail 移动时 twin 中臂基座同步平移。
+- [ ] rail：`get_linear_track_registers` 探测正确；每次上电由操作员在 UI 上归零一次（phase-09c **Home rail**：
+      dry-run 扫掠判定 clear → 确认 → 滑台到操作员左端 → 卡片 `rail 0.000 m`，`hardware_monitor.arms[*]`
+      `rail_homed / rail_enabled true`；归零前 `POST /api/session kind=hardware` 必须 409 "rail not homed"；
+      驱动 connect 从不调用 `set_linear_track_back_origin`）；command 0.7 m 被钳到 0.650 m；rail 移动时 twin 中臂
+      基座同步平移；session 结束后臂回到 `state 4`、抱闸（D6），导轨保持归零标志。
 - [ ] 控制路径预算：hardware 模式 tick（IK + twin check + gate + SDK 下发）p99
       < 2 ms（overview §9），twin check 实测落在 0.24–0.75 ms 带内（3 臂时）。
 - [ ] 双臂逼近课目（10% 速度）：gate 在 hull 接触前 block（UI 红横幅 + 被钳命令

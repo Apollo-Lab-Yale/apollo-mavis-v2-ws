@@ -36,21 +36,37 @@
 **A2. 硬件逐级点亮（你握物理急停，Claude 操作软件）**
 - [ ] 按 phase-09-integration.md「硬件逐级点亮」1→6 顺序陪跑：单臂低速 →
       rail → gripper → twin 对拍 → 双臂 gate 课目 → 完整 teleop/采集/DAgger。
+      **首次真机 session 严格按 `phase-09c-hardware-session.md`「真机验收步骤」**（2026-09-05 代码落地，真机
+      从未跑过；步骤 4 按其 09d 头注修订）：两臂 running、err 0 → Manipulation Arm 卡片 **Home rail**（dry-run
+      扫掠 clear → 确认 → 滑台到操作员左端 → `rail 0.000 m`；09d：不 clear 则面板给出预定位规划，确认后臂先以
+      10% 折叠再归零并保持该姿态，202 进度在面板里；立刻看叠加窗口，镜像则 `hardware_session.rail_flip: true`）→
+      Perception Arm 同样归零 → Speed 10% → Teleop（09d：两臂都在 session 里，无 Include 开关）→ bring-up 进度到
+      running、Cockpit `speed 10%`、不握 clutch 两臂静止 10 s → 握 clutch 移 5 cm（Manipulation Arm 跟随）→ 结束
+      session（两臂停止抱闸、监视器恢复）。驱动 connect 写序列（clean → backstops → motion_enable → mode 0 →
+      mode 1 → 100 Hz 发流）在真机上从未跑过，09d 起两臂都要连，所以 Perception Arm 的 C19 必须先清掉 / 在 Studio
+      关掉末端设备（拒绝矩阵对已锁存错误 409；连上也会让驱动 LATCH）。
 - [ ] **twin 对拍用 phase-09a 的叠加窗口**（已交付，无需运动指令即可先看）：Welcome 页
       Hardware 页签 `grip_wrist_align` / `view_wrist_align`——孪生按真机关节角淡黄半透明叠在
       腕部相机画面上，蓝线 = 孪生桌沿/障碍物边缘。现在两条导轨未归零，窗口小字
       "rail not homed · twin assumes 0.65 m"（grip）/ "0.00 m"（view）表示导轨位置是配置假设；
-      归零 + 使能（步骤 2）后小字应消失、孪生导轨/臂与真机重合。Perception Arm 窗口里孪生的
+      归零（phase-09c：臂卡片 **Home rail**，孪生扫掠门禁的 `home_rail` 维护操作——唯一会动的维护操作）+
+      使能后小字应消失、孪生导轨/臂与真机重合（不重合 / 镜像 → `hardware_session.rail_flip`）。Perception Arm 窗口里孪生的
       麦克风体遮住画面下方一大块而真机画面**没有**遮挡——这是要现场量出来的几何差异
       （麦克风体位置/尺寸，03-sim §4.3），先量再改场景，不要"修掉"叠加。
 - [ ] 物理测量项：6 个示教位姿的卷尺实测 clearance（对 twin ≤4 mm）、
       各臂 `base_in_world` 与 rail 原点实测、相机外参标定（标定板）。
 - [ ] **mavis_v2 场景校准**（`apollo-mavis-v2-sim/.../scenes/mavis_v2.yaml` 头部有全部
-      假设）：① mavis 轨道网格长 1.0926 m、零位端到基座中心 0.2476 m——按"右端与台面
-      齐平"反推 x0=0.3599，滑块右边距右沿 15.0 cm（口述 14）；实测轨长/零位端悬出后回调；
-      ② 障碍物（左端、纵深 27.5 起）内角与 gripper 轨网格左端有 1.4×3.8 cm 静态重叠，
-      说明网格轨比实物长/宽一点；③ 两轨 base 间距 39.5、相机轨外沿 2.6、轨宽 19.2 已确认，
-      复核即可；④ 臂法兰安装面高出台面 0.107188 m 是否属实；⑤ 电机盒在哪一端。
+      假设）：① **已于 2026-09-05 关闭**——归零后实测"台面 +X 边缘到轨道零位端 14.0 cm、
+      零位端到基座圆柱中心 18.5–19 cm"，故 `base_pos` x0 由推导值 +0.2375 改为 **+0.2800**、
+      共享 `xarm7_on_rail.xml` 的轨网格偏移 y 由 0.325 改为 **0.385093**（原值把滑台按中程
+      居中，零位端余量算成 0.2476 m，错了 6.0 cm）。**两臂原先都离障碍物端远了 4.25 cm，
+      即此前所有靠 +X 端的间距与扫掠判定都偏乐观**；x0 只用两个读数之和，与卷尺量到哪个
+      端面特征无关。仍偏乐观且需要更好网格才能修：网格滑台在零位端还差 8.95 cm 而真机只差
+      5–6 cm（约 3.4 cm 富余），网格轨 1.0926 m 对真机 1.075 m（画出来的轨现在越过台面 −X
+      边缘 1.76 cm，故意把零位端对准——那一端有障碍物）；
+      ② 障碍物内角与 gripper 轨网格左端的静态重叠现为 1.4×2.0 cm，两者都焊在世界上、
+      MuJoCo 会过滤，门禁与扫掠都碰不到；③ 两轨 base 间距 39.5、相机轨外沿 2.6、轨宽 19.2
+      已确认，复核即可；④ 臂法兰安装面高出台面 0.107188 m 是否属实；⑤ 电机盒在哪一端。
 - [ ] watchdog/急停课目（拔 WS、手拍碰撞、物理急停）需要你现场触发。
 - [ ] 验收表逐项签核。
 
@@ -70,8 +86,19 @@
       `/ws/video/grip_wrist_align` 12 fps；五个窗口 + 小字 + C19 chip；监视前后
       state/mode/error 不变（注意 02-hardware §8.5：SDK connect 在有 warn 时会 `clean_warn`，
       首次读寄存器可能改 RS-485 波特率——决定是否 `baud_checkset=False`）。
-- [ ] runtime：`HardwareWorkcell` 组装进 session manager（hardware kind 目前
-      409；代码 + FakeSDK 测试先落地，真机验证留 A2）。
+- [x] ~~runtime：`HardwareWorkcell` 组装进 session manager（hardware kind 目前
+      409；代码 + FakeSDK 测试先落地，真机验证留 A2）~~ 2026-09-05 **phase-09c**
+      （`phase-09c-hardware-session.md`）：`SessionManager._bringup_hardware`（拒绝矩阵 → 监视器 pause + join →
+      子集臂 `WorkcellConfig`、`cameras: []` → 限速驱动工厂 → `bring_up` → 全新门禁孪生 + 无条件 `SafetyGate` →
+      未选中臂冻结 → `ControlLoop(workcell_kind="hardware")` → 预览相机接管）、`SessionSpec.speed_scale`、
+      `hardware_session` 配置块；hardware 驱动 connect 永不归零（`require_homed()` → `RailNotHomedError`），
+      新维护操作 `home_rail`（只读监视器线程执行，`RailSweepChecker` 全程扫掠门禁，只按寄存器判定），
+      `disconnect()` 停止 + 抱闸（D6）；ui **Home rail** / **Include in session**（09d 已移除：两臂常驻）/
+      **Speed** / bring-up 进度。fake 全链路（unhomed → 409 → home_rail → running）通过；真机验证留 A2（该文件
+      末尾的验收步骤）。**phase-09d**（`phase-09d-rail-homing-planning.md`，2026-09-05）在其上：`spec.arms` 必须等于
+      全部臂、`default_arms` 删除；`home_rail` 姿态不 clear 时孪生规划位置无关路径 → `RailHomingJob`（202，
+      `allow_unhomed` 连该臂、10% 门禁下折叠、`XArmDriver.home_rail()`、抱闸保持姿态）；真机 `start_from=profile`
+      在 bring-up 内规划；Devices 页改名 Debug。
 - [x] ~~五仓转 **git submodule** + ws 仓 .gitignore/README/CLAUDE.md 更新~~ 2026-09-03 完成
       （ws commit `baddf1d`，五个子仓各 tracking `main`）；[ ] 各仓 **tag** 尚未打（五仓目前无 tag）。
 - [ ] **CI 接线**：五仓 GitHub Actions（core schema --check、sim 膨胀语义哨兵、

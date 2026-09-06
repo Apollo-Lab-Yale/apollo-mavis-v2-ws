@@ -81,8 +81,24 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   viewpoint, then fixed to yaw −90 which left the plate facing the operator; turned
   each rail 180° to yaw +90 on 2026-09-03; until 2026-09-04 both arms rested together
   at q ≈ 0.597 in a lowered ready pose, now only the guardrail scenarios use it.)
+  RAIL ZERO ALONG TRAVEL, measured 2026-09-05 with both tracks homed (it had been
+  DERIVED from the mavis mesh and was 6.0 cm wrong): the extrusion's +X/travel-zero end
+  is 14.0 cm from the table's +X edge and 18.5-19 cm from the arm base cylinder's centre
+  → `base_pos` x0 = **+0.2800** (was +0.2375) and the shared `xarm7_on_rail.xml` rail geom
+  offset y = **0.385093** (was 0.325, which centred the carriage at mid-travel). x0 uses
+  only the SUM of the two readings, so it does not depend on which end feature the tape
+  touched. **Both arms therefore sat 4.25 cm too far from the obstacle end**, i.e. every
+  obstacle-side clearance the twin reported — and every rail sweep that passed near the
+  +X end — was optimistic by that much (view carriage ↔ obstacle 12.4 cm not 15.4, view
+  flange ↔ obstacle 11.6 cm, mic ↔ obstacle 12.75 cm not 17). Still optimistic and NOT
+  fixable without better meshes: the mesh carriage stops 8.95 cm short of the rail's zero
+  end where the real one stops 5-6 cm short (~3.4 cm generous), and the mesh rail is
+  1.0926 m against the real 1.075 m so the drawn rail now overhangs the table's −X edge
+  by 1.76 cm (the zero end is anchored on purpose — it has the obstacle). The mesh
+  carriage is also 1.0 cm ASYMMETRIC about the base: +X edge base+0.098, −X edge
+  base−0.088.
   Encoded in `apollo-mavis-v2-sim/src/apollo_mavis_v2_sim/assets/scenes/mavis_v2.yaml`
-  (header lists every measurement and the assumptions to confirm in phase-09);
+  (header lists every measurement and what is still unverified);
   docs/design/03-sim.md §4.3 has the arithmetic. It is the ONLY scene the UI / API
   expose (registry `title: APOLLO MAVIS V2 Digital Twin`); the other scene YAMLs are
   `hidden: true` and kept for CI/tests.
@@ -143,8 +159,9 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   `get_linear_track_registers` → `{pos: 0, status: 2, error: 0, is_enabled: 0, on_zero: 0}`,
   so `pos` is meaningless (the Manipulation Arm's carriage is physically at the operator's
   RIGHT end ≈ sim q 0.65 while its register reads 0); homing (`set_linear_track_back_origin`)
-  is a motion command → phase-09. SDK 1.18.5 API gaps (verified in source): `XArmAPI` has NO
-  `get_linear_track_sn` / `get_linear_track_version` (`__getattr__` raises; only
+  is a motion command → since phase-09c the operator-triggered, twin-gated `home_rail`
+  maintenance op (bullet below), never the driver's connect. SDK 1.18.5 API gaps (verified in
+  source): `XArmAPI` has NO `get_linear_track_sn` / `get_linear_track_version` (`__getattr__` raises; only
   `get_linear_track_registers/pos/status/error/is_enabled/on_zero`, `set_linear_track_*`,
   `clean_linear_track_error`, `get_linear_motor_registers`); `register_report_callback` has
   NO `report_mode` kwarg; the 30003 report payload carries NO `mode` (use `api.mode`);
@@ -168,10 +185,10 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   (encoder noise); the full recovery sequence `clean_error → clean_warn → motion_enable(True)
   → set_mode(1) → set_state(0)` is equally motion-free (it only enables / enters servo state;
   `motion_enable` releases the brakes so the motors hold position actively — motion comes only
-  from explicit motion commands). Linear-track homing (`set_linear_track_back_origin`) IS motion
-  and is NOT a maintenance op (phase-09). Interface: `POST /api/hardware/arms/{arm_id}/maintenance
-  {op}` — `clear_errors` (no session: `clean_error` + `clean_warn` on the read-only monitor's
-  poll thread, never enables; INSIDE a hardware session it is routed to the session driver's
+  from explicit motion commands). Linear-track homing (`set_linear_track_back_origin`) IS motion;
+  since phase-09c it is the ONE motion-class maintenance op, `home_rail` (next bullet). Interface:
+  `POST /api/hardware/arms/{arm_id}/maintenance {op}` — `clear_errors` (no session: `clean_error`
+  + `clean_warn` on the read-only monitor's poll thread, never enables; INSIDE a hardware session it is routed to the session driver's
   user-initiated recovery and is then equivalent to `recover`, i.e. it DOES `motion_enable` —
   the Welcome button never posts it then), `apply_backstops` (no session; 409 during one),
   `recover` (hardware session only: the driver's user-initiated recovery + re-seed from the
@@ -197,6 +214,120 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   `expected_sn` stays None (useless for catching swapped cables; the NIC ↔ profile mapping is
   the check). Never open UFACTORY Studio "Live control" during a session (the driver's
   `StudioConflictWarning` shows as `fault_detail` "warning: close UFACTORY Studio live control").
+- Hardware session bring-up (phase-09c + 09d, designed + implemented 2026-09-05 against fakes
+  only — **never run on the real boxes yet**; `docs/prompts/phase-09c-hardware-session.md` and
+  `docs/prompts/phase-09d-rail-homing-planning.md` are the contracts, the 09c 真机验收步骤 as
+  amended by its 09d header note the first-run procedure, user present, e-stop in hand). **Both
+  arms are ALWAYS in a hardware session** (09d): `SessionSpec.arms` must equal every configured
+  arm (409 "hardware sessions include every configured arm (Manipulation Arm, Perception Arm) -
+  missing […]"); the Hardware tab has no per-arm include switch and `hardware_session.default_arms`
+  is gone (an old YAML key is ignored). **No
+  implicit motion**: the driver's `connect()` NEVER homes the track — `RailController.require_homed()`
+  raises `RailNotHomedError` (`ArmBringupStatus.rail = "unhomed"`) and `POST /api/session
+  kind=hardware` is refused (409 "rail not homed") while either arm's track is unhomed
+  (carriage position unknown → the twin cannot gate). **`home_rail` is the ONLY motion-class
+  maintenance op**: operator-triggered from the Hardware-tab arm card (**Home rail** →
+  `HomeRailSheet`), session-less (409 "end the session first"), executed on the read-only
+  monitor's poll thread as `set_linear_track_back_origin(wait=True, timeout=30, auto_enable=False)`
+  → `set_linear_track_enable(True)` → `set_linear_track_speed(50)`, success judged from the
+  registers ONLY (`on_zero == 1 and is_enabled == 1 and error == 0` — SDK 1.18.5 overwrites the
+  wait result with the enable's code when `auto_enable=True`), and **gated by a STATIC full-travel
+  twin sweep** (`runtime/devices/rail_sweep.py`: the arm's CURRENT 7 joints, the other arm at its
+  last monitor sample or `rail_fallback_m`, rail slot 0–0.65 m in 5 mm steps = 131 checks at
+  0.025 m inflation — the guardrail's debug margin; ≈ 32 ms on `mavis_v2`, 310 pairs).
+  `dry_run: true` returns the `RailSweepVerdict` alone; a blocked sweep is `ok: false` + verdict
+  with zero writes; the monitor re-samples and refuses if the joints moved > 0.02 rad. REST waits
+  45 s, the UI 60 s; the arm reads `stale` + `maintenance_busy` meanwhile and `POST /api/session`
+  is 409. The carriage drives to the operator's LEFT (+X) end at the track's OWN homing speed (no
+  SDK setter, unmeasured; `rail_speed_mm_s` 50 is the positioning cap written after homing) —
+  right after the first homing look
+  at the `*_align` overlay and set `hardware_session.rail_flip: true` if the twin's carriage sits
+  at the wrong end (the key moved from `twin_overlay.rail_flip`, kept as an alias; overlay, gate
+  twin and sweep twin share it). **Since 09d a posture that blocks the sweep is not a flat
+  refusal — the dry run also PLANS** (`RailSweepVerdict.pre_position: PrePositionPlan`,
+  `runtime/devices/rail_homing.py`): twin RRT-Connect on the 0.025 m sweep twin from the current
+  7 joints to the scene keyframe's posture for that arm (then the `<arm>_home` key) with the rail
+  slot LOCKED at `rail_fallback_m`, validated POSITION-AGNOSTICALLY (`RailSweepChecker.check_path`:
+  every configuration of the 0.05 rad-densified path × all 131 rail positions, under the
+  planner's start-state hysteresis) — that check is the ONLY safety basis of the motion (the
+  carriage is unknown while it runs, the gate twin only guesses it). On the operator's confirm
+  (**Home rail — move arm, then carriage**) the op runs as a per-arm `RailHomingJob`: REST **202**
+  `status: accepted` + `job_id`; phases queued → sweeping → planning → connecting → positioning →
+  homing → verifying → done|failed on `telemetry.hardware_monitor.arms[].maintenance`; final
+  result at `GET /api/hardware/arms/{arm_id}/maintenance/last`. The job connects THAT arm alone
+  (`XArmDriverConfig.rail_homing: "allow_unhomed"` — the driver publishes `q[7] == 0.0` as a
+  PLACEHOLDER flagged by `XArmDriver.rail_position_known == False`; the runtime's `RailHoldArm`
+  shows the twin the fallback and pins every rail command), speed scale 0.1, the other arm frozen
+  at its last sample (D1), a private bus and no teleop source; executes the waypoints through the
+  gated plan executor (`_op_execute_plan`, straight joint-space segments); STOPS the loop; homes
+  with `XArmDriver.home_rail()` on the job thread while the servo stream holds the joints
+  (register-judged like the monitor op); verifies; hands the arm back braked **in the folded
+  posture — no automatic return**; resumes the monitor. No candidate posture / no
+  position-agnostic path → `status: refused` (200, `ok: false`, a Studio suggestion). While a job
+  runs every maintenance op and `POST /api/session` are 409 "rail homing in progress";
+  `maintenance_busy` is true for the job's whole life. Decisions D1–D6: **D1** (since 09d ONLY
+  the rail-homing job's other arm — a teleop session has no unselected arm) all monitors pause
+  together, the arm is posed ONCE in the gate twin from its last sample (q7 + rail or
+  `rail_fallback_m`) and frozen — braked, never commanded, do NOT move it from xArm Studio
+  (undetected in this phase; UI hint "Perception Arm frozen at last sample"); **D2**
+  `SessionSpec.speed_scale` ∈ (0, 1], Hardware tab 10 % / 30 % / 100 %, default 10 %, multiplies
+  the host caps (`teleop.*`, `target_rate.*`, `dq_max_rad`, `jog.*`) and the driver caps (at
+  scale 1.0: `max_joint_vel` 0.3 rad/s, `max_cart_step_m` 0.002, `rail_speed_mm_s` 50); **D3**
+  `home_rail` = synchronous POST, 45 s server budget; **D4** sweep margin 0.025 m, step 5 mm;
+  **D5** `SessionInfo.kind` / `.speed_scale`, `SessionTelemetry.bringup` rows, `GET /api/session`
+  → `state: bringup` during bring-up; **D6** `XArmDriver.disconnect()` = `set_mode(0)` →
+  `set_state(4)` → `motion_enable(False)` — **teardown leaves the arms STOPPED with the BRAKES
+  ENGAGED** (as found after power-on); the track keeps its homed flag + enable (no re-homing
+  between sessions, no `set_linear_track_enable(False)`). Bring-up order: refusal matrix (teleop
+  only, arms == EVERY configured arm and all in the twin scene, no homing in flight — monitor op
+  or job —, per arm: monitor sample, box reachable, `error_code == 0`, rail homed + enabled) →
+  monitor `pause()` + `join(15 s)` → session `WorkcellConfig` (every arm, `cameras: []`) →
+  `HardwareWorkcell(driver_factory=speed-scaled XArmDriver, netsetup=None)` → `bring_up` → FRESH
+  gate twin + UNCONDITIONAL `SafetyGate` (`ControlLoop` raises `SafetyConfigError` otherwise; three
+  twins — gate, overlay, sweep — are separate instances) → `start_from=profile:<id>` is PLANNED
+  on that gate twin INSIDE bring-up (09d; the start_from worker only executes the stored plan; no
+  path → teardown + 409 "profile motion not collision-free: <failure> (<pair>) - …") →
+  `ControlLoop(workcell_kind="hardware")` → the preview cameras are ADOPTED (`hub.set_fps`, no UVC
+  re-open; `SessionInfo.streams == []`). Teleop only for now (collect / DAgger / inference on
+  hardware → 409); the first live session = BOTH arms at 10 % with the Manipulation Arm active
+  (the default active arm; the Perception Arm just holds) — the Perception Arm's latched C19 must
+  be cleared first (the matrix 409s "clear errors first"; a connected driver would LATCH on it),
+  so fix it in Studio (Externals → End Effector → None) before the first session. DONE
+  2026-09-05: C19 is gone (`error_code` 0) and both tracks are homed; the first session then
+  hit the three false alarms in the next bullet. The Welcome
+  page's top-right link is **Debug** (`#/devices`, title "APOLLO MAVIS V2 · Debug", heading
+  "Debug — gamepad & tracker"; renamed from "Devices" in 09d, route and testids unchanged).
+- FIRST LIVE HARDWARE SESSION (2026-09-05, `docs/design/02-hardware.md` §14.4): the session
+  came up and then latched BOTH arms every ~0.5 s with "external mode/state conflict
+  persisted (UFACTORY Studio?)" **with no Studio running** (nothing on port 18333; the
+  runtime was the only client on 502/30003). Three of our own misreadings, now fixed:
+  (1) **controller `state 2` (standby) is HEALTHY** — a mode-1 arm HOLDING a posture
+  reports state 2, not 0 (re-sending the same joints is not "motion"), and across the whole
+  session the boxes reported only `mode 1 state 2` (15×) plus one `mode 1 state 4`. The
+  Studio detector accepted just `{0, 1}` → `SERVO_HEALTHY_STATES = {0, 1, 2}`,
+  `SERVO_CONFLICT_STATES = {3, 4, 5, 6}` in `hardware/driver.py`; the SDK's own rule is
+  `ready = state not in (4, 5)`. The latch text now reports the MEASURED mode/state and
+  only *suggests* closing Studio (who holds 18333 is invisible to the host — never assert
+  it). (2) **entering servo mode is not instantaneous**: `set_mode(1); set_state(0)` returns
+  before `move_servoj` is accepted (replies still carry the 0x10 not-ready bit → APIState
+  **9**), so the first servo tick after a blind `sleep(0.1)` faulted the Perception Arm mid
+  bring-up → `_enter_servo_mode()` polls `get_state()` for readiness (≤1.5 s) and the
+  streamer retries a code 9 inside a bounded 0.3 s post-`resume()` grace. (3) **`clean_error`
+  returning 1/2/9 is a STATUS ECHO, not a failure** (those are the only writes that skip the
+  SDK's `_check_code`): `clear_errors` reported "FAILED - clean_error returned 2" while the
+  error HAD been cleared → `monitor.py` tolerates `STATUS_ECHO_CODES` and judges from the
+  read-back, like `home_rail` does with its registers. The test fake had hidden all three
+  (it moved to `state 0` on `set_state(0)` and gated servo sends on `state == 0`); it now
+  mirrors the box (`state 2` + a separate `ready_to_move` flag for the 0x10 bit,
+  `FaultScript.not_ready_ticks`). The Perception Arm's C19 is GONE (`error_code` 0 — the
+  Studio Externals → End Effector → None fix stuck).
+- ARMING SWITCH (2026-09-05): `hardware_session.armed` in the runtime config gates every real
+  driver connection (hardware sessions, `home_rail` motion). The repo config keeps it FALSE;
+  only the rendered lab config (`scripts/deploy/render-lab-config.sh`, `HARDWARE_ARMED=true`)
+  arms it. Reason: on 2026-09-05 a runtime test without the fake seam started a rail-homing
+  job against the real Manipulation Arm controller (no motion; the arm was enabled and
+  braked again). Never run the runtime suite on the lab machine without the conftest
+  guard, and never set `armed: true` in the repo config.
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
   hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
   NVIDIA driver 580.173.02 (upgraded 2026-09-01); NVENC works. lerobot's

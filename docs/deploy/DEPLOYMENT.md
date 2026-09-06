@@ -29,12 +29,21 @@ Before you start — **read this first**:
    core `a1fce61` (v4l2 cameras by USB serial + `fourcc`), hardware `3e54c6c` (netsetup
    dispatcher, `install --python/--user`), runtime `f7e9868`, sim `5c58840`, ui `3647a03`.
    If core lags runtime, the S4 render fails validation; if ui lags core, `gen:check` fails.
-2. Real-arm sessions are **not implemented yet**: `POST /api/session kind=hardware`
-   answers 409 (`session/manager.py:194`, "hardware sessions land with phase-09
-   integration"). What runs today against the real cell: arm reachability probes, the
-   RØDE microphone preview, Vive tracker teleop + calibration wizard, the two RealSense
-   colour previews (mapped to the arms by USB serial, S4), and full **sim** sessions on the
-   `mavis_v2` digital twin.
+2. Real-arm sessions landed with **phase-09c / 09d** (2026-09-05; contracts
+   `docs/prompts/phase-09c-hardware-session.md` + `phase-09d-rail-homing-planning.md`) but have
+   **never run on the real boxes yet** (fakes only): `POST /api/session kind=hardware` is
+   teleop-only, ALWAYS brings up both arms (phase-09d: `SessionSpec.arms` must be every
+   configured arm — no per-arm switch on the Hardware tab) at `speed_scale` (default 10 %),
+   and is refused (409 `rail not homed`) while either linear track is unhomed — the operator
+   homes it first with the arm card's **Home rail**, the ONE maintenance action that moves
+   hardware (twin-gated; since phase-09d it may first drive the arm along a twin-planned,
+   rail-position-agnostic path to a folded posture at 10 % and then hold it there, S7). The
+   first live run follows the 09c contract's 真机验收步骤 (as amended by its 09d header note)
+   with the user present and the e-stop in hand (S7).
+   Also running against the real cell: arm reachability probes, the read-only controller
+   monitor + twin overlays, the RØDE microphone preview, Vive tracker teleop + calibration
+   wizard, the two RealSense colour previews (mapped to the arms by USB serial, S4), and
+   full **sim** sessions on the `mavis_v2` digital twin.
 3. Exactly **one** process may own the Watchman dongle, the microphone capture and the
    arms (S8). The developer's runtime on `:8765` owns them right now; the ops service
    cannot start on the same machine until that instance is stopped or moved (S8.3).
@@ -292,7 +301,14 @@ cameras' D435i colour `intrinsics` (2026-09-04), the phase-09b per-arm controlle
 (`tcp_load_kg` / `tcp_load_cog_mm` / `collision_sensitivity`: `grip` 0.95 kg @ (0, 0, 60) mm,
 `view` 0.55 kg @ (0, 0, 90) mm, sensitivity 3 — estimates accepted by the user on 2026-09-05 (the tools were not weighed); the
 driver writes them at every session connect, the Hardware tab's **Apply safety settings** writes
-them without a session), `egl_device_id: 0`, `control.target_rate`, `tracker.controller_map`,
+them without a session), the phase-09c/09d `hardware_session` block (`armed: true` — the lab render is the ONLY config that
+arms the real drivers, `HARDWARE_ARMED=false` renders a monitor-only config; `default_speed_scale:
+0.1`, `rail_flip: false` — set `true` and re-render if the `*_align` overlay shows the twin's
+carriage at the wrong end after the first **Home rail**; `home_rail_inflation_m: 0.025`,
+`home_rail_step_m: 0.005` — also the margin / step of the phase-09d pre-positioning path check;
+`bringup_timeout_s: 60`; there is NO `default_arms` any more — since phase-09d a hardware
+session always includes both arms and an old key in a YAML is ignored),
+`egl_device_id: 0`, `control.target_rate`, `tracker.controller_map`,
 `filter`, `calibration` blocks (these newer keys are **missing** from the developer's
 `/tmp/mavis_v2_live.yaml`; the render starts from the repo file so they are kept).
 
@@ -353,7 +369,8 @@ The tracker **yaw** is a separate per-account artefact: `calibration_dir/tracker
 (written by the Yaw alignment wizard; overrides `yaw_deg` when `yaw_valid`). The developer
 never persisted one (`GET /api/tracker/calibration` shows `yaw_calibrated_at: null`), so
 the ops account starts from the 116.3° estimate — run the 7-click Yaw wizard on the
-Devices page after S7.
+Debug page (`#/devices`, the Welcome page's top-right link; named "Devices" before phase-09d)
+after S7.
 
 ---
 
@@ -545,6 +562,60 @@ the card's read-back line is neutral and both toasts appeared (`<Arm> · errors 
 `<Arm> · safety settings applied (sensitivity 3, payload 0.95 kg)`). The settings are volatile
 (lost at a controller reboot); the driver re-applies them at every session connect.
 
+Phase-09c / 09d (2026-09-05) — hardware sessions; **not yet exercised live** (fakes only). Each
+Hardware-tab arm card shows the track read-back: the amber pill **`rail not homed`** plus a
+**Home rail** button while a track is present but unhomed (both lab tracks after every
+power-on: registers `on_zero 0 / is_enabled 0`), `rail 0.000 m` once homed and enabled.
+**Home rail is the ONE maintenance action that moves hardware** — the carriage drives to the
+operator's LEFT (+X) end at the track's own homing speed (no SDK setter, duration unmeasured;
+50 mm/s is the positioning cap written after homing) — so it never posts directly: the sheet first shows the
+digital-twin sweep verdict (`{"op":"home_rail","dry_run":true}` — the full 0–0.65 m travel at
+the arm's CURRENT posture, the other arm at its last monitor sample, 25 mm margin, zero
+writes) and offers the destructive confirm (`Sweep clear — safe to home`, **Home rail — move
+carriage**) when the sweep is clear — the joints stay untouched. A blocked sweep no longer
+ends there (phase-09d): the dry run also PLANS a pre-positioning motion — the sheet reads
+`Current posture blocks the sweep — pre-positioning planned` with `The arm will first move
+along a planned path (N waypoints, ~X s at 10 %) to a folded posture that clears the whole
+rail travel, then the rail homes, then the arm holds that posture.`, the target posture in
+degrees and `path checked at 131 rail positions` (every waypoint of the twin-planned path is
+collision-free at every rail position, because the carriage is unknown); confirming
+(**Home rail — move arm, then carriage**) starts a `RailHomingJob` (REST 202) whose seven
+phases (queued → sweeping → planning → connecting → positioning → homing → verifying) show
+live in the sheet: the job connects that arm alone at 10 %, moves it along the path under the
+gate, homes the track with the joints held, verifies the registers and hands the arm back
+braked **in that folded posture — nothing moves it back**. Only when no rail-safe path exists
+is homing refused (`Sweep blocked — no safe pre-positioning path`: fold the arm toward the
+factory-zero posture in xArm Studio, or move the other arm, and retry). While the carriage
+moves (≤ 45 s) the arm reads `stale` with `maintenance_busy: true` (a job: `paused` +
+`maintenance_busy` for its whole life) and `POST /api/session` is 409. A hardware session is
+refused while either arm's track is unhomed (the carriage position is unknown, so the gate
+twin cannot be posed; both arms are always in a hardware session since phase-09d). **First
+live run — follow the 真机验收步骤 in `docs/prompts/phase-09c-hardware-session.md` as amended
+by its phase-09d header note** (user present, physical e-stop in hand, workspace clear; the
+driver's connect write sequence has never run on a real box): (1) both arms `running`, err 0
+(clear the Perception Arm's `C19` first — a latched error 409s the session and would LATCH its
+driver; the permanent fix is in Studio, S11), overlays normal; (2) Manipulation Arm → **Home
+rail** → dry-run (clear, or `pre-positioning planned`: read the plan, expect the ARM to move
+first) → confirm → card reads `rail 0.000 m` → look at the `*_align` overlay **immediately**:
+twin rail / base must coincide with the real ones; if the carriage sits at the wrong end set
+`hardware_session.rail_flip: true` (re-render S4, restart) and look again; (3) Perception Arm
+the same (judge its base from the Manipulation Arm's overlay — its own camera looks outward);
+(4) **Speed 10 %** → Teleop (both arms join; there is no per-arm switch) → bring-up rows until
+`running`, Cockpit shows `speed 10%`, both arms stay still for 10 s without the clutch; (5)
+clutch + a slow 5 cm hand motion → the Manipulation Arm (the active arm) follows in the same
+direction at ~1/10 speed, the Perception Arm holds, releasing the clutch stops it; (6) end the
+session → both arms are handed back stopped with the brakes engaged (`state 4`,
+`motion_enable(False)`), the monitor resumes, the cards are normal. Only then 30 %, switching
+the active arm, rail following. The same over REST:
+
+```bash
+M=127.0.0.1:8765/api/hardware/arms
+curl -s -X POST -H 'content-type: application/json' -d '{"op":"home_rail","dry_run":true}' $M/grip/maintenance | python3 -m json.tool | grep -E '"ok"|"detail"|"clear"|"needed"|"waypoints"|first_blocked|min_clearance'   # ok true + rail_sweep.clear true = safe to home with the joints untouched; pre_position.needed true + clear true = a pre-positioning motion is planned (phase-09d; waypoints, duration_s); nothing written
+curl -s -m 60 -X POST -H 'content-type: application/json' -d '{"op":"home_rail"}' $M/grip/maintenance | python3 -m json.tool | grep -E '"ok"|"status"|"job_id"|"detail"|rail_homed|rail_enabled|rail_pos_m'   # MOVES THE CARRIAGE (<= 45 s): ok true, status done, after.rail_homed / rail_enabled true, rail_pos_m 0.0 -- OR HTTP 202 status accepted + job_id (phase-09d: the posture blocks the sweep; the ARM MOVES FIRST along the planned path at 10 %, then the carriage -- keep clear of the whole cell)
+curl -s $M/grip/maintenance/last | python3 -m json.tool | grep -E '"ok"|"status"|"job_id"|"detail"'   # phase-09d: the job's FINAL result (status done, same job_id; ok false on failure); 404 until any home_rail ran. Progress meanwhile: /ws/telemetry hardware_monitor.arms[].maintenance.phase
+curl -s 127.0.0.1:8765/api/session      # 404 without a session; "state":"bringup" while POST /api/session runs, then "running" with "kind":"hardware", both arm ids in "arms" (phase-09d), "speed_scale":0.1
+```
+
 From a mavis shell additionally (**verify on first deploy**): `pactl list short sources | grep NT-USB`
 must list `alsa_input.usb-R__DE_Microphones_R__DE_NT-USB_Mini_750BFEE8-00.mono-fallback`
 (needs `XDG_RUNTIME_DIR` exported; proves mavis's PulseAudio sees the card via group `audio`).
@@ -553,9 +624,11 @@ Browser: the runtime binds `127.0.0.1` (no authentication anywhere) — open
 `http://127.0.0.1:8765/` on the machine, or `ssh -L 8765:127.0.0.1:8765 apollo-pc-1` /
 tailscale from elsewhere. Do **not** switch `host` to `0.0.0.0` without a reverse proxy
 with auth: it would expose arm control to the LAN. Then: Welcome page shows the mic
-waveform and both arms reachable; Devices page → tracker `tracking` when the controller is
-on → run **Yaw alignment** (7 clicks) so `/var/lib/apollo-mavis-v2/calibration/tracker_calibration.json`
-exists; start a **sim** session on `mavis_v2` and teleop with the controller.
+waveform and both arms reachable; Debug page (`#/devices`, top-right link) → tracker
+`tracking` when the controller is on → run **Yaw alignment** (7 clicks) so
+`/var/lib/apollo-mavis-v2/calibration/tracker_calibration.json` exists; start a **sim** session
+on `mavis_v2` and teleop with the controller. A **hardware** session only after the
+phase-09c/09d first-run procedure above, with the user present.
 
 ---
 
@@ -577,7 +650,7 @@ After power-cycling the arms, `reachable` goes `unreachable → refused → open
 |---|---|---|
 | Watchman dongle 28de:2101 | yes (libusb claim) | second libsurvive context → `LIBUSB_ERROR_BUSY`, tracker `error` (retries forever). Only one `tracker.backend: libsurvive` per machine. |
 | RØDE NT-USB Mini | one ALSA card; held by whichever **PulseAudio daemon** has a running stream | the loser's capture gets EBUSY/`absent`. Dev and ops each have their own PA daemon. |
-| xArm control boxes (TCP 502) | one SDK controller at a time | probes are harmless; sessions (post phase-09) must never run from two instances |
+| xArm control boxes (TCP 502) | one SDK controller at a time | probes are harmless; the read-only monitor and hardware sessions (phase-09c) must never run from two instances — inside one instance the monitor is paused while a session owns a box |
 | Ports 8765 / 5757 | per instance | second instance needs `--port` / `dagger.trainer.port` |
 | NetworkManager profiles | system-wide | only the root dispatcher / one `netsetup` mutates them |
 | GPUs, `/dev/video*`, sim | shareable | — |
@@ -700,11 +773,14 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 | tracker `error` with `LIBUSB_ERROR_BUSY` in `journalctl --user -u mavis-runtime` | another libsurvive holds the dongle: the developer's runtime, `survive-cli`, `scripts/tracker/03-…`. `sudo fuser -v /dev/bus/usb/$(lsusb -d 28de:2101 \| awk '{printf "%s/%s", $2, substr($4,1,3)}')` shows the pid; stop it (S8.4). A killed process can keep the interface claimed → replug the dongle. |
 | tracker `no_backend` | pysurvive missing — a plain `uv sync` removed it. `(cd /opt/apollo-mavis-v2/apollo-mavis-v2-runtime && uv pip install --no-deps --force-reinstall ../third_party/wheels/pysurvive-*-cp312-*.whl)`; restart. |
 | tracker `error`: permission / cannot open device | mavis lacks `plugdev` or the udev rule is missing: `id mavis`, `ls -la /dev/bus/usb/…` should be `root plugdev 0660`; `sudo udevadm trigger --subsystem-match=usb`; restart `user@<uid>` after group changes. |
-| tracker `searching` forever | controller off/asleep, or stations off; `--lighthousecount 3` must match the powered stations. Yaw/base-station: Devices page wizard. |
+| tracker `searching` forever | controller off/asleep, or stations off; `--lighthousecount 3` must match the powered stations. Yaw/base-station: Debug page (`#/devices`) wizard. |
 | microphone `absent` / `error: pactl…` | mavis's PulseAudio does not see the card: (a) `XDG_RUNTIME_DIR` unset → service must run under the user manager (it does) — from shells export it; (b) mavis not in `audio` (`/dev/snd/* root:audio 0660`); (c) the developer's PA has a stream open on the RØDE (S8.3, set its card profile off); (d) `pactl info` fails → `systemctl --user status pulseaudio.socket pulseaudio.service` as mavis (**verify on first deploy**: module-udev-detect for a seatless user). Never open `hw:CARD=Mini` directly: EBUSY and it stalls every Pulse recorder. |
 | both wrist-cam tiles black after a reboot (`/api/cameras` `live: false`, log: `select() timeout` / `cannot open`) | cold-boot quirk of the D435i colour UVC stream: it delivers nothing until librealsense has opened the device once. The driver runs `rs-enumerate-devices -s` automatically before the first RealSense open — check `command -v rs-enumerate-devices` (librealsense2-utils, Intel apt repo) and the runtime log for `RealSense wake`; manual fallback: run `rs-enumerate-devices -s`, then restart the service. `rs-enumerate-devices` prints ASIC serials (243522071002 / 327122074467), not the USB serials in the config. |
 | sim previews black / `stream died` in the log, EGL errors | render node permission: mavis needs `render` (`/dev/dri/renderD* root:render 0660`); `/dev/nvidia*` are 0666. Check `MUJOCO_GL=egl` in `systemctl --user show mavis-runtime -p Environment`; `egl_device_id: 0` = PCI 41:00.0. An EGL failure kills only the preview streams, not the runtime. |
-| `POST /api/session` kind=hardware → 409 "hardware sessions land with phase-09 integration" | expected until phase-09; use sim sessions. |
+| `POST /api/session` kind=hardware → 409 `<Arm>: rail not homed - home it from the Hardware tab (Home rail) before starting a session` | expected after every power-on (phase-09c): both tracks boot unhomed and a session needs the carriage position for the gate twin — and since phase-09d BOTH arms are always in a session, so both tracks must be homed. Card → **Home rail** → dry-run verdict → confirm (the carriage MOVES to the operator's left end, ≤ 45 s; or, phase-09d, the sheet says `pre-positioning planned` and the ARM MOVES FIRST along the planned path at 10 %, then the carriage — 202 job, watch the phases in the sheet) → `rail 0.000 m`; then check the `*_align` overlay before the session. Other 409s from the same matrix: `hardware sessions support teleop only` (use the Sim tab for collect / DAgger / inference), `hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing [...]` (a client posted a subset — the UI never does since phase-09d; both arms always join, so the Perception Arm must be homed / error-free too), `no monitor sample` (box off / monitor paused), `controller error N is latched - clear errors first` (**Clear errors**; the Perception Arm's `C19` blocks every session until fixed in Studio), `rail homing in progress` (wait for the carriage / the job), `control box … is unreachable`, `hardware bring-up failed: <Arm>: <stage> - …` (the drivers were torn down again, the monitor resumed — read the stage), `profile motion not collision-free: <failure> (<pair>) - …` (phase-09d: `start_from: profile:<id>` was planned on the gate twin inside bring-up and no collision-free path exists from the measured posture — use `keep_current` or another profile; the session was torn down). |
+| **Home rail** refused / failed (sheet shows a red verdict or an error, `ok: false`, 409) | `Sweep blocked — no safe pre-positioning path` (`status: refused`, phase-09d) = the twin sweep found a pair within 25 mm somewhere along the 0–0.65 m travel at the arm's current posture (`rail_sweep.first_blocked_m` / `first_blocked_pair`) AND no candidate posture (scene keyframe, `<arm>_home`) is reachable by a rail-position-agnostic path: fold the arm toward the factory-zero posture in xArm Studio (joints 2–7 near 0; or move the other arm) and re-open Home rail — nothing was written. (`Current posture blocks the sweep — pre-positioning planned` is NOT a refusal: confirm and the arm moves first; an older runtime shows `Sweep blocked — homing refused` instead.) 409 `clear errors first` → **Clear errors** first; 409 `end the session first` → end the hardware session; 409 `needs the digital twin` → the lab config lacks `digital_twin_scene` or the runtime venv lacks the sim extra. `ok: false … the arm moved since the sweep was checked` → keep the arm still between the dry run and the confirm. `ok: false … on_zero still 0` after the 30 s SDK wait → the track never reached its zero switch: check the track cable / `hardware_monitor.arms[].rail_*` registers, **Clear errors**, retry. UI `no answer after 60 s` → read the card's rail pill; the runtime may still have finished. While homing the arm reads `stale` + `maintenance_busy` and `POST /api/session` is 409. |
+| after a hardware session an arm is not back at `state 4` / brakes not engaged | `XArmDriver.disconnect()` ends with `set_mode(0)` → `set_state(4)` → `motion_enable(False)` (phase-09c D6) and the track keeps its homed flag. Check `hardware_monitor.arms[].state` once the monitor resumes; if the box still reports enabled, the disconnect writes failed (runtime log) — disable it from xArm Studio, never leave the cell enabled unattended. |
+| rail-homing job `failed` (phase-09d; the sheet marks a phase red, toast `<Arm> · rail homing job failed during <phase>: …`, `GET /api/hardware/arms/<id>/maintenance/last` → `ok: false`) | the runtime tore the job down (arm stopped + braked where it was, monitor resumed, `maintenance_busy` cleared — nothing half-connected). Read the detail: `arm moved since the sweep` (> 0.02 rad between dry run and confirm — keep it still), `session slipped in` / `rail homing in progress` (retry), a driver fault or the gate holding during `positioning` (30 s or 3× the estimate; the posture must land within 0.05 rad — an obstacle / the other arm is in the way: check the overlay, fold in Studio), `on_zero still 0` after `home_rail()` (track cable / registers, **Clear errors**, retry), register verification (`rail_homed` / `rail_enabled` not both true). The arm stays wherever the job stopped it — look before re-opening Home rail; the next dry run plans from that posture. |
 | red `C<code>` chip on a Hardware-tab arm card (Perception Arm `C19` today; `hardware_monitor.arms[].error_code != 0`) | a controller error is latched in the box. Click **Clear errors** on the card (phase-09b; `POST /api/hardware/arms/<id>/maintenance {"op":"clear_errors"}` = `clean_error` + `clean_warn` on the read-only monitor — no enable, no motion, no confirm dialog). Toast `<Arm> · errors cleared`; the chip clears with the next monitor sample. `C19` (End Effector Communication Error: the box expects an end effector on the tool RS-485 bus, the Perception Arm has none) returns until xArm Studio → Settings → Externals → End Effector → **None** (no SDK write for it). Inside a hardware session the card buttons are disabled (`Use the Cockpit`): use the Cockpit fault banner's **Clear errors & resume**, then re-grip the clutch. 409 `… needs the read-only monitor connected` = box off / monitor paused; `ok: false … re-latched right after clearing` = a persisting hardware fault (cable, e-stop). |
 | amber `sensitivity 1 · payload 0.00 kg` with `differs from config` on an arm card (`hardware_monitor.arms[].backstops_match: false`) | the controller lost its volatile safety settings (reboot) or never had them written. Click **Apply safety settings** (`{"op":"apply_backstops"}`: payload, gravity, collision sensitivity, self-collision model, rebound off — configuration writes only, no motion) → toast `<Arm> · safety settings applied (sensitivity 3, payload 0.95 kg)` and `backstops_match: true`. The driver re-applies the same values at every session connect; the values live in the lab config per arm (`tcp_load_kg` / `tcp_load_cog_mm` / `collision_sensitivity`; PROVISIONAL payloads until the tools are weighed — change them in `configs/mavis_v2.yaml`, then S9 re-render). |
 | arms `unreachable` | boxes off (1-2 min after power-on), or the NIC lost its profile: `nmcli -t -f NAME,DEVICE con show --active \| grep mavis_`, `tail /var/log/mavis-netsetup.log` (dispatcher repairs on link events), `$PY -m apollo_mavis_v2_hardware.netsetup verify --arm grip=192.168.1.201 --arm view=192.168.2.219`, `… match --repair` (needs `netdev` + the `.pkla`, S5). Also `ip route get 192.168.2.219` must leave via `enp36s0f0`. |
@@ -729,8 +805,12 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 
 前提：开发者已按依赖顺序（core → sim/hardware → runtime → ui）把**五个**子仓库 push 到 GitHub
 并更新 workspace 指针（2026-09-04 已完成；S4 依赖 core/runtime 里按 USB 序列号配相机的改动，S5 依赖
-hardware 的 `netsetup install --python/--user`）。真机 session 目前返回 409（phase-09 之前），
-可用的是探测、麦克风、追踪器、相机预览和 **仿真** session。
+hardware 的 `netsetup install --python/--user`）。真机 session 已在 phase-09c/09d 落地（仅 teleop；**两臂常驻
+session**（09d，无 Include 开关）、10% 限速；任一导轨未归零时 409，先在臂卡片点 **Home rail** 归零——这是唯一会让
+硬件运动的维护操作，先看孪生扫掠判定再确认；09d 起若当前姿态挡住扫掠，会先按孪生规划的、与导轨位置无关的路径以
+10% 把臂折叠到安全姿态再归零，归零后保持该姿态，进度在面板里），但**尚未在真机上跑过**：首次运行按
+`docs/prompts/phase-09c-hardware-session.md` 末尾的「真机验收步骤」（按其 09d 头注修订）、用户在场、急停在手（S7）。此外可用的是探测、只读监视 + 孪生叠加、麦克风、追踪器、
+相机预览和 **仿真** session。
 
 ```bash
 # 1) 系统依赖 + udev + sysctl（需 sudo，用自己的账号运行）
@@ -759,7 +839,7 @@ sudo -iu mavis
 export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
 systemctl --user start mavis-runtime && journalctl --user -u mavis-runtime -f
 # 7) 验证
-bash /opt/apollo-mavis-v2/scripts/deploy/healthcheck.sh     # 浏览器打开 http://127.0.0.1:8765/ ，Devices 页做 Yaw 标定
+bash /opt/apollo-mavis-v2/scripts/deploy/healthcheck.sh     # 浏览器打开 http://127.0.0.1:8765/ ，Debug 页（#/devices，右上角链接）做 Yaw 标定
 ```
 
 日常：`systemctl --user start|stop|restart|status mavis-runtime`（mavis 身份，需先 export 上面两个变量）；

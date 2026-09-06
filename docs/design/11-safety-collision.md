@@ -1,7 +1,14 @@
 # 11 — Safety & Collision System (cross-cutting)
 
-Status: v1.0 (2026-09-01). Conforms to `00-overview.md` v0.3 §6 (binding). Research
-ground truth: `docs/research/{mujoco-xarm7-sim,collision-ik,xarm-python-sdk}.md`.
+Status: v1.0 (2026-09-01; amended 2026-09-05 — phase-09c: §4 the hardware gate
+is now built unconditionally by `_bringup_hardware`, `ControlLoop.__init__`
+enforces it, and `home_rail` is the ONE gated motion outside the loop; amended
+2026-09-05 — phase-09d: §4 item 4 the `RailHoldArm` adapter, item 7 the
+rail-homing job's pre-positioning motion goes through the gate too and its
+position-agnostic path check is the motion's only safety basis, §9 the planner's
+start-state hysteresis spelled out). Conforms
+to `00-overview.md` v0.3 §6 (binding). Research ground truth:
+`docs/research/{mujoco-xarm7-sim,collision-ik,xarm-python-sdk}.md`.
 
 ## 1. Scope, ownership map, module layout
 
@@ -109,12 +116,66 @@ self._supervisor.publish(dec.report, dec.events)     # telemetry snapshot + even
    `SafetyGate` always (hardware refuses to start ungated — `enabled: false` is a
    startup error); `kind == "sim"` ⇒ `NullGate` unless `safety_debug` (§5).
    `NullGate.filter()` is a pass-through with an "ok" report — identical tick path.
+   Implemented in phase-09c (`SessionManager._bringup_hardware`, 04-runtime §5): a
+   FRESH `DigitalTwin` (`SceneOverrides(microphones, base_pose)`, `geom_inflation_m`,
+   `allowed_pairs_extra`) + `SafetyGate` + `default_collision_pairs`, no branch; the
+   twin is never shared with the alignment overlay's or the rail sweep's twin (three
+   `MjData`s, three threads). An arm the session does not select is posed in that
+   twin ONCE from its last read-only-monitor sample (q7 + rail or the configured
+   fallback) and frozen — it is braked and never commanded, so it is a static obstacle
+   for the gate; the operator must not move it from xArm Studio meanwhile (not
+   detected in 09c; UI hint + 02-hardware risk).
 4. **Enforcement tests**: AST scan asserts `command_joints|command_rail|command_gripper`
    call sites exist only in `runtime/control/loop.py` (plus interface defs/mocks), and
    `ControlLoop.__init__` raises `SafetyConfigError` (runtime-local, subclasses core
-   `ConfigError`) on hardware kind without a `SafetyGate` bound to a live twin.
+   `ConfigError`) on hardware kind without a `SafetyGate` bound to a live twin
+   (implemented phase-09c; REST maps it to 409 — `tests/test_hardware_session.py`).
+   The scan's only other allowance is `runtime/session/hardware.py`'s two rail
+   adapters, pinned by `tests/test_chokepoint.py` to those classes alone:
+   `RailFlipArm` (phase-09c) mirrors the rail slot of the already-gated command the
+   `ArmSender` hands it and forwards it; `RailHoldArm` (phase-09d, the rail-homing
+   job's arm whose carriage position is UNKNOWN) shows the twin the configured
+   `rail_fallback_m` instead of the driver's 0.0 placeholder, pins the rail slot of
+   every gated command to the reported position (the job never moves the carriage;
+   the only rail motion is `home_rail()` itself) and refuses `command_rail`.
 5. Gripper commands are not collision-gated (they open/close in place; fingertip geoms
    remain monitored pairs) but ARE deadman-gated (§10.1).
+6. **The one gated motion outside the loop: `home_rail` (phase-09c).** Rail homing
+   (`set_linear_track_back_origin`) drives the carriage to the track's zero end from
+   an UNKNOWN position and cannot go through the 100 Hz chokepoint (no session may
+   exist while a track is unhomed — the twin cannot be posed). It is therefore
+   operator-triggered only, session-less only, and gated by a STATIC full-travel twin
+   sweep (`runtime/devices/rail_sweep.py`): the target arm at its current 7 joints,
+   the other arm at its last sample, the rail slot stepped `0 … 0.65 m` in 5 mm
+   increments at `hardware_session.home_rail_inflation_m` (0.025 m, the guardrail's
+   debug margin — a blind sweep gets more than the gate's 0.008 m); any step within
+   the inflation refuses the op with zero writes (`RailSweepVerdict` names the first
+   blocking position and pair), a clear sweep hands the checked posture to the
+   monitor's poll thread, which re-samples and refuses if the arm moved (0.02 rad).
+   A dry run returns the verdict alone so the operator sees it before confirming.
+7. **The maintenance motion goes through the gate too (phase-09d).** A posture that
+   is NOT sweep-clear gets a planned pre-positioning motion instead of a refusal
+   (`runtime/devices/rail_homing.py`): the sweep twin's RRT-Connect plans from the
+   current 7 joints to the scene keyframe (then the `<arm>_home` key) with the rail
+   slot LOCKED at the fallback, and `RailSweepChecker.check_path` validates the path
+   POSITION-AGNOSTICALLY — every configuration along the densified straight segments
+   (0.05 rad) at every one of the 131 rail positions, at the 0.025 m sweep margin,
+   under the planner's start-state hysteresis (§9, 03-sim §10 item 3, applied per
+   rail position: a pair the current posture already violates at a position may
+   only open up, never close — 2 mm tolerance — and re-arms once clear; any new
+   violation blocks). That check is the ONLY safety basis of the motion: the carriage
+   is unknown while it runs, so the gate twin can only guess it (`rail_fallback_m` via
+   `RailHoldArm`), and a "passed" gate never substitutes for it. The motion itself is
+   still dispatched through the chokepoint — the job connects that arm alone
+   (`rail_homing: allow_unhomed`, speed scale 0.1, the other arm frozen at its last
+   sample as a static obstacle, D1), builds the same `SafetyGate` on a fresh twin and
+   executes the waypoints with `ControlLoop._op_execute_plan` (a private bus, no teleop
+   source; the `PlanExecutor` follows the straight segments the planner checked) —
+   then stops the loop, homes the track with `XArmDriver.home_rail()` while the servo
+   stream holds the joints, verifies the registers and hands the arm back braked in
+   the folded posture (no automatic return). `start_from=profile` on hardware is
+   likewise planned on the gate twin INSIDE bring-up and refused (409) when the twin
+   finds no collision-free path.
 
 ## 5. Sim policy: gate off by default, `safety_debug`, guardrail script
 
@@ -390,6 +451,13 @@ class PlanResult(BaseModel):
 - Validity checker: candidate q → **planner-private `MjData`**, `mj_kinematics` +
   `mj_collision`, violations per §7 step-3 semantics on inflated geoms. Measured 4k–60k
   checks/s/core ⇒ the 5 s budget is generous.
+- **Start-state hysteresis** (sim `planner.py`; 03-sim §10 item 3): pairs already violating
+  at `q_start` — the arm parked inside the inflation shell, e.g. held there by the gate —
+  are whitelisted until they first exceed `inflation + 5 mm` (`REARM_MARGIN_M`), then
+  re-armed for the rest of the plan; a pair at or below 0 mm (real penetration) is
+  `start_in_collision` instead. Without it a clamped arm could never plan its way out.
+  The phase-09d position-agnostic path check (`RailSweepChecker.check_path`, §4 item 7)
+  applies the same rule per rail position.
 - Edges interpolated at `max_step_rad` per joint (rail 0.01 m); post-process: 50 random
   shortcut passes, then time-parameterization with per-joint velocity/accel caps
   (defaults 0.6 rad/s, 2 rad/s²; rail 0.1 m/s).
