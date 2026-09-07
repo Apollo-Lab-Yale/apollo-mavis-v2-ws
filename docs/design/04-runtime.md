@@ -289,7 +289,16 @@ Phase behavior (identical skeleton for all four modes; overview §4):
        workcell_kind="hardware", gripper_arms=[ArmConfig.gripper != none])`* —
        host-side D2: `teleop.linear_mps/angular_rps/rail_mps`,
        `target_rate.v_mps/w_radps`, `dq_max_rad`, `jog.slew_rad_per_tick/
-       rail_m_per_tick` × scale (the rig ends here) — then, phase-09d,
+       rail_m_per_tick` × scale, **then capped by the connected drivers' servo
+       stream** (`executor_caps_for` → `apply_executor_caps` for the
+       PlanExecutor, and since 2026-09-07 `apply_teleop_caps` for the TELEOP
+       chain: `target_rate.v_mps/w_radps`, `teleop.linear_mps/angular_rps` and
+       `dq_max_rad` are lowered to `max_cart_step_m·rate_hz` / `min(max_joint_vel)`
+       of the tightest `XArmDriver.cfg.servo` — 0.4 m/s + 0.6 rad/s at scale
+       1.0, 0.04 m/s + 0.06 rad/s at 0.1 (the 2026-09-07 caps; 0.2 / 0.3 before); `rail_mps` and the leash are not
+       servo quantities and stay; fakes without `ServoLimits` leave everything
+       at the plain scale; both cap sets are logged at INFO) (the rig ends here)
+       — then, phase-09d,
        *`start_from=profile:<id>` is PLANNED NOW* (`_plan_profile_start`: the
        gate twin synced with the measured states, `twin.plan(PlanRequest)` —
        RRT-Connect, frozen arms as obstacles, the rail slot follows the profile
@@ -453,6 +462,24 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   position and orientation; the truncation is NOT slipped into the anchor (the
   target catches up within the leash), the leash slip still bounds the offset.
   Keyboard twists are already rate-bounded by `teleop.*` and skip this stage.
+  **The rate must not exceed what the arm executes (2026-09-07).** On hardware
+  the servo streamer clips every joint at `max_joint_vel·dt` and the whole step
+  at `max_cart_step_m` (then 0.002 m/tick = 0.2 m/s at speed scale 1.0, 0.02 m/s
+  at the 0.1 default; 0.004 = 0.4 m/s since the same day), while the host chain ran at 1.0 m/s: the target ran ahead
+  of the measured TCP until the 25 mm leash truncated it, and `TrackerTeleop.slip`
+  folded that truncation into the engagement anchor — hand travel silently
+  DISCARDED (worst along directions that need large joint motion, e.g. straight
+  down), and whatever got through kept arriving for up to one leash (0.125 s at
+  scale 1.0, **1.25 s at 0.1**) after the hand stopped. Those were the operator's
+  "does not follow the hand" / "moving the controller down barely moves the
+  gripper" / "keeps moving after I release the trigger" reports. The hardware
+  bring-up therefore caps the teleop chain at the streamer's own rates
+  (`apply_teleop_caps`, §5 step 11): slower than the hand at low scale, but
+  faithful — the commanded direction is the hand's direction and a release
+  stops the arm within one streamer tick. The arm's top speed is unchanged (it
+  always was the streamer's); a faster FEEL is `speed_scale` / `ServoLimits`,
+  chosen deliberately. `TrackerTeleop.slip_count` / `slip_pos_total_m` count the
+  discarded travel for the loop's health line (§14 "Logging").
 - **Per-tick joint clamp**: `|q_i − q_last_i| ≤ dq_max` (0.04 rad/tick ≈
   4 rad/s) before the gate; cartesian step stays < 2.5 mm at default rates.
 - **Gate** (§8): `supervisor.filter(q_cmd, q_meas, source)`; violating arms
@@ -513,17 +540,29 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   `/ws/control` client is not. Telemetry echoes the raw controller state and
   the injected codes (`tracker.controller`, `tracker.device_held`).
 - **Trackpad click classification + device discrete actions** (13-tracker
-  §1.1, remap 2026-09-02): the reader classifies a trackpad click ONCE at its
+  §1.1, remap 2026-09-02): the reader classifies a trackpad click at its
   press edge from `(x, y)` by the dominant axis (`|x|` and `|y|` both within
-  `trackpad_deadzone` ⇒ ignored) and holds the class until release
-  (`ControllerState.trackpad_dir`); every press edge of the trackpad click,
+  `trackpad_deadzone` ⇒ unclassified) and holds the class until release
+  (`ControllerState.trackpad_dir`); **since 2026-09-07 a click whose press edge
+  fell inside the deadzone is re-classified while still held, the first time
+  the finger leaves the deadzone, and that appends its own edge** (before, such
+  a click stayed dead however far the finger moved — and the pad axes are only
+  refreshed by an event, so an idle or just-woken controller read a stale
+  centre at the press edge; squeezing the trigger produced axis events and
+  appeared to "unlock" the pad — the operator's "gripper only works after the
+  trigger"); every press edge of the trackpad click,
   the menu button and the grip button advances `ControllerState.edge_seq` and
   sets `edge_input` to the input that produced it (the classified
   `trackpad_*`, `None` for a deadzone click, `menu_click`, `grip_click`;
   `note_edges`). Default `controller_map`: `{clutch: trigger_click,
   gripper_open: trackpad_up, gripper_close: trackpad_down, rail_neg:
   trackpad_left, rail_pos: trackpad_right, arm_next: menu_click, arm_prev:
-  none}`; bindable inputs are `trigger_click`, `trackpad_left|right|up|down`,
+  none}` (the reference map the tests pin); **the lab config
+  `configs/mavis_v2.yaml` departs from it since 2026-09-07** — `gripper_close:
+  grip_click, gripper_open: menu_click, arm_next: trackpad_up, arm_prev:
+  trackpad_down` — so the two actions that must never miss sit on plain
+  buttons and the pad carries arm switching (also on the keyboard and in the
+  UI); bindable inputs are `trigger_click`, `trackpad_left|right|up|down`,
   `menu_click`, `grip_click`, `none` (system is never bindable: menu + system
   is the pairing combo); every input binds at most one action, held actions
   accept any input and the discrete actions accept any input except
@@ -1361,11 +1400,11 @@ workcells:                   # POST /api/session picks by requested kind
     safety: {enabled: true, geom_inflation_m: 0.008, min_clearance_m: 0.016}
   sim:      { <WorkcellConfig>: sim_scene, cameras (kind sim),
               safety: {safety_debug: false} }
-profiles_dir: ~/apollo/profiles
-datasets_root: ~/apollo/datasets
-checkpoints_root: ~/apollo/checkpoints
-calibration_dir: ~/apollo/calibration   # tracker_calibration.json + libsurvive temp/installed
-                                        #   copies (phase-10, 13-tracker §4); expanduser'd
+profiles_dir: ${APOLLO_HOME}/var/profiles       # ${APOLLO_HOME} = workspace root (self-contained
+datasets_root: ${APOLLO_HOME}/var/datasets      #   paths, below); resolved by config.py, then
+checkpoints_root: ${APOLLO_HOME}/var/checkpoints  #   ~ / other $VARS expanded, still-relative
+calibration_dir: ${APOLLO_HOME}/var/calibration   # anchored at the ws root. tracker_calibration.json
+                                        #   + libsurvive temp/installed copies (phase-10, 13-tracker §4)
 control:
   rate_hz: 100
   teleop: {linear_mps: 0.12, angular_rps: 0.6, rail_mps: 0.10, gripper_frac_ps: 1.2}
@@ -1375,6 +1414,7 @@ control:
   rail_in_ik: false          # rail excluded from the IK; rail inputs slide the whole arm (§6 "Rail")
   jog: {slew_rad_per_tick: 0.02, rail_m_per_tick: 0.002, goto_threshold_rad: 0.15}
   watchdog: {stale_s: 0.2, ramp_s: 0.1}   # = SafetyConfig input_deadman_s/input_ramp_s
+  health_log_every_s: 1.0    # control-loop INFO health line period ("Logging" below); 0 = off
 recorder: {fps: 25, vcodec: auto, jpeg_quality: 80,
            extrinsics_warn: {pos_m: 0.003, rot_rad: 0.010},   # checkpoint-load
            extrinsics_max:  {pos_m: 0.010, rot_rad: 0.035}}   #   verify, 10-frames §5.3
@@ -1403,7 +1443,9 @@ tracker: {backend: none,            # none | fake | libsurvive (13-tracker §4)
           filter: {enabled: true, min_cutoff_hz: 1.0, beta: 0.05,    # One Euro (live: enabled/
                    d_cutoff_hz: 1.0, deadband_m: 0.002,              #   min_cutoff/beta via
                    deadband_rad: 0.005},                             #   tracker_settings)
-          libsurvive_config_path: ~/.config/libsurvive/config.json,  # replaced only by `install`
+          libsurvive_config_path: ${APOLLO_HOME}/var/libsurvive/config.json,  # libsurvive reads/writes
+                                              #   it at teleop (tracker.py adds --configfile); the
+                                              #   `install` step (wizard) is the only other writer
           calibration: {min_scenes: 6,                               # phase-10 (13-tracker §4)
                         validation_seconds: 10.0, validation_skip_seconds: 3.0,
                         validation_std_mm: 5.0, validation_step_mm: 20.0,
@@ -1466,7 +1508,79 @@ hardware_session:            # phase-09c/09d (§5 hardware BRINGUP, §13.1 home_
   bringup_timeout_s: 60.0    # HardwareWorkcell.bring_up budget inside POST /api/session
                              #   and inside the rail-homing job's connect
 egl_device_id: 0
+logging:                     # 2026-09-07 ("Logging" below)
+  level: INFO                # DEBUG | INFO | WARNING | ERROR, both handlers
+  dir: ${APOLLO_HOME}/var/logs   # rotating file next to the rest of the machine state; null = stderr only
+  file: runtime.log
+  max_bytes: 20971520        # 20 MB x
+  backup_count: 10           #   10 kept
+  access_log: false          # uvicorn per-request lines (25 Hz UI polls) off by default
 ```
+
+**Logging (2026-09-07).** Until then the process had one `basicConfig` to
+stderr, no level knob and no file: the dev launcher appended stderr to an
+unrotated `var/logs/runtime.log` (40 MB after two days, a quarter of it the
+access log of three UI poll endpoints, 42 INFO application records in total),
+so the first live teleop defects could not be read off a log. Now
+`__main__.configure_file_logging(cfg.logging)` adds a
+`RotatingFileHandler` at `logging.dir/logging.file` after the config loads and
+keeps the stderr handler (journald on the ops path; the dev launcher's
+`var/logs/runtime.stderr.log`, which is also the ONLY place libsurvive's and
+MuJoCo's C-side prints land — they never pass through Python logging).
+uvicorn runs with `log_config=None` so its lines propagate to the same
+handlers; `access_log` follows the config. The control loop writes:
+
+- one INFO **health line** per `control.health_log_every_s` —
+  `loop: 100 ticks/1.0s (100 Hz, tick p50 0.9 ms p99 2.1 ms, +0 overruns)
+  active=grip src=teleop held=['KeyC'] tracker=tracking pose_age=4ms
+  ctl_age=0.3s engaged=grip leash_slips=+3 (+0.041 m total) gate=ok
+  ik_slips=+0 ik_diverged=+0 cmd-meas={grip:0.0031 view:0.0000}
+  servo={grip: 1200 ticks, 0 late, 0 faults, p99 10.4 ms; …}` — the pose age
+  and the controller (button) age are printed separately because the two paths
+  die independently (2026-09-06: poses at 135 Hz, no button event for minutes);
+  `leash_slips` is the hand travel discarded this window (§6); `cmd-meas` is
+  `max|q_cmd − q_meas|` per arm; `servo=` is `XArmDriver.tick_stats()` (duck
+  typed; absent for sim);
+- INFO/WARNING **edge lines**: `clutch ENGAGED/released (arm, source)`,
+  `controller stream STALE/fresh again`, `ws input watchdog LATCHED/cleared`
+  (gate block/clear edges were already the supervisor's `collision event`
+  lines), plus DEBUG per-event IK divergence / residual-freeze lines.
+
+`ControlLoop.ik_slips` / `.ik_diverged` and `TrackerTeleop.slip_count` /
+`.slip_pos_total_m` are the cumulative counters behind the deltas.
+
+### 14.1 Self-contained paths (`${APOLLO_HOME}`)
+
+Every filesystem path the runtime reads or writes resolves *inside the
+workspace*, so `git clone --recurse-submodules <ws>` runs with no `~/apollo`
+(or any machine-specific) dependency and the repo can be deployed to another
+user unchanged. The tracked configs anchor data at `${APOLLO_HOME}/var/...`;
+`config.py` resolves each path field (`profiles_dir`, `datasets_root`,
+`checkpoints_root`, `calibration_dir`, `ui_dist`, `tracker.libsurvive_config_path`)
+by expanding `${APOLLO_HOME}` and any other `$VARS`, then `~`, then anchoring a
+still-relative result at the workspace root. Absolute paths and `~` still work
+verbatim, so the FHS ops render may pin `/var/lib/apollo-mavis-v2/...`.
+
+`${APOLLO_HOME}` is the workspace root: `$APOLLO_HOME` when the launcher /
+systemd unit exports it, otherwise inferred from the config file's own location
+(the nearest ancestor holding the side-by-side sub-repos) and, failing that,
+from the installed package's location. `load_runtime_config` also seeds
+`$APOLLO_HOME` from the config file so child processes (dagger trainer,
+libsurvive) inherit the same anchor. libsurvive is started with
+`--configfile ${...}/var/libsurvive/config.json` at teleop (the calibration
+wizard strips `--configfile` and points at its own temp copy), so the lighthouse
+calibration lives in the workspace too.
+
+Developer instance: `scripts/dev/mavis-dev.sh` derives the workspace root from
+its own location, exports `APOLLO_HOME`, and runs the runtime + a Vite dev server
+with logs/pidfiles under `<ws>/var`. `mavis-dev.sh render` builds the gitignored
+`<ws>/var/mavis_v2_local.yaml` from the tracked `configs/mavis_v2.yaml` plus the
+machine knobs in the gitignored `scripts/dev/local.env` (via
+`scripts/deploy/render-lab-config.sh KEEP_REPO_PATHS=1`, which keeps the
+workspace-relative paths). Machine-specific and safety-sensitive values (tracker
+yaw, libsurvive backend, `hardware_session.armed`) live ONLY in `local.env` + the
+rendered local config, both gitignored — the tracked config stays `armed:false`
+with the `fake` tracker. The ops path is unchanged (systemd units + FHS layout).
 
 User-facing arm names (2026-09-04): arm id `grip` is the **Manipulation Arm**
 (xArm Gripper G2 + wrist camera, control box 192.168.1.201) and arm id `view`

@@ -37,7 +37,8 @@
   分段控件，**默认 10%**。主机侧：`teleop.linear_mps/angular_rps/rail_mps`、`target_rate.v_mps/w_radps`、
   `dq_max_rad`、`jog.slew_rad_per_tick/rail_m_per_tick` 乘以 scale。驱动侧（经 `driver_factory` 闭包）：
   `servo.max_joint_vel`、`max_cart_step_m`、`rail_speed_mm_s` 乘以 scale；hardware 在 scale 1.0 的上限改为
-  `max_joint_vel 0.3 rad/s`、`max_cart_step_m 0.002`（0.2 m/s）、`rail_speed_mm_s 50`。`SessionInfo`/telemetry
+  `max_joint_vel 0.3 rad/s`、`max_cart_step_m 0.002`（0.2 m/s）、`rail_speed_mm_s 50`（2026-09-07 首次真机后
+  按操作者反馈上调为 0.6 rad/s / 0.004 = 0.4 m/s，导轨不变；4 mm/tick 刻意保持为门禁 8 mm 膨胀的一半）。`SessionInfo`/telemetry
   回显 `speed_scale`。
 - **D3 `home_rail` REST**：同步 POST，服务端超时 45 s，UI 显示进行中；REST 处理器对该 op 用长超时。
 - **D4 扫掠余量**：归零扫掠用 `inflation 0.025 m`（起点未知的盲扫，取 guardrail 的调试余量），步长 5 mm

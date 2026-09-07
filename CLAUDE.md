@@ -56,7 +56,8 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
 - Arms may or may not have a linear track (rail); max rail travel 0.65 m.
   Presence must be auto-detected via the xArm SDK.
 - Lab cell geometry (tape-measured 2026-09-02): 1.215 × 0.62 × 0.03 m table, top
-  0.735 m above the floor; two identical rails 39.5 cm apart along the long axis
+  0.735 m above the floor; two identical rails 39.0 cm apart along the long axis (39.5 by
+  tape on 2026-09-02; 39.0 by the wrist-camera overlay on 2026-09-06, see 03-sim §4.3)
   (Perception Arm (`view`) on the outer rail, nearest the operator, 2.6 cm from the
   edge the operator stands at; Manipulation Arm (`grip`) inward). Frame is the
   OPERATOR's view (they are the authority on left/right): +Y = outer edge (operator
@@ -81,22 +82,61 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   viewpoint, then fixed to yaw −90 which left the plate facing the operator; turned
   each rail 180° to yaw +90 on 2026-09-03; until 2026-09-04 both arms rested together
   at q ≈ 0.597 in a lowered ready pose, now only the guardrail scenarios use it.)
-  RAIL ZERO ALONG TRAVEL, measured 2026-09-05 with both tracks homed (it had been
-  DERIVED from the mavis mesh and was 6.0 cm wrong): the extrusion's +X/travel-zero end
-  is 14.0 cm from the table's +X edge and 18.5-19 cm from the arm base cylinder's centre
-  → `base_pos` x0 = **+0.2800** (was +0.2375) and the shared `xarm7_on_rail.xml` rail geom
-  offset y = **0.385093** (was 0.325, which centred the carriage at mid-travel). x0 uses
-  only the SUM of the two readings, so it does not depend on which end feature the tape
-  touched. **Both arms therefore sat 4.25 cm too far from the obstacle end**, i.e. every
-  obstacle-side clearance the twin reported — and every rail sweep that passed near the
-  +X end — was optimistic by that much (view carriage ↔ obstacle 12.4 cm not 15.4, view
-  flange ↔ obstacle 11.6 cm, mic ↔ obstacle 12.75 cm not 17). Still optimistic and NOT
-  fixable without better meshes: the mesh carriage stops 8.95 cm short of the rail's zero
-  end where the real one stops 5-6 cm short (~3.4 cm generous), and the mesh rail is
-  1.0926 m against the real 1.075 m so the drawn rail now overhangs the table's −X edge
-  by 1.76 cm (the zero end is anchored on purpose — it has the obstacle). The mesh
-  carriage is also 1.0 cm ASYMMETRIC about the base: +X edge base+0.098, −X edge
-  base−0.088.
+  RAIL ZERO ALONG TRAVEL, measured 2026-09-05, END FEATURE CORRECTED 2026-09-06 (it
+  had been DERIVED from the mavis mesh and was 4 cm wrong). **The operator's "rail end"
+  is the rail's WIDE END FACE (the 14 cm end plate), NOT the 3.2 cm boss that protrudes
+  2.0 cm past it** — 09-05 anchored the boss by mistake and it cost a whole round of
+  contradictory overlay measurements. Measured: wide face 14.5 cm from the table's +X
+  edge, wide face → arm base cylinder centre 18.5-19 cm, boss tip ~12 cm (sleeve fitted,
+  hard to read) → the shared `xarm7_on_rail.xml` rail geom offset y = **0.365093** (was 0.325,
+  then 0.385093) and `base_pos` x0 = **+0.2800** (was +0.2375; the tape chain alone gives 0.2750,
+  but with the wrist camera pinned to tape-referenced table dots both rails' end faces still sat
+  4–7 mm further +X — the two table-referenced tape readings disagree by 4.5 mm and the image
+  decides; face → base stays at the measured 18.7 cm, so arms and rails moved together).
+  Grip rail Y: `base_pos` −0.1786 (spacing **39.0**, not the tape's 39.5: the same mesh edge is
+  0 px off on the outer rail and 5 mm off on the inner one).
+  **Both arms had sat ~4 cm too far from the obstacle end**, i.e. every obstacle-side
+  clearance the twin reported — and every rail sweep that passed near the +X end — was
+  optimistic by that much (view carriage ↔ obstacle 12.4 cm not 15.4, view flange ↔
+  obstacle 11.55 cm, mic ↔ obstacle 12.75 cm not 17). Still optimistic and NOT fixable
+  without better meshes: the mesh carriage is ~7.5 cm SHORT along the rail (real one ≈
+  26 cm, base-centred; mesh 18.6, so it stops 8.95 cm short of the rail's zero end where
+  the real one stops 5-6 cm short), and the mesh rail is 1.0926 m against the real
+  1.075 m (drawn rail's −X end stops 0.24 cm short of the table's −X edge; the zero end is
+  anchored on purpose — it has the obstacle). The mesh carriage is also 1.0 cm ASYMMETRIC about
+  the base: +X edge base+0.098, −X edge base−0.088.
+- WRIST CAMERA EXTRINSIC, measured 2026-09-06 (03-sim §4.3 "wrist camera extrinsic"):
+  the camera pose on link7 was the reference model's GUESS `0.07 0 0.05`; solved from
+  four tape-referenced dots it is `pos="0.06832 -0.02220 0.02945"` in `xarm7_on_rail.xml`
+  — ~22 mm sideways and ~20 mm too far from the flange (re-solved after the residual pass
+  moved `base_pos`; the mount = measured camera − FK, so it absorbs the arm's placement). **That single error was the
+  entire visible twin-overlay offset the operator reported** and the twin's 2.7 %
+  table-plane over-scale. Ruled OUT before that, in order: the D435 colour intrinsics
+  (a three-height tape solve gave fx 607 ± 4 vs the configured 608.19 — the YUYV 640×480
+  UVC path really does have librealsense's colour intrinsics), the camera ROTATION (a
+  195 × 96 mm rectangle's near/far-edge perspective convergence: 1.0226 measured vs
+  1.0226 predicted; the operator's "displacement mismatch, no rotation mismatch" was
+  exactly right), and the principal-point sign convention in `twin_overlay.py` (correct).
+  Method notes worth keeping: a single-height scale reading CANNOT separate focal length
+  from camera distance — use ≥ 2 heights with h ≥ 0.5 m, and `f ∝ h` so f is never better
+  than h; a free 6-DoF PnP on 4 co-planar points is degenerate between tilt and scale
+  (it "wanted" 19.6° of tilt — not evidence); tape-verify hand-drawn dot spacing (the
+  "20 cm" dots were 19.5 and the "10 cm" ones 9.6); localise dot centroids with a LOCAL
+  PLANE background (a constant background under a shadow gradient biased v by 1 px). The
+  MICROPHONE body is deliberately NOT tied to the camera pose (`MIC_REF_PLANE_Z_M` in
+  `scenes/builder.py`) and is still unverified. Remaining overlay residual after the fix
+  and the residual pass: dots 1.24 px RMS, every measured rail/table edge within ±2 px.
+  Applies to the Manipulation Arm's camera; the Perception Arm shares the MJCF `wrist_cam`
+  pose but its own hand-assembled bracket makes its overlay sit a UNIFORM +21 px x / +13 px y
+  (~2 cm at the arm) off across EVERY link — depth-/pose-independent (far and mid Sobel-edge
+  bands give the same shift), so a fixed mount discrepancy, not parallax. FIXED 2026-09-06 as
+  an OVERLAY-ONLY per-camera principal-point nudge `twin_overlay.principal_offset_px:
+  {view_wrist: [21, 13]}` in `apollo-mavis-v2-runtime/configs/mavis_v2.yaml` (applied by
+  `TwinOverlayRenderer`; residual < 1 px live). It does NOT touch `CameraConfig.intrinsics` —
+  those are the true factory D435 values `session/manager.py` bakes into recordings; a
+  principal-point offset cancels a uniform pose-independent shift exactly (03-sim §4.3
+  "per-arm wrist camera overlay offset"). The carriage mesh is still ~7.5 cm short along the
+  rail (unmeasured).
   Encoded in `apollo-mavis-v2-sim/src/apollo_mavis_v2_sim/assets/scenes/mavis_v2.yaml`
   (header lists every measurement and what is still unverified);
   docs/design/03-sim.md §4.3 has the arithmetic. It is the ONLY scene the UI / API
@@ -272,7 +312,11 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   (undetected in this phase; UI hint "Perception Arm frozen at last sample"); **D2**
   `SessionSpec.speed_scale` ∈ (0, 1], Hardware tab 10 % / 30 % / 100 %, default 10 %, multiplies
   the host caps (`teleop.*`, `target_rate.*`, `dq_max_rad`, `jog.*`) and the driver caps (at
-  scale 1.0: `max_joint_vel` 0.3 rad/s, `max_cart_step_m` 0.002, `rail_speed_mm_s` 50); **D3**
+  scale 1.0 since 2026-09-07: `max_joint_vel` **0.6** rad/s, `max_cart_step_m` **0.004** = 0.4 m/s,
+  `rail_speed_mm_s` 50 — the first-run 0.3 / 0.002 were "over-conservative" per the operator;
+  4 mm/tick is deliberately HALF the gate's 8 mm inflation so one tick can never cross the
+  inflated shell the gate checks once per tick — do not raise it further without also
+  changing the gate); **D3**
   `home_rail` = synchronous POST, 45 s server budget; **D4** sweep margin 0.025 m, step 5 mm;
   **D5** `SessionInfo.kind` / `.speed_scale`, `SessionTelemetry.bringup` rows, `GET /api/session`
   → `state: bringup` during bring-up; **D6** `XArmDriver.disconnect()` = `set_mode(0)` →
@@ -328,6 +372,93 @@ advances every pointer to the latest pushed `main`. Fresh checkout:
   job against the real Manipulation Arm controller (no motion; the arm was enabled and
   braked again). Never run the runtime suite on the lab machine without the conftest
   guard, and never set `armed: true` in the repo config.
+- VIVE CONTROLLER LINK, and what the UI now shows (2026-09-07). The Welcome page has a
+  THIRD tab, **Setting** (`kind-setting`, `TabKey = Kind | "setting"` — not a workcell kind, so
+  it launches nothing and the Start-from / Scene / Modes sections are hidden while it is open):
+  controller link + pairing status, both calibrations (the Debug page's own `CalibrationPanel` +
+  `TrackerCalibrationWizard`, shared not moved) and the controller angle (yaw wizard +
+  `TrackerSettingsForm`). Both workcell tabs carry a controller pill (`controller-link-<tab>`)
+  from one pure classifier `controllerLink()` (`ui/src/components/controller.tsx`): no receiver →
+  not paired → error → searching → stale → connected, i.e. the FIRST actionable fact.
+  **Pairing stays status-only**: it needs exclusive USB access to the receiver, which the
+  runtime's libsurvive context holds, and pysurvive's simple API has no pairing call — the panel
+  prints the `survive-cli --pair-device` command instead. Three additive telemetry fields feed
+  this (13-tracker §3.5 item 7b): `controller_age_s` (age of the newest BUTTON/axis event, from
+  `ControllerState.rx_mono` — independent of the pose age `age_s`), `objects` (libsurvive's
+  OBJECT-type names, e.g. `["WM0"]`; empty = nothing paired / interface not openable) and
+  `dongle_present` (USB `28de:2101` in sysfs, `tracker.dongle_present()`, 5 s throttle). The UI
+  must read `undefined` on these as UNKNOWN, never as "unplugged"/"unpaired". WHY they exist:
+  see the next bullet.
+- CONTROLLER BUTTON PATH CAN DIE WHILE POSES KEEP FLOWING (measured 2026-09-06/07). The pose
+  path and the button path are independent. Symptom: teleop unusable because the clutch never
+  engages, while `telemetry.tracker` looked healthy (`status: tracking`, 135 Hz, pose age 4 ms)
+  and `controller` was FROZEN at a plausible value (`trigger: 1.0` with `trigger_pressed:
+  false`, `trackpad_x: 0.99997`) — zero controller-state changes over 20 s. Evidence: libsurvive
+  logged **50 787** `WM0 handle_input needed 1 bytes but had 4294967295` in 11 minutes,
+  continuously (~75/s), where the two previous days had 11 513 confined to the 15 minutes the
+  controller was actually in use (and buttons worked then: two `device action switch_arm -> ok`
+  on 09-04). The runtime side was clean (zero `event N handling failed: dropped`), so libsurvive
+  delivered no button event at all. **A runtime restart cleared it**: `handle_input` errors 0,
+  `controller_age_s` ≤ 0.30 s, 32 distinct controller states in 20 s, trigger back to 0.0 at
+  rest. So it is a stuck libsurvive/USB state in the process, not (necessarily) broken hardware
+  — restart the runtime before suspecting the controller. The clutch also rides KeyC / gamepad
+  RT, so a dead button path does not block verifying pose teleop.
+- LIBSURVIVE REWRITES THE LIGHTHOUSE CONFIG ON EVERY RUN, and it degrades (2026-09-07). Since
+  `devices/tracker.py` passes `--configfile ${APOLLO_HOME}/var/libsurvive/config.json`, that
+  workspace file is libsurvive's to write, and it does — with `--globalscenesolver 0
+  --disable-calibrate 1`. Observed: the pristine 3-station 09-03 calibration became **9 then 10**
+  `lighthouse*` blocks, and station **ch3 (id 2684858188)** lost its calibrated pose (demoted to
+  an unpositioned slot) while slot 0 was taken by a channel-0 station with `PositionSet: 1` and a
+  pose **1.11 m** off. With it, a resting controller wandered std 12/35/13 mm and 14 cm
+  peak-to-peak; after restoring the tracked copy
+  (`apollo-mavis-v2-runtime/configs/libsurvive/mavis_v2-lighthouses-20260903.json`) and
+  restarting, 0.1 mm peak-to-peak at rest. Backups: `var/libsurvive/config.json.bak-<ts>` and
+  `~/.config/libsurvive/config.json`. OPEN: the runtime should hand libsurvive a COPY and keep
+  the calibration read-only (the wizard's install step is the only legitimate writer), and ch3's
+  OOTX not decoding needs checking at the station.
+- TELEOP FEEL DEFECTS, ROOT CAUSE + FIX (2026-09-07; 04-runtime §6 "The rate must not exceed
+  what the arm executes"). The operator reported "doesn't follow the hand", "moving the
+  controller down barely moves the end effector", "keeps moving after I release the trigger".
+  Cause: the host commanded the tracker target at `target_rate.v_mps` 1.0 m/s while the
+  driver's servo streamer executed at most `max_cart_step_m` 0.002 m/tick = 0.2 m/s at speed
+  scale 1.0 (**0.02 m/s at the 0.1 default**) and `max_joint_vel` 0.3 rad/s (both doubled later
+  the same day, see D2); the target ran
+  into the 25 mm leash and `TrackerTeleop.slip()` folded the truncation into the anchor —
+  hand travel silently DISCARDED (worst along large-joint-motion directions such as straight
+  down), the remainder arriving up to one leash (0.125 s at scale 1.0, 1.25 s at 0.1) after
+  the hand stopped. Fix: `session/hardware.py` `apply_teleop_caps` (called in hardware
+  bring-up after `apply_executor_caps`) lowers `target_rate.*`, `teleop.linear_mps/angular_rps`
+  and `dq_max_rad` to the connected drivers' servo bounds (`ExecutorCaps.joint_step_rad` is the
+  servo's own per-joint step; `slew_rad_per_tick` is ALSO bounded by the jog slew and must not
+  be used for teleop). No safety bound is relaxed — top speed was always the streamer's; a
+  faster feel = `speed_scale` / `ServoLimits`, chosen deliberately. Both cap sets are logged at
+  INFO at bring-up. NOT yet verified live (the 2026-09-07 01:12 session started at scale 1.0
+  BEFORE this change; the runtime must be restarted to pick it up).
+- CONTROLLER MAP + TRACKPAD (2026-09-07): the lab YAML binds **gripper_close: grip_click,
+  gripper_open: menu_click, arm_next: trackpad_up, arm_prev: trackpad_down** (the code default
+  `ControllerMapConfig` keeps the reference map the tests pin: pad up/down = gripper, menu =
+  arm_next). Reason: a pad click only acts once its direction is classified from axes that an
+  event-driven reader refreshes only on an axis EVENT, so an idle/just-woken controller read a
+  stale centre at the press edge and the click stayed dead — the trigger squeeze produced axis
+  events and appeared to "unlock" the gripper. `note_edges` now also RE-CLASSIFIES a deadzone
+  click while it is still held (late classification; one extra edge). Squeezing the grip closes,
+  menu opens; pad left/right = rail as before.
+- LOGGING (2026-09-07; 04-runtime §14 "Logging"): `RuntimeConfig.logging` → a rotating
+  `${APOLLO_HOME}/var/logs/runtime.log` (20 MB × 10, `level` INFO, uvicorn access log OFF) plus
+  the stderr stream; the dev launcher's raw stderr goes to `var/logs/runtime.stderr.log`
+  (libsurvive's `WM0 handle_input` flood and MuJoCo prints land ONLY there). The control loop
+  writes a 1 Hz `loop:` health line (tick Hz/p50/p99/overruns, active arm, held codes, tracker
+  pose age vs controller age, `leash_slips` = discarded hand travel, gate, `ik_slips`, per-arm
+  `cmd-meas` lag, servo `tick_stats`) and edge lines for clutch ENGAGED/released, controller
+  stream STALE/fresh, WS watchdog LATCHED/cleared; gate edges were already `collision event`.
+  `grep 'loop:' var/logs/runtime.log` is the first thing to read after a bad session. The 40 MB
+  pre-2026-09-07 `runtime.log` (no health lines) gets rotated away on the first write.
+- COCKPIT PROXIMITY FRAME (2026-09-07; 05-ui §8.2 "ProximityFrame"): the stream grid's outer
+  frame goes colourless → gradient amber (< 0.10 m) → gradient red (< 0.05 m, saturating at
+  0.02 m) from the smallest twin clearance, full red while blocked, grey when telemetry is
+  stale; `SafetyConfig.clearance_sweep_m` (core) was raised 0.05 → 0.10 so the sweep reports
+  the range the frame needs. A plain sim session has no safety twin (`safety_debug: false`) →
+  no clearances → the frame stays off; hardware always has it.
 - Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
   hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
   NVIDIA driver 580.173.02 (upgraded 2026-09-01); NVENC works. lerobot's

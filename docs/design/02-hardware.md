@@ -92,7 +92,8 @@ class ServoLimits(BaseModel):              # defaults = HARDWARE CAPS at speed_s
     max_joint_vel: NDArray7 = [0.3]*7      # rad/s cap (per-tick slew = vel*dt)
     max_joint_acc: NDArray7 = [20.0]*7     # rad/s^2 (prevents C24 on step changes)
     lever_arm_m: NDArray7 = [1.20, 1.20, 1.00, 0.75, 0.44, 0.30, 0.10]
-    max_cart_step_m: float = 0.002         # 0.2 m/s TCP cap; firmware hard limit 10 mm/tick
+    max_cart_step_m: float = 0.004         # 0.4 m/s TCP cap (2026-09-07; was 0.002); half the
+                                           #   gate's 8 mm inflation - firmware limit 10 mm/tick
     joint_limit_margin_rad: float = 0.0087 # 0.5 deg inside limits (avoids -8 OUT_OF_RANGE)
 
 class XArmDriverConfig(BaseModel):
@@ -134,8 +135,11 @@ class RecoveryResult:           # set at the end of every recovery sequence
     user_initiated: bool = False; t_mono: float = 0.0
 ```
 
-**Speed caps (phase-09c D2).** `servo.max_joint_vel` (0.3 rad/s),
-`servo.max_cart_step_m` (2 mm per 10 ms tick = 0.2 m/s TCP) and
+**Speed caps (phase-09c D2).** `servo.max_joint_vel` (0.6 rad/s since
+2026-09-07; 0.3 for the first live runs), `servo.max_cart_step_m` (4 mm per
+10 ms tick = 0.4 m/s TCP since 2026-09-07; 2 mm before — the operator found
+100 % "still very slow"; 4 mm is deliberately HALF the gate's 8 mm inflation so
+one tick can never cross the inflated shell the gate checks once per tick) and
 `rail_speed_mm_s` (50) are the hardware caps at `SessionSpec.speed_scale == 1.0`;
 the runtime multiplies all three by the session's `speed_scale` (default 0.1 on
 the Hardware tab) inside its `driver_factory` closure before constructing the
@@ -265,8 +269,8 @@ faulted the arm mid-bring-up (2026-09-05, §14.4). Two guards, both bounded:
    window a 9 faults like any other bad return, so a box that stays not-ready
    still surfaces within ~0.3 s.
 
-The lever-arm bound keeps worst-case TCP step ≤ `max_cart_step_m` (2 mm per
-tick at `speed_scale` 1.0, i.e. 0.2 m/s; scaled with the session, D2) with all
+The lever-arm bound keeps worst-case TCP step ≤ `max_cart_step_m` (4 mm per
+tick at `speed_scale` 1.0, i.e. 0.4 m/s, since 2026-09-07; scaled with the session, D2) with all
 joints slewing (no MuJoCo/Jacobian in `hardware` — fixed conservative radii). Jitter:
 deadline scheduling on `monotonic()`; sustained p99 > 3 ms emits a
 `DriverEvent` warning (GIL-pressure cue, overview §2). The stale-input
@@ -1277,7 +1281,7 @@ result while the homing still completes. **Driver/rail**: connect with an
 unhomed track raises `RailNotHomedError(step="rail")` and never calls
 `set_linear_track_back_origin`; homed → enable + speed + `pos_m` seeded;
 `disconnect()` = `set_mode(0), set_state(4), motion_enable(False)` and nothing
-to the track; default caps 0.3 rad/s / 2 mm / 50 mm/s honoured on the wire.
+to the track; default caps 0.6 rad/s / 4 mm / 50 mm/s (0.3 / 2 mm until 2026-09-07) honoured on the wire.
 **Workcell**: unhomed → `rail: "unhomed"`, sibling untouched, `start()` carries
 the typed error; a subset config builds only the selected drivers.
 
@@ -1390,8 +1394,9 @@ the `mavis_v2` twin (no +π on joint 1; see `docs/prompts/phase-09a-*.md`).
   `HOME_RAIL_TIMEOUT_S = 45`; shutdown waits that long for a homing in flight;
   status `stale` + `maintenance_busy` while homing. `ArmMonitorSample.rail_error`
   added. `maintenance(timeout_s=None)` → per-op default.
-- Driver (§3.1, §3.6): D2 caps `max_joint_vel 0.3 rad/s`, `max_cart_step_m
-  0.002`, `rail_speed_mm_s 50` at `speed_scale 1.0` (runtime scales); D6
+- Driver (§3.1, §3.6): D2 caps `max_joint_vel 0.6 rad/s`, `max_cart_step_m
+  0.004`, `rail_speed_mm_s 50` at `speed_scale 1.0` (runtime scales; 0.3 / 0.002
+  until 2026-09-07); D6
   `disconnect()` = `set_mode(0)`, `set_state(4)`, `motion_enable(False)`, track
   untouched.
 - Fake (§11): `homing_duration_s`, `homing_result_code`, SDK-faithful

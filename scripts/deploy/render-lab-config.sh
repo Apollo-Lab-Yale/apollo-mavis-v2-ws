@@ -16,6 +16,8 @@
 #   LAB_CONFIG=/tmp/x.yaml ...                          # install somewhere else
 # Knobs (env): TRACKER_BACKEND=libsurvive LIGHTHOUSE_COUNT=3 TRACKER_YAW_DEG=116.3
 #   RAIL_IN_IK=false HARDWARE_ARMED=true MIC_ENABLED=true EGL_DEVICE_ID=0 RUNTIME_HOST RUNTIME_PORT UI_DIST
+#   LOG_LEVEL=INFO      logging.level (DEBUG adds per-event IK slips + driver events); the
+#                       rotating log file goes to $DATA_ROOT/logs (KEEP_REPO_PATHS keeps ${APOLLO_HOME}/var/logs)
 #   LIBSURVIVE_CONFIG=$DATA_ROOT/libsurvive/config.json GRIP_IP VIEW_IP
 #   CAMERA_SERIALS="grip_wrist=349643062582,view_wrist=322143060792"
 #                       override workcells.hardware.cameras[].serial by camera id (the repo
@@ -46,6 +48,10 @@ export EGL_DEVICE_ID="${EGL_DEVICE_ID:-0}"
 export LIBSURVIVE_CONFIG="${LIBSURVIVE_CONFIG:-$DATA_ROOT/libsurvive/config.json}"
 export CAMERA_SERIALS="${CAMERA_SERIALS:-}"
 export TRAINER_PORT="${TRAINER_PORT:-}"
+# KEEP_REPO_PATHS=1: leave the source config's workspace-relative ${APOLLO_HOME}/var/...
+# data + libsurvive paths untouched (self-contained dev render, scripts/dev/mavis-dev.sh);
+# unset/0 pins the absolute DATA_ROOT paths the FHS ops deploy needs.
+export KEEP_REPO_PATHS="${KEEP_REPO_PATHS:-0}"
 export SRC_COMMIT
 SRC_COMMIT="$(git -C "$(dirname "$SRC_CONFIG")" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
@@ -80,10 +86,15 @@ def setv(path, value):
 
 setv(("host",), env["RUNTIME_HOST"])
 setv(("port",), int(env["RUNTIME_PORT"]))
-setv(("ui_dist",), env["UI_DIST"])
-for key, sub in (("profiles_dir", "profiles"), ("datasets_root", "datasets"),
-                 ("checkpoints_root", "checkpoints"), ("calibration_dir", "calibration")):
-    setv((key,), f"{env['DATA_ROOT']}/{sub}")
+_ui = env["UI_DIST"].strip()
+setv(("ui_dist",), None if _ui.lower() in ("", "none", "null") else _ui)  # null -> API-only, a Vite dev server serves the UI
+if not flag("KEEP_REPO_PATHS"):  # else keep the source's ${APOLLO_HOME}/var/... (self-contained)
+    for key, sub in (("profiles_dir", "profiles"), ("datasets_root", "datasets"),
+                     ("checkpoints_root", "checkpoints"), ("calibration_dir", "calibration")):
+        setv((key,), f"{env['DATA_ROOT']}/{sub}")
+    setv(("logging", "dir"), f"{env['DATA_ROOT']}/logs")  # rotating runtime.log (2026-09-07)
+if env.get("LOG_LEVEL"):
+    setv(("logging", "level"), env["LOG_LEVEL"].strip().upper())
 setv(("control", "rail_in_ik"), flag("RAIL_IN_IK"))
 # Arming switch: the lab config is the ONLY place that lets the runtime connect the
 # real xArm drivers / home the rails (repo default false; HARDWARE_ARMED=false renders
@@ -99,7 +110,8 @@ for frozen in ("--globalscenesolver", "--disable-calibrate"):  # never let teleo
     if frozen not in args:
         args += [frozen, "0" if frozen == "--globalscenesolver" else "1"]
 setv(("tracker", "libsurvive_args"), args)
-setv(("tracker", "libsurvive_config_path"), env["LIBSURVIVE_CONFIG"])
+if not flag("KEEP_REPO_PATHS"):  # else keep ${APOLLO_HOME}/var/libsurvive/config.json
+    setv(("tracker", "libsurvive_config_path"), env["LIBSURVIVE_CONFIG"])
 setv(("tracker", "yaw_deg"), float(env["TRACKER_YAW_DEG"]))
 setv(("microphone", "enabled"), flag("MIC_ENABLED"))
 setv(("egl_device_id",), int(env["EGL_DEVICE_ID"]))

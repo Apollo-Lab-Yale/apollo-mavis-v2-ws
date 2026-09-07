@@ -63,12 +63,28 @@ pad up/down = arm switch); `switch_arm_prev` has no Vive-controller binding
 (keyboard `KeyZ` / gamepad `LB` only). Holding menu+system for the pairing
 gesture fires `switch_arm` once — harmless, and pairing is a one-off operation.
 
-A click is classified once, at its press edge, by the trackpad position at that
-moment (dominant axis wins; |x| and |y| both below the deadzone ⇒ ignored); the
-classification is held until release. Default `controller_map`:
-`{clutch: trigger_click, gripper_open: trackpad_up, gripper_close:
-trackpad_down, rail_neg: trackpad_left, rail_pos: trackpad_right, arm_next:
-menu_click, arm_prev: none}` with `trackpad_deadzone: 0.3`. Bindable inputs:
+A click is classified at its press edge by the trackpad position at that
+moment (dominant axis wins; |x| and |y| both below the deadzone ⇒ unclassified);
+the classification is held until release. **Late classification (2026-09-07):**
+a click whose press edge fell inside the deadzone is re-classified while it is
+still held, the first time the finger leaves the deadzone, and that appends its
+own edge (one click ⇒ at most one `None` edge and one classified edge, so a
+discrete action still fires once). Before, such a click stayed dead for its
+whole duration — and because the pad axes are only refreshed by an axis EVENT,
+an idle or just-woken controller read a stale centre at the press edge; the
+trigger squeeze that produced axis events then appeared to "unlock" the pad
+(the operator's "gripper only works after the trigger"). Default
+`controller_map`: `{clutch: trigger_click, gripper_open: trackpad_up,
+gripper_close: trackpad_down, rail_neg: trackpad_left, rail_pos:
+trackpad_right, arm_next: menu_click, arm_prev: none}` with
+`trackpad_deadzone: 0.3` — the reference map the tests pin. **The lab config
+(`apollo-mavis-v2-runtime/configs/mavis_v2.yaml`) departs from it since
+2026-09-07:** `gripper_close: grip_click, gripper_open: menu_click, arm_next:
+trackpad_up, arm_prev: trackpad_down` — the wand has six bindable inputs once
+the trigger is the clutch, four of them the pad's directions, and the pad is
+the least reliable of them (it needs a classification), so the two actions
+that must never miss while the clutch is held moved to the plain buttons and
+arm switching (also `Tab`/`KeyZ` and the Cockpit) took the pad. Bindable inputs:
 `trigger_click`, `trackpad_left|right|up|down`, `menu_click`, `grip_click`,
 `none`; held actions accept any input, discrete actions accept any input except
 `trigger_click`; an input serves at most one action. Device-sourced discrete
@@ -196,6 +212,32 @@ injected codes (`TrackerTelemetry.controller`, `.device_held`).
    exact set, `tests/test_protocol.py::_WIRE_MODELS` and the `TrackerTelemetry`
    attribute-set assertion move together. Class names are unique across the
    protocol (no json-schema-to-typescript alias renumbering); no keymap row.
+7b. **Controller-link fields (additive, 2026-09-07).** `TrackerTelemetry` gains
+   `controller_age_s: float | None`, `objects: list[str]` and
+   `dongle_present: bool | None`. Motivation, from the 2026-09-06 session: the
+   POSE path and the BUTTON path are independent and failed apart — poses ran
+   at 135 Hz while libsurvive delivered no button event at all, so the clutch
+   could never engage while every field the UI had (`status: "tracking"`,
+   `rate_hz`, `age_s`, a frozen but plausible `controller`) still looked
+   healthy. Therefore:
+   - `controller_age_s` = `now - ControllerState.rx_mono`, the age of the
+     newest button / touch / axis event, independent of `age_s` (the pose age).
+     `None` = no input event yet. An IDLE controller legitimately sends
+     nothing, so a large value is **not** proof of a fault; the UI reports it
+     and asks for a trigger squeeze (05-ui §8.1).
+   - `objects` = the OBJECT-type codenames libsurvive currently enumerates
+     (`["WM0"]`), refreshed by the reader thread in the same walk as the
+     lighthouse snapshot. Empty = nothing paired / interface not openable,
+     which separates "not paired" from "no station fix".
+   - `dongle_present` = USB `28de:2101` found in
+     `/sys/bus/usb/devices` (`tracker.dongle_present()`, throttled to
+     `DONGLE_POLL_S` = 5 s, ~0.8 ms per scan, read from `status()` so it works
+     for every backend). `None` = not checked / no sysfs. Read-only sysfs, so
+     it answers "is the receiver plugged in?" while libsurvive owns the
+     interface.
+   All three are optional on the wire, and the UI must read `undefined` as
+   UNKNOWN (a runtime that has not been restarted omits them) rather than as
+   "unplugged" / "unpaired".
 8. **Transport (binding, 2026-09-03):** calibration adds **no** `ActionName`
    and **no** keymap row (item 2's 23-entry invariant holds). Commands ride
    REST — `GET /api/tracker/calibration -> TrackerCalibrationStatus`, `POST
@@ -259,7 +301,8 @@ move together.
   into `ControllerState`; `TrackerConfig.controller_map` defaults to the §1.1 table
   (`{clutch: trigger_click, gripper_open: trackpad_up, gripper_close:
   trackpad_down, rail_neg: trackpad_left, rail_pos: trackpad_right, arm_next:
-  menu_click, arm_prev: none}`) with `trackpad_deadzone: 0.3`; the reader
+  menu_click, arm_prev: none}`; the lab YAML binds the gripper to grip/menu and
+  arm switching to pad up/down, §1.1) with `trackpad_deadzone: 0.3`; the reader
   attaches the latest controller state and the derived `held_codes` (clutch,
   gripper and rail codes looked up from the keymap by action) to every sample
   and publishes a sample on each button edge (re-publishing the last pose; this
@@ -438,8 +481,10 @@ move together.
     non-null `yaw_deg`, that value overrides `cfg.tracker.yaw_deg` (the YAML
     is only the boot default). With `yaw_valid=false` telemetry reports the
     fact and the UI shows "yaw alignment needed". Config keys (04-runtime
-    §14): `RuntimeConfig.calibration_dir = ~/apollo/calibration`,
-    `TrackerConfig.libsurvive_config_path = ~/.config/libsurvive/config.json`,
+    §14): `RuntimeConfig.calibration_dir = ${APOLLO_HOME}/var/calibration`,
+    `TrackerConfig.libsurvive_config_path = ${APOLLO_HOME}/var/libsurvive/config.json`
+    (workspace-relative, §14.1; libsurvive is started with `--configfile` at that
+    path so it reads/writes the workspace copy, not `~/.config`),
     `TrackerConfig.calibration = TrackerCalibrationConfig {min_scenes: 6,
     validation_seconds: 10.0, validation_skip_seconds: 3.0,
     validation_std_mm: 5.0, validation_step_mm: 20.0, still_window_s: 0.5,
@@ -511,6 +556,55 @@ move together.
   `teleop`/`sim`/`mavis_v2` session with arms `grip`,`view` if none) and the
   session's video streams (`sim`, cameras; `twin` only under `safety_debug`).
 - `KeymapOverlay`: new `tracker` group and a gamepad glyph column.
+- **Welcome page: controller line + Setting tab (2026-09-07; 05-ui §8.1).** The
+  Debug page is a debugging surface, not the operator's front door, so the
+  Welcome page now answers "is the controller connected?" on **both** workcell
+  tabs (one pill from `controllerLink()`, `src/components/controller.tsx`) and
+  carries a third tab, **Setting**, with the device set-up: controller link and
+  pairing status, both calibrations (the Debug page's own `CalibrationPanel` and
+  `TrackerCalibrationWizard`, unchanged and shared) and the controller angle
+  (the yaw wizard plus `TrackerSettingsForm` for live nudging). The link ladder
+  reports the FIRST actionable fact — no receiver → not paired → error →
+  searching → stale → connected — and separates the button path from the pose
+  path: a fresh pose stream never speaks for the buttons, whose own row shows
+  `controller_age_s` and asks for a trigger squeeze, verified live by
+  `ControllerView`.
+- **Pairing is status-only (2026-09-07, decision).** The Setting tab shows what
+  is paired and the exact operator command
+  (`survive-cli --pair-device`, hold Menu + System ≈ 50 s) but does not pair:
+  pairing needs exclusive USB access to the receiver, which the runtime's
+  libsurvive context holds while it reads poses, and libsurvive's simple API has
+  no pairing call. VERIFIED 2026-09-07 against the installed wheel: of
+  `pysurvive`'s 963 names none matches `pair` except
+  `SensorActivations_isPairValid` (sensor pairs, unrelated), the `simple_*`
+  surface is `simple_{init,init_with_logger,start_thread,next_event,wait_for_*,
+  get_*,object_*,close,...}` with no pairing entry, and `nm -D` on the bundled
+  `libsurvive.so` finds no pairing symbol either — pairing lives in survive-cli's
+  own code. A future runtime-driven flow would have to stop the reader, pair, and
+  restart it — the same seam the calibration wizard already uses
+  (`TrackerReader.restart`).
+- **Base-station calibration is offered only on the libsurvive backend
+  (fixed 2026-09-07).** `calibrationDisabledReason(tracker, session, kind?)` now
+  takes the wizard kind: with `kind: "base_station"` and any other backend it
+  returns "Base-station calibration needs the libsurvive backend (this runtime
+  runs <backend>)" and the button is disabled with its own note
+  (`calibration-kind-note`), instead of letting the first POST come back 409
+  "backend is not libsurvive" as a toast. §5 above documented that gate from the
+  start; the code did not implement it, and the Devices test pinned the wrong
+  behaviour. The yaw gesture keeps working on the `fake` backend (its Capture
+  button), so the shared reason line still means "neither kind is available".
+- **The Welcome page never opens `/ws/control` (2026-09-07, safety).** The
+  runtime gives the WRITER role to the first control connection and demotes
+  every later one, so a Setting tab that dialled it could take teleop away from
+  the Cockpit tab the operator drives with. The Setting tab's live
+  `tracker_settings` fields are therefore enabled only when a control socket is
+  ALREADY open in that browser tab; otherwise they show the echoed values with
+  "tune from the Cockpit or the Debug page".
+- **An active calibration blocks the launchers (2026-09-07).** `POST /api/session`
+  409s "tracker calibration in progress" (`rest.py`), and both wizards are now
+  reachable from the Welcome page, so `LandingSelection.calibrationActive`
+  (from `isCalibrationActive`) feeds `REASON.calibrationActive` — the operator
+  reads it on the mode cards instead of meeting the 409.
 - **Calibration (phase-10, 2026-09-03; 05-ui §8.4 / §9 / §10).** The Devices
   side column gains a `CalibrationPanel`: a status row (`yaw_valid` → green
   chip `yaw aligned <date>` from `yaw_calibrated_at`, otherwise an amber chip
@@ -569,10 +663,16 @@ the resting pose noise is 0.1 mm std / 1 mm peak-to-peak / 0.08° — the 5 cm
 "jitter" seen before was the broken station plus a stale calibration.
 libsurvive's poser thread uses about one CPU core continuously.
 
-Pairing a controller to the dongle (once): run libsurvive with `--pair-device`
-(`survive-cli --pair-device --v 100 --lighthousecount 4`), then hold the
-controller's **Menu + System** buttons until the LED blinks blue; the dongle
-accepted the pairing after ~50 s of attempts. Always close libsurvive cleanly
+Pairing a controller to the dongle (once): run libsurvive with `--pair-device`,
+then hold the controller's **Menu + System** buttons until the LED blinks blue;
+the dongle accepted the pairing after ~50 s of attempts. The exact command is
+one string, `PAIRING_COMMAND` in `apollo-mavis-v2-ui/src/components/setting.tsx`
+(the Setting tab prints it verbatim, so the two must not drift):
+`LD_LIBRARY_PATH=~/opt/libsurvive/lib ~/opt/libsurvive/bin/survive-cli
+--pair-device --v 100` — `survive-cli` is not on `PATH` and needs that library
+path, and `--lighthousecount` is irrelevant to pairing. The runtime must be
+STOPPED first (it holds the USB interface), which also takes the Setting tab's
+own page offline — the panel says so. Always close libsurvive cleanly
 (`simple_close`): a killed process keeps the USB interface claimed and the next
 open fails with `LIBUSB_ERROR_BUSY` (`fuser /dev/bus/usb/<bus>/<dev>` finds the
 holder). The runtime's reader must close on shutdown and on SIGTERM.
@@ -686,7 +786,7 @@ click the runtime fits the yaw over the four horizontal legs against the
 operator axes above and shows yaw, residual and the checks (legs ≥ 10 cm,
 horizontal legs flat, up/down truly vertical and in the right order, residual
 ≤ 15°); **Apply** installs it live (`tracker_settings` path) and persists it
-to `~/apollo/calibration/tracker_calibration.json`, which overrides the YAML
+to `${APOLLO_HOME}/var/calibration/tracker_calibration.json`, which overrides the YAML
 `yaw_deg` on every later start. Redo the gesture after **any** base-station
 recalibration — the wizard enforces this by clearing `yaw_valid` on install
 and showing "yaw alignment needed" until a new yaw is applied.

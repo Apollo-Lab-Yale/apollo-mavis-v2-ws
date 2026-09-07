@@ -11,13 +11,20 @@
 # leave-one-out, and prints the scatter of the fixes. Consistent calibration =>
 # std of a few mm in every column and near-zero offsets between the columns.
 # Inconsistent => cm-level std / max steps with all LHs, collapsing when one LH is left out.
-# Nothing here touches ~/.config/libsurvive/config.json (temp copies, scene solver off).
+# Nothing here touches the live libsurvive config (temp copies, scene solver off).
+# The config under test is $LIBSURVIVE_CONFIG, else the WORKSPACE copy the runtime hands
+# libsurvive (<ws>/var/libsurvive/config.json, self-contained since 2026-09-07), else the
+# legacy ~/.config/libsurvive/config.json.
 #
 # usage: 03-lh-consistency-check.sh [SECONDS | existing.rec]      (default: record 20 s)
 set -euo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WS="${APOLLO_HOME:-$(cd "$HERE/../.." && pwd)}"
 LIBSURVIVE="${LIBSURVIVE_PREFIX:-$HOME/opt/libsurvive}"
 CLI="$LIBSURVIVE/bin/survive-cli"
-CFG="${LIBSURVIVE_CONFIG:-$HOME/.config/libsurvive/config.json}"
+if [ -n "${LIBSURVIVE_CONFIG:-}" ]; then CFG="$LIBSURVIVE_CONFIG"
+elif [ -f "$WS/var/libsurvive/config.json" ]; then CFG="$WS/var/libsurvive/config.json"
+else CFG="$HOME/.config/libsurvive/config.json"; fi
 LH_COUNT="${LIGHTHOUSE_COUNT:-3}"
 WORK="$(mktemp -d /tmp/lh-check-XXXXXX)"
 export LD_LIBRARY_PATH="$LIBSURVIVE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

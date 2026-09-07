@@ -33,3 +33,9 @@ MUJOCO_LOG.TXT
 
 # uv-managed interpreters of an ops checkout (UV_PYTHON_INSTALL_DIR, scripts/deploy/install-stack.sh)
 /.uv/
+
+# Self-contained workspace runtime data (${APOLLO_HOME}/var; scripts/dev/mavis-dev.sh)
+/var/*
+!/var/README.md
+# Developer machine knobs for `mavis-dev.sh render` (tracker yaw, armed, ...) -- never committed
+/scripts/dev/local.env

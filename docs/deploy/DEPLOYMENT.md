@@ -78,7 +78,7 @@ Before you start — **read this first**:
 | Lab runtime config (rendered by S4 — no sudo, re-rendered by mavis alone in S9) | `/var/lib/apollo-mavis-v2/mavis_v2_lab.yaml` | `mavis:mavis`, 664 |
 | netsetup system state | `/etc/apollo-mavis-v2/nic_map.json` (written by root) | root |
 | Service unit | `/home/mavis/.config/systemd/user/mavis-runtime.service` | mavis |
-| Logs | `journalctl --user -u mavis-runtime` (as mavis); netsetup: `/var/log/mavis-netsetup.log` | — |
+| Logs | `journalctl --user -u mavis-runtime` (as mavis) **and** the runtime's own rotating `$DATA_ROOT/logs/runtime.log` (20 MB × 10; `logging:` block, `LOG_LEVEL` render knob, 2026-09-07); netsetup: `/var/log/mavis-netsetup.log` | `<ws>/var/logs/runtime.log` (rotating) + `runtime.stderr.log` (raw stderr: libsurvive / MuJoCo C prints) |
 
 The developer account (`xiatao`) is untouched: its checkout, venvs, `~/.config/libsurvive`,
 `~/apollo/*`, nvm and uv stay where they are. Two things are shared by nature and are
@@ -270,10 +270,10 @@ Exact diff versus the repo config (values, comments stripped):
 ```diff
 -ui_dist: null
 +ui_dist: /opt/apollo-mavis-v2/apollo-mavis-v2-ui/dist
--profiles_dir: ~/apollo/profiles
--datasets_root: ~/apollo/datasets
--checkpoints_root: ~/apollo/checkpoints
--calibration_dir: ~/apollo/calibration
+-profiles_dir: ${APOLLO_HOME}/var/profiles
+-datasets_root: ${APOLLO_HOME}/var/datasets
+-checkpoints_root: ${APOLLO_HOME}/var/checkpoints
+-calibration_dir: ${APOLLO_HOME}/var/calibration
 +profiles_dir: /var/lib/apollo-mavis-v2/profiles
 +datasets_root: /var/lib/apollo-mavis-v2/datasets
 +checkpoints_root: /var/lib/apollo-mavis-v2/checkpoints
@@ -285,7 +285,7 @@ Exact diff versus the repo config (values, comments stripped):
 +  backend: libsurvive
 -  libsurvive_args: ["--lighthousecount", "4", "--globalscenesolver", "0", "--disable-calibrate", "1"]
 +  libsurvive_args: ["--lighthousecount", "3", "--globalscenesolver", "0", "--disable-calibrate", "1"]
--  libsurvive_config_path: ~/.config/libsurvive/config.json
+-  libsurvive_config_path: ${APOLLO_HOME}/var/libsurvive/config.json
 +  libsurvive_config_path: /var/lib/apollo-mavis-v2/libsurvive/config.json
 -  yaw_deg: 0.0
 +  yaw_deg: 116.3                            # ESTIMATE (2026-09-03); redo the Yaw wizard, it persists to calibration_dir
@@ -346,13 +346,15 @@ tool exists (S11 has the manual fallback).
 
 ### libsurvive lighthouse calibration (per account!)
 
-`tracker.libsurvive_config_path` is used only by the calibration wizard (copy / back up /
-install). libsurvive itself ignores it and reads `$XDG_CONFIG_HOME/libsurvive/config.json`,
-i.e. `~/.config/libsurvive/config.json` of the **service user** (the normal reader never
-passes `--configfile`; the strings `XDG_CONFIG_HOME` and `%s/.config/libsurvive` are in
-`libsurvive.so`). S6's `install-services.sh` therefore symlinks
-`/home/mavis/.config/libsurvive -> /var/lib/apollo-mavis-v2/libsurvive` so both paths are
-the same file, and seeds `config.json` if missing.
+Since 2026-09-06 the normal reader **also** passes `--configfile
+tracker.libsurvive_config_path` (`devices/tracker.py`), so libsurvive reads/writes exactly
+that file at teleop — no reliance on `$XDG_CONFIG_HOME/libsurvive/config.json`. The
+calibration wizard still owns the same path for copy / back up / install and strips any
+`--configfile` before adding its own temp copy (`CALIBRATION_ARGS`). With an explicit
+`--configfile` the S6 symlink `/home/mavis/.config/libsurvive ->
+/var/lib/apollo-mavis-v2/libsurvive` is redundant (harmless; `install-services.sh` still
+creates it and seeds `config.json` if missing). The self-contained default is
+`${APOLLO_HOME}/var/libsurvive/config.json` (04-runtime §14.1).
 
 Seed it from the developer's **current** calibration, which is newer than the repo copy
 (`~/.config/libsurvive/config.json` 2026-09-04 01:10 vs
@@ -494,6 +496,8 @@ systemctl --user status  mavis-runtime
 systemctl --user restart mavis-runtime
 systemctl --user stop    mavis-runtime
 journalctl --user -u mavis-runtime -f          # stderr of the runtime (INFO)
+tail -f /var/lib/apollo-mavis-v2/logs/runtime.log   # the same lines, rotating file (logging.dir); `grep 'loop:'` = the
+                                                    #   1 Hz control-loop health line (04-runtime §14 "Logging")
 journalctl --user -u mavis-runtime -b --no-pager | tail -100
 ```
 
@@ -657,17 +661,27 @@ After power-cycling the arms, `reachable` goes `unreachable → refused → open
 
 ### S8.3 Developer running a second instance while the ops service runs
 
-Use fake/none backends, another port, your own data dirs. Render such a config from your
-own checkout (no sudo; `DATA_ROOT` becomes your `~/apollo`, ports move):
+Use fake/none backends, another port, and the self-contained developer launcher, which
+keeps everything under `<ws>/var` (no `~/apollo`, no sudo; `04-runtime §14.1`):
 
 ```bash
 cd ~/projects/apollo-mavis-v2-ws
-OPS_ROOT=$PWD LAB_CONFIG=$HOME/apollo/dev.yaml DATA_ROOT=$HOME/apollo \
+scripts/dev/mavis-dev.sh render        # builds <ws>/var/mavis_v2_local.yaml from the tracked
+                                       #   config + the gitignored scripts/dev/local.env knobs
+scripts/dev/mavis-dev.sh start         # runtime (:8765) + Vite (:5173), logs/pids in <ws>/var
+```
+
+With no `scripts/dev/local.env` the render is a safe sim default (`tracker.backend: fake`,
+`hardware_session.armed: false`); set `TRACKER_BACKEND` / `HARDWARE_ARMED` / `TRACKER_YAW_DEG`
+/ `RUNTIME_PORT` there for a lab box. To render by hand instead (e.g. a second instance
+beside the ops service on another port), call the renderer with `KEEP_REPO_PATHS=1` so the
+workspace-relative paths survive:
+
+```bash
+OPS_ROOT=$PWD KEEP_REPO_PATHS=1 LAB_CONFIG=$PWD/var/dev.yaml \
   RUNTIME_PORT=8766 TRAINER_PORT=5758 TRACKER_BACKEND=fake MIC_ENABLED=false \
-  LIBSURVIVE_CONFIG=$HOME/.config/libsurvive/config.json UI_DIST=$PWD/apollo-mavis-v2-ui/dist \
   bash scripts/deploy/render-lab-config.sh
-(cd apollo-mavis-v2-runtime && uv run python -m apollo_mavis_v2_runtime --config ~/apollo/dev.yaml)
-(cd apollo-mavis-v2-ui && APOLLO_RUNTIME_URL=http://localhost:8766 npm run dev -- --port 5173)
+MAVIS_CONFIG=$PWD/var/dev.yaml scripts/dev/mavis-dev.sh start runtime
 ```
 
 `tracker.backend: fake` (scripted circle), `microphone.enabled: false`, sim sessions only.
