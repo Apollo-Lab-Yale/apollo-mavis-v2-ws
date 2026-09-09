@@ -6,7 +6,11 @@ enforces it, and `home_rail` is the ONE gated motion outside the loop; amended
 2026-09-05 — phase-09d: §4 item 4 the `RailHoldArm` adapter, item 7 the
 rail-homing job's pre-positioning motion goes through the gate too and its
 position-agnostic path check is the motion's only safety basis, §9 the planner's
-start-state hysteresis spelled out). Conforms
+start-state hysteresis spelled out; **amended 2026-09-09 — phase-15 GELLO
+Manipulation (`16-gello.md` v1.0): §2 row T11 leader glitch / mis-calibration,
+§6.3 the `mavis_v2_kitchen` appliance boxes are ordinary monitored environment
+geoms and a scene may declare `graspable` geoms a session whitelists against one
+gripper, §13 the UI readout shows four of the runtime's five pairs**). Conforms
 to `00-overview.md` v0.3 §6 (binding). Research ground truth:
 `docs/research/{mujoco-xarm7-sim,collision-ik,xarm-python-sdk}.md`.
 
@@ -64,6 +68,7 @@ class SafetyConfig(BaseModel):
 | T8 | Deep-penetration infeasibility: measured state already inside inflated (or real) contact — post e-stop, manual repositioning, free-drive | Gate escape rule: only clearance-increasing commands pass (§7 step 6); IK opening-velocity recovery ladder (§8) | Operator: joint-jog small deltas are gated but escape-permitted; worst case hardware e-stop + free-drive |
 | T9 | Concurrent controllers: UFACTORY Studio live-control grabs mode/state under the SDK | External mode/state-change detection → hold + operator ack (§10.2) | — |
 | T10 | Runtime bug bypassing safety (new mode / code path sends commands directly) | Single architectural chokepoint + import-boundary test (§4) | Controller backstops still active |
+| T11 | Leader glitch / mis-calibration (GELLO Manipulation, phase-15 2026-09-09): a dropped byte or a wrong servo id, or a wrong `joint_signs` / offset, makes the joint-space follower sweep toward a wrong posture at the cap | Launch check on the kitchen twin (joint limits + `check_config_violations` at the full goal → 409 with the pair, previewed in the sheet); per-sample jump rejection (`max_jump_rad` 0.5 → sample `valid = False`, never a target); engage tolerance (0.10 rad — the arm never starts following from far away); the leash (0.80 rad → `out_of_sync`, hold); the operator's **Pause**; the twin gate on every tick (L1). The follower never JUMPS: the uniform step cap (0.006 rad/tick, 4 mm lever-weighted on hardware) follows a fast leader at 0.6 rad/s (16-gello §12.1, §6) | Controller backstops (L3); `hardware_session.armed` gates the driver connection |
 
 ## 3. The four safety layers (spine §6)
 
@@ -316,6 +321,18 @@ excludes gripper-knuckle pairs). Then:
   `SceneMeta` — 03-sim §4.2; e.g. `mavis_v2`'s carriages 24 mm above the table
   and ~2 mm from the neighbouring rail), (b) `safety.allowed_pairs_extra`,
   (c) session-scoped additions (fingertips ↔ named grasp object).
+- **Kitchen twin `mavis_v2_kitchen` (phase-15, 2026-09-09; 16-gello D6 / D7).** The
+  appliance boxes (fridge body and handles, range body / backguard / handle, counter,
+  upper cabinet, wall) are ordinary collidable environment geoms, so they enter the
+  monitored list automatically — no pair-management code changed (≈ 310 → ≈ 360 pairs;
+  the 25 Hz sweep and the tick budget are unaffected at ~1 µs per pair); the AprilTag
+  plates are `collidable: false` (`contype = conaffinity = 0`) and are never monitored.
+  A scene may declare **`graspable`** geoms (`SceneDescriptor.graspable`, validated at
+  build, echoed on `SceneMeta`; the kitchen lists `fridge_door_handle`,
+  `fridge_drawer_handle`, `range_handle`) which a session whitelists against ONE
+  gripper through `set_grasp_whitelist` — item (c) above — so the fingers may touch a
+  handle while every arm link stays gated against every appliance body. The hinged
+  fridge door is not modelled (v2).
 - **Convex hulls** over-approximate — conservative but can false-alarm in tight
   layouts. Escape hatch: decompose the offending link mesh with **CoACD** into a few
   convex pieces as collision-only geoms (`group="3"`, alpha 0) in a scene-local
@@ -707,7 +724,13 @@ The UI is never in the control path; it renders safety state from `/ws/telemetry
 (20–30 Hz). Wire shape fixed by 05-ui.md: `TelemetryMsg.collision: CollisionReport{
 blocked, pairs, min_clearance_m, severity: "ok"|"warn"|"blocked" }` (latest
 `GateDecision` merged with the 25 Hz sweep, §7.2) and `TelemetryMsg.clearances: {pair,
-dist_m}[]` (top-5 smallest, for `ClearanceReadout` — mm, monospace, color-graded).
+dist_m}[]` (top-5 smallest — the runtime still publishes five; since 2026-09-09
+`ClearanceReadout` shows the **four** closest of them (`CLEARANCE_ROWS = 4`), each row a
+single line with the pair label ellipsised, in a `max-height` panel with its own scroll, and
+the episode controls render ABOVE it in collect / dagger — wrapped pair labels such as
+`grip_right_finger_pad_2 ↔ view_d435_mount` used to push New episode / Save / Discard off
+the screen; k = 5 in the readout until then; 16-gello §0 item 6 / §12.4 — mm, monospace,
+color-graded).
 
 Banner states (`CollisionBanner`): `"warn"` → amber "CLEARANCE LOW arm0/link5 ↔
 arm1/link3 (12 mm)"; `"blocked"` → red "COMMAND BLOCKED BY TWIN GATE" + offending

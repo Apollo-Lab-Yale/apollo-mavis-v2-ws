@@ -43,12 +43,16 @@ render() {
   # sim render (fake tracker, armed:false) for a fresh clone on another machine.
   [ -f "$HERE/local.env" ] && { set -a; . "$HERE/local.env"; set +a; }
   export TRACKER_BACKEND="${TRACKER_BACKEND:-fake}" HARDWARE_ARMED="${HARDWARE_ARMED:-false}"
+  # phase-15 (16-gello §9.3): the GELLO leader knobs + the overlay twin scene pass through like
+  # the tracker knobs; empty = the repo values (backend none, twin_overlay.scene null)
+  export GELLO_BACKEND="${GELLO_BACKEND:-}" GELLO_USB_SERIAL="${GELLO_USB_SERIAL:-}" \
+         GELLO_BAUD="${GELLO_BAUD:-}" TWIN_OVERLAY_SCENE="${TWIN_OVERLAY_SCENE:-}"
   # UI_DIST empty -> ui_dist:null (API-only, `start ui` runs Vite on :5173); set it in
   # local.env to serve a built SPA from the runtime instead. OPS_ROOT=$WS points the
   # deploy renderer at THIS checkout's runtime (source config + venv) instead of /opt.
   OPS_ROOT="$WS" KEEP_REPO_PATHS=1 LAB_CONFIG="$LOCAL_CONFIG" DATA_ROOT="$VAR" UI_DIST="${UI_DIST:-none}" \
     bash "$WS/scripts/deploy/render-lab-config.sh"
-  echo "rendered $LOCAL_CONFIG (tracker=$TRACKER_BACKEND armed=$HARDWARE_ARMED)"
+  echo "rendered $LOCAL_CONFIG (tracker=$TRACKER_BACKEND armed=$HARDWARE_ARMED gello=${GELLO_BACKEND:-none} overlay_scene=${TWIN_OVERLAY_SCENE:-default})"
   # Seed the libsurvive lighthouse calibration from the tracked copy when the workspace has
   # none yet (self-contained fresh clone). Never overwrite: libsurvive rewrites this file on
   # every run and the wizard's install step is the only legitimate writer of a NEW one.

@@ -33,7 +33,9 @@ Before you start — **read this first**:
    `docs/prompts/phase-09c-hardware-session.md` + `phase-09d-rail-homing-planning.md`) and
    **first ran on the real boxes on 2026-09-05** (`docs/design/02-hardware.md` §16: three
    false alarms of our own, fixed the same day; fakes only until then): `POST /api/session
-   kind=hardware` is teleop-only, ALWAYS brings up both arms (phase-09d: `SessionSpec.arms`
+   kind=hardware` is teleop-only (data collection admitted 2026-09-07; **GELLO Manipulation**
+   admitted with phase-15 on 2026-09-09 — `docs/design/16-gello.md` D8; DAgger / Online DAgger /
+   inference stay sim-only), ALWAYS brings up both arms (phase-09d: `SessionSpec.arms`
    must be every configured arm — no per-arm switch on the Hardware tab) at `speed_scale`
    (Hardware tab 10 / 50 / 100 %, default 100 % since 2026-09-08 evening — the operator's call,
    `hardware_session.default_speed_scale: 1.0`, uncommitted in the runtime/ui working trees; 50 %
@@ -68,6 +70,9 @@ Before you start — **read this first**:
    │   ├─ FastAPI/uvicorn :8765  /api/*  /ws/control  /ws/telemetry  /ws/video/*  /video/*
    │   ├─ built UI (ui_dist = .../apollo-mavis-v2-ui/dist) mounted at /              │
    │   ├─ tracker: libsurvive via pysurvive -> Watchman dongle 28de:2101 (exclusive)  │
+   │   ├─ GELLO leader (phase-15, 2026-09-09): Dynamixel bus over FTDI FT232H 0403:6014 │
+   │   │     /dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_FTAKROCJ-if00-port0     │
+   │   │     -> ttyUSB0, root:dialout 0660; EXACTLY ONE process opens it (dev vs service) │
    │   ├─ microphone: RØDE NT-USB Mini through the account's OWN PulseAudio (pactl/parec)
    │   ├─ hardware probe: TCP 502 to 192.168.1.201 (grip) and 192.168.2.219 (view), 2 s
    │   ├─ sim previews: MuJoCo EGL on GPU 0 (/dev/nvidia*, /dev/dri/renderD*)         │
@@ -83,6 +88,7 @@ Before you start — **read this first**:
 | Profiles, datasets, checkpoints, tracker calibration, libsurvive config, pysurvive wheel staging | `/var/lib/apollo-mavis-v2/{profiles,datasets,checkpoints,calibration,libsurvive,wheels}` | `mavis:mavis`, 2775 + default ACL |
 | Lab runtime config (rendered by S4 — no sudo, re-rendered by mavis alone in S9) | `/var/lib/apollo-mavis-v2/mavis_v2_lab.yaml` | `mavis:mavis`, 664 |
 | **Demonstrations and Online DAgger sessions (2026-09-08, operator decision — outside `var/` and outside `/var/lib`; the morning's `~/data/pro_dagger` name never shipped)**: `datasets.namespaces` in the runtime config maps `bc_demo/<name>` → `~/data/bc_demo/<name>` and `online_dagger/<session>` → `~/data/online_dagger/<session>/{session.json,rollouts/}` (the trainer may add its own files there, e.g. `trainer/` — the runtime never reads them); `~` is the HOME of the account that runs the runtime, so under the service it is `/home/mavis/data/...`. Only the generic `datasets_root` (legacy `apollo/...` data) stays under `/var/lib/apollo-mavis-v2/datasets`. `GET /api/datasets/layout` prints the effective roots | `~/data/bc_demo`, `~/data/online_dagger` | the runtime account (`mavis`); created on first use (`mkdir -p`) |
+| GELLO leader calibration (phase-15, 2026-09-09; written by `POST /api/gello/calibrate`, S8.1c) | `gello.calibration_path` in the rendered YAML — repo default `${APOLLO_HOME}/var/gello_calibration.json`; **verify on first deploy** where the lab render puts it (expected under `/var/lib/apollo-mavis-v2/`) | the runtime account (`mavis`) |
 | netsetup system state | `/etc/apollo-mavis-v2/nic_map.json` (written by root) | root |
 | Service unit | `/home/mavis/.config/systemd/user/mavis-runtime.service` | mavis |
 | Logs | `journalctl --user -u mavis-runtime` (as mavis) **and** the runtime's own rotating `$DATA_ROOT/logs/runtime.log` (20 MB × 10; `logging:` block, `LOG_LEVEL` render knob, 2026-09-07); netsetup: `/var/log/mavis-netsetup.log` | `<ws>/var/logs/runtime.log` (rotating) + `runtime.stderr.log` (raw stderr: libsurvive / MuJoCo C prints) |
@@ -177,7 +183,8 @@ Why each group (checked against real node ownership, `ls -la`):
 | `input` | gamepad `/dev/input/event17` (`root:input 0660`) | same rule file |
 | `audio` | `/dev/snd/*` (`root:audio 0660`) | mavis's own PulseAudio must open the RØDE card |
 | `netdev` | — | netsetup's polkit `.pkla` grants NetworkManager control to `unix-group:netdev` |
-| `video`, `dialout` | `/dev/dri/card*`, serial | not needed today; harmless |
+| `dialout` | GELLO leader adapter `/dev/ttyUSB0` (FTDI FT232H `0403:6014`, `root:dialout 0660`; by-id `usb-FTDI_USB__-__Serial_Converter_FTAKROCJ-if00-port0`) | **needed since phase-15 (2026-09-09)**: the runtime's `GelloReader` opens the serial port (16-gello §4, §9.3); `60-apollo-teleop-input.rules` also puts the raw USB node in `dialout` (S5). Was "not needed today; harmless" until then — `mavis` has been in the group since S2 was first run |
+| `video` | `/dev/dri/card*` | not needed today; harmless |
 
 The developer's devices work through `TAG+="uaccess"` ACLs (`user:xiatao:rw-`) that
 logind grants to the **seat owner**. A lingering account never owns a seat, so `mavis`
@@ -222,7 +229,7 @@ uv python install 3.10 3.12                       # hardware pins 3.10, runtime 
 (cd apollo-mavis-v2-core     && uv sync --locked --no-dev)
 (cd apollo-mavis-v2-sim      && uv sync --locked --no-dev)
 (cd apollo-mavis-v2-hardware && uv sync --locked --no-dev)     # needs GitHub: xarm-python-sdk git pin d911319c
-(cd apollo-mavis-v2-runtime  && uv sync --locked --no-dev --extra sim --extra hardware --extra audio)  # ~5 GB (torch cu130, lerobot, mujoco)
+(cd apollo-mavis-v2-runtime  && uv sync --locked --no-dev --extra sim --extra hardware --extra audio --extra gello)  # ~5 GB (torch cu130, lerobot, mujoco); gello = dynamixel-sdk + pyserial (phase-15, 2026-09-09) -- without it GET /api/gello reports no_backend
 # pysurvive is OUT of uv.lock and every plain `uv sync` removes it again -> install last:
 mkdir -p third_party/wheels && cp -n /var/lib/apollo-mavis-v2/wheels/pysurvive-*-cp312-*.whl third_party/wheels/   # from the S2 staging dir
 (cd apollo-mavis-v2-runtime  && uv pip install --no-deps --force-reinstall ../third_party/wheels/pysurvive-1.1.204-cp312-cp312-linux_x86_64.whl)
@@ -370,14 +377,46 @@ The script always had these knobs; this section documents them (2026-09-08).
   add the key under `hardware_session:` in the rendered YAML by hand and restart. (An earlier
   wording listed it among the "carried over" YAML lines; corrected 2026-09-08 late evening.)
 
+### Render knobs added 2026-09-09 (phase-15 GELLO Manipulation; 16-gello §9)
+
+- **`GELLO_BACKEND`** (lab value `dynamixel`; the repo config says `gello.backend: none`): the
+  runtime's `GelloReader` backend — `none` keeps GELLO off (`GET /api/gello` → `no_backend`, the
+  GELLO card cannot start), `fake` is the scripted leader for sim / tests, `dynamixel` opens the
+  real bus (needs the `gello` extra, S3).
+- **`GELLO_USB_SERIAL`** (lab value `FTAKROCJ`): the FTDI adapter's USB serial → `gello.usb_serial`;
+  the reader resolves the `ttyUSB*` node whose sysfs USB parent carries it (the cameras' by-serial
+  precedent), so `/dev/ttyUSB` numbering and plug order do not matter. Empty = the fixed
+  `gello.port` (`/dev/ttyUSB0`).
+- **`GELLO_BAUD`** (empty = `gello.baud: null` = auto-scan 57600 / 1M / 2M / 3M / 4M at connect; the
+  first rate whose broadcast ping is answered wins and is logged): set it once the build's servo
+  baud is known (16-gello §16 item 1 — nothing answered on 2026-09-09, most likely unpowered servos).
+- **`TWIN_OVERLAY_SCENE`** (lab value `mavis_v2_kitchen`; empty = `twin_overlay.scene: null` = the
+  hardware workcell's `digital_twin_scene`, i.e. `mavis_v2`): which scene the session-less
+  `grip_wrist_align` / `view_wrist_align` overlays render. With the kitchen twin the overlays also
+  outline the fridge / range / counter boxes, so their placement can be checked against the real
+  wrist images (16-gello §3: every appliance face is ±3 cm until this check has been done and the
+  YAML nudged — a phase-15 acceptance step). A GELLO session's gate runs on the kitchen twin
+  whatever the overlay shows (16-gello §16 item 6) — keep the two in step.
+- Everything else in the `gello:` block (`scene_id: mavis_v2_kitchen`, the Perception Arm's hold
+  posture `view_posture_rad` / `view_rail_m`, `joint_signs` — operator-owned once set —, the
+  tolerances `engage_tol_rad` 0.10 / `leash_rad` 0.80 / `max_jump_rad` 0.5, `calibration_path`) comes
+  from the repo config (16-gello §9.1); edit the rendered YAML by hand if it ever has to differ.
+
+```bash
+GELLO_BACKEND=dynamixel GELLO_USB_SERIAL=FTAKROCJ TWIN_OVERLAY_SCENE=mavis_v2_kitchen \
+  bash /opt/apollo-mavis-v2/scripts/deploy/render-lab-config.sh     # + DORA_BIND_HOST=wlp38s0 if a viewpoint node should attach; then RESTART
+```
+
+**Restart after every render** applies to these knobs exactly as to the others below.
+
 **Restart after every render or upgrade.** The runtime reads the config ONCE at start
 (`systemctl --user restart mavis-runtime`; the script's last line says so). The same holds
-for the developer's long-running instance: as of 2026-09-08 (late evening) the dev runtime
-(PID 2144376, started 18:00:02 with `var/mavis_v2_local.yaml`, rendered 17:59) runs the 18:00
-snapshot of the working trees — the 05:52 phase-12 / 13 merge plus the morning's PRO-DAgger
-v1.0 code; its config already carries `translate_frame: world`, but nothing from the 18:38
-Online DAgger v2.0 refactor, `start_from_fault_grace_s` or Go to profile is live until it is
-restarted. (An earlier note here named a 01:27 pre-merge process; corrected.)
+for the developer's long-running instance: as of 2026-09-09 the dev runtime (PID 3869832,
+started 04:45:20 with `var/mavis_v2_local.yaml`) runs the phase-12 / 13 / 14 trees exactly as
+committed at 05:46 (ws e16d2c1) — `translate_frame: world`, Online DAgger v2.0, Go to profile
+and `start_from_fault_grace_s` are live; nothing from phase-15 (GELLO, `gello:` block,
+`/api/gello`, the kitchen twin) is, until it is restarted after a re-render. (Earlier notes here
+named the 2026-09-08 18:00 process 2144376 and, before that, a 01:27 one; both are gone.)
 
 ```bash
 bash /opt/apollo-mavis-v2/scripts/deploy/render-lab-config.sh          # -> /var/lib/apollo-mavis-v2/mavis_v2_lab.yaml
@@ -449,6 +488,19 @@ after S7.
    `scripts/tracker/01-sudo-udev-and-deps.sh` only if
    `/etc/udev/rules.d/60-apollo-teleop-input.rules` is missing; the file is installed since
    2026-09-02; `FORCE_UDEV=1` re-runs it). Manual: `bash scripts/tracker/01-sudo-udev-and-deps.sh`.
+
+   **Phase-15 (2026-09-09) adds two rules to the same file** (16-gello §9.3), installed by that
+   script: `SUBSYSTEM=="usb", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="6014", MODE="0660",
+   GROUP="dialout", TAG+="uaccess"` (the GELLO leader's FTDI FT232H adapter) and `ACTION=="add",
+   SUBSYSTEM=="usb-serial", DRIVER=="ftdi_sio", ATTR{latency_timer}="1"` (1 ms USB latency — the
+   kernel default 16 ms caps eight Dynamixel servos at ~30 Hz; the reader logs a WARNING above 2 ms).
+   Because the rule file already exists on apollo-pc-1, `install-system-deps.sh` SKIPS it — re-run
+   with `FORCE_UDEV=1 bash scripts/deploy/install-system-deps.sh` (or `bash
+   scripts/tracker/01-sudo-udev-and-deps.sh` directly); the script also writes `latency_timer` 1
+   into every FTDI port that is already plugged in, because the rule fires on `add` only (otherwise
+   replug the adapter), and adds `dialout` to the invoking developer (`mavis` has it since S2).
+   Verify: `cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer` → `1` (it read 16 on 2026-09-09
+   before the rule), `ls -la /dev/ttyUSB0` → `root dialout 0660`.
 
 2. netsetup install (polkit `.pkla` for group `netdev`, `netdev` membership, the NM
    dispatcher hook `/etc/NetworkManager/dispatcher.d/90-mavis-netsetup` with a venv python
@@ -596,9 +648,12 @@ Read-only script: `bash /opt/apollo-mavis-v2/scripts/deploy/healthcheck.sh`
 (`tracking`/`searching`), and that `GET /` returns the SPA. Manual:
 
 ```bash
-id mavis                                          # render plugdev input audio netdev present
+id mavis                                          # render plugdev input audio netdev dialout present (dialout: GELLO adapter, phase-15)
 loginctl show-user mavis -p Linger                # Linger=yes
 lsusb -d 28de:2101; lsusb -d 19f7:0015             # dongle, RØDE present
+lsusb -d 0403:6014                                 # GELLO leader adapter (FTDI FT232H), phase-15 2026-09-09
+ls -la /dev/serial/by-id/                          # usb-FTDI_USB__-__Serial_Converter_FTAKROCJ-if00-port0 -> ../../ttyUSB0 (root:dialout 0660)
+cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer   # 1 (S5 udev rule); 16 = rule not applied -> leader rate ~30 Hz (S11)
 nmcli -t -f NAME,DEVICE con show --active | grep mavis_    # mavis_manipulation_arm:enp36s0f1, mavis_viewpoint_arm:enp36s0f0
 timeout 2 bash -c 'echo > /dev/tcp/192.168.1.201/502' && echo grip-open
 timeout 2 bash -c 'echo > /dev/tcp/192.168.2.219/502' && echo view-open
@@ -608,7 +663,13 @@ curl -s 127.0.0.1:8765/api/microphones | python3 -m json.tool | grep -E '"status
 curl -s 127.0.0.1:8765/api/cameras | python3 -c 'import json,sys; [print(c["camera_id"], c["live"]) for c in json.load(sys.stdin) if c["kind"] != "sim"]'   # grip_wrist True / grip_wrist_align True / view_wrist True / view_wrist_align True
 curl -s 127.0.0.1:8765/api/tracker/calibration | python3 -m json.tool | grep -E 'yaw_valid|yaw_calibrated_at|applied_yaw'
 curl -s -o /dev/null -w '%{http_code} %{content_type}\n' 127.0.0.1:8765/     # 200 text/html (UI)
+curl -s 127.0.0.1:8765/api/gello | python3 -m json.tool | grep -E '"backend"|"status"|"port"|"baud"|"rate_hz"|"calibrated"|scene_id|hardware_admitted'   # phase-15: backend dynamixel, status connected (servos powered) with rate_hz ~100, scene_id mavis_v2_kitchen, hardware_admitted true; no_backend / stale -> S11
 ```
+
+With `TWIN_OVERLAY_SCENE=mavis_v2_kitchen` (S4, phase-15) the two `*_align` overlays also draw the
+kitchen twin's fridge / range / counter boxes as outlines over the real wrist images — the
+alignment check 16-gello §3 asks for (appliance faces ±3 cm until compared and the scene YAML
+nudged; the Perception Arm at its GELLO hold posture sees the fridge front and the range).
 
 The two `*_align` rows (phase-09a, 2026-09-04) are the digital-twin alignment overlays
 (`kind: twin`, 640×480 @ 12 fps): each is `live: true` only while its real wrist camera is live
@@ -754,6 +815,32 @@ initial condition" when you want a posture measured on the real cell, carriages 
 Designating an initial condition also changes what a collect session's per-episode
 return-to-start aims at when no `start_from` profile is chosen (04-runtime §10.5).
 
+### S8.1c GELLO leader calibration (2026-09-09, phase-15; 16-gello §4, D10)
+
+Session-less and motion-free. Once per GELLO build (and after any servo re-mount): (1) power
+the servos — the adapter alone enumerates (`lsusb -d 0403:6014`) but no servo answers the baud
+scan until they are powered, and `GET /api/gello` stays `no_backend` / `error` (that was the bus's
+state on 2026-09-09); (2) `GET /api/gello` → `status: connected`, `rate_hz` ≈ 100, `q_raw` moving
+as you move GELLO; (3) pose GELLO like the Manipulation Arm stands RIGHT NOW (the read-only
+monitor sample on hardware, the parked posture in sim) and click **Calibrate** in the GELLO sheet
+= `POST /api/gello/calibrate {"op":"match_arm"}` — the runtime stores per-joint offsets (the
+nearest multiple of π/2, the GELLO convention) in `gello.calibration_path`; (4) move each joint
+alone and check its direction in the sheet's raw / mapped table — `gello.joint_signs` are CONFIG
+(operator-owned once set; the calibrate op never writes them: edit the rendered YAML and
+restart); (5) gripper endpoints `{"op":"gripper_open"}` / `{"op":"gripper_closed"}` at the two
+ends — until both exist `gripper_frac` is null and the follower's gripper does not move;
+`{"op":"clear"}` deletes the file. Every op's result is echoed in `GET /api/gello` (`calibrated`,
+`joint_offsets_rad`); 409 while a session runs or without a leader sample. Then the GELLO
+sheet's preview must read `clear` before **Start** is enabled (a collision names the pair and
+tints the bodies red in the PNG — move GELLO and retry, 16-gello §0 item 5).
+
+```bash
+G=127.0.0.1:8765/api/gello
+curl -s $G | python3 -m json.tool | grep -E '"status"|"baud"|"rate_hz"|"calibrated"|q_raw'
+curl -s -X POST -H 'content-type: application/json' -d '{"op":"match_arm","kind":"hardware"}' $G/calibrate | python3 -m json.tool   # ok true, joint_offsets_rad [7 values]
+curl -s -X POST -H 'content-type: application/json' -d '{"kind":"hardware"}' $G/preview | python3 -c 'import json,sys; r=json.load(sys.stdin); print(r["status"], r["detail"], r["pairs"])'   # clear [] -- or collision + the pairs (no motion either way)
+```
+
 ### S8.2 Who owns what — exactly one owner per device
 
 | Resource | Exclusive? | Consequence for a second instance |
@@ -761,6 +848,7 @@ return-to-start aims at when no `start_from` profile is chosen (04-runtime §10.
 | Watchman dongle 28de:2101 | yes (libusb claim) | second libsurvive context → `LIBUSB_ERROR_BUSY`, tracker `error` (retries forever). Only one `tracker.backend: libsurvive` per machine. |
 | RØDE NT-USB Mini | one ALSA card; held by whichever **PulseAudio daemon** has a running stream | the loser's capture gets EBUSY/`absent`. Dev and ops each have their own PA daemon. |
 | xArm control boxes (TCP 502) | one SDK controller at a time | probes are harmless; the read-only monitor and hardware sessions (phase-09c) must never run from two instances — inside one instance the monitor is paused while a session owns a box |
+| GELLO leader adapter FTDI FT232H `0403:6014` (`/dev/ttyUSB0`; phase-15, 2026-09-09) | yes (one opener of the serial port) | a second `gello.backend: dynamixel` gets the port busy / a garbled bus and reports `error`; only one instance per machine may run the dynamixel backend — the other renders `GELLO_BACKEND=none` (or `fake`). Same rule as the dongle: dev runtime vs ops service (S8.4). |
 | Ports 8765 / 5757 | per instance | second instance needs `--port` / `dagger.trainer.port` |
 | NetworkManager profiles | system-wide | only the root dispatcher / one `netsetup` mutates them |
 | GPUs, `/dev/video*`, sim | shareable | — |
@@ -891,7 +979,7 @@ Manual equivalent of the update part:
 source /opt/apollo-mavis-v2/scripts/deploy/_common.sh   # exports UV_PYTHON_INSTALL_DIR + git safe.directory; without it uv fetches private interpreters into ~
 cd /opt/apollo-mavis-v2 && git pull --ff-only && git submodule sync --recursive && git submodule update --init --recursive
 for r in core sim hardware; do (cd apollo-mavis-v2-$r && uv sync --locked --no-dev); done
-(cd apollo-mavis-v2-runtime && uv sync --locked --no-dev --extra sim --extra hardware --extra audio \
+(cd apollo-mavis-v2-runtime && uv sync --locked --no-dev --extra sim --extra hardware --extra audio --extra gello \
   && uv pip install --no-deps --force-reinstall ../third_party/wheels/pysurvive-*-cp312-*.whl \
   && .venv/bin/python -c "import pysurvive")
 (cd apollo-mavis-v2-ui && npm ci --no-audit --no-fund && npm run gen:check && npm run build)
@@ -921,6 +1009,15 @@ still deploys the 2026-09-07 pins (no `dora:`, `datasets:`, `online_dagger:` key
 pre-run install fails on this machine, and `pnpm-lock.yaml` / `pnpm-workspace.yaml` are never
 committed).
 
+State on 2026-09-09: phase-12 / 13 / 14 and the 2026-09-08/09 follow-ups were committed and
+pushed at 05:46 (ws `e16d2c1` pins all five), so `UPDATE=1` now deploys them — re-render so the
+`dora:` / `datasets:` / `online_dagger:` / `translate_frame` keys land. **Phase-15 (GELLO
+Manipulation, `docs/design/16-gello.md`) is in progress in the developer's working trees and
+uncommitted**: an upgrade today gets no `gello:` block, no `gello` extra in `uv.lock` (the
+`--extra gello` above then fails — drop the flag until the runtime pin carries it), no
+`/api/gello` and no `mavis_v2_kitchen` scene. After it is pushed and pinned: `UPDATE=1` →
+re-render with the S4 GELLO knobs → `FORCE_UDEV=1` S5 once (the two new udev rules) → restart.
+
 ---
 
 ## S10. Backup and restore
@@ -932,6 +1029,7 @@ What matters (everything else is rebuildable from git + PyPI):
 | Lighthouse calibration (+ wizard backups) | `/var/lib/apollo-mavis-v2/libsurvive/config.json`, `config.json.bak-*` |
 | Tracker yaw + base-station install record | `/var/lib/apollo-mavis-v2/calibration/tracker_calibration.json`, `base_station-*.json` |
 | Teleop profiles | `/var/lib/apollo-mavis-v2/profiles/` |
+| GELLO leader calibration (phase-15, 2026-09-09; small — redo with S8.1c if lost) | `gello.calibration_path` of the rendered YAML (repo default `${APOLLO_HOME}/var/gello_calibration.json`) |
 | Datasets (episode directories since phase-13; `exports/lerobot_v3/` is a derived export), checkpoints | legacy / generic root `/var/lib/apollo-mavis-v2/datasets/`; **since 2026-09-08 the demonstrations live in `~mavis/data/bc_demo/<name>/` and Online DAgger sessions in `~mavis/data/online_dagger/<session>/` (`session.json`, `rollouts/`, plus whatever the trainer writes there)** — back those two trees up too; `/var/lib/apollo-mavis-v2/checkpoints/` (large) |
 | Lab config, netsetup state | `/var/lib/apollo-mavis-v2/mavis_v2_lab.yaml` (re-renderable, S4), `/etc/apollo-mavis-v2/nic_map.json` |
 | Developer-side originals | `/home/xiatao/.config/libsurvive/`, `/home/xiatao/apollo/{calib,calibration,profiles}` |
@@ -966,7 +1064,7 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 | microphone `absent` / `error: pactl…` | mavis's PulseAudio does not see the card: (a) `XDG_RUNTIME_DIR` unset → service must run under the user manager (it does) — from shells export it; (b) mavis not in `audio` (`/dev/snd/* root:audio 0660`); (c) the developer's PA has a stream open on the RØDE (S8.3, set its card profile off); (d) `pactl info` fails → `systemctl --user status pulseaudio.socket pulseaudio.service` as mavis (**verify on first deploy**: module-udev-detect for a seatless user). Never open `hw:CARD=Mini` directly: EBUSY and it stalls every Pulse recorder. |
 | both wrist-cam tiles black after a reboot (`/api/cameras` `live: false`, log: `select() timeout` / `cannot open`) | cold-boot quirk of the D435i colour UVC stream: it delivers nothing until librealsense has opened the device once. The driver runs `rs-enumerate-devices -s` automatically before the first RealSense open — check `command -v rs-enumerate-devices` (librealsense2-utils, Intel apt repo) and the runtime log for `RealSense wake`; manual fallback: run `rs-enumerate-devices -s`, then restart the service. `rs-enumerate-devices` prints ASIC serials (243522071002 / 327122074467), not the USB serials in the config. |
 | sim previews black / `stream died` in the log, EGL errors | render node permission: mavis needs `render` (`/dev/dri/renderD* root:render 0660`); `/dev/nvidia*` are 0666. Check `MUJOCO_GL=egl` in `systemctl --user show mavis-runtime -p Environment`; `egl_device_id: 0` = PCI 41:00.0. An EGL failure kills only the preview streams, not the runtime. |
-| `POST /api/session` kind=hardware → 409 `<Arm>: rail not homed - home it from the Hardware tab (Home rail) before starting a session` | expected after every power-on (phase-09c): both tracks boot unhomed and a session needs the carriage position for the gate twin — and since phase-09d BOTH arms are always in a session, so both tracks must be homed. Card → **Home rail** → dry-run verdict → confirm (the carriage MOVES to the operator's left end, ≤ 45 s; or, phase-09d, the sheet says `pre-positioning planned` and the ARM MOVES FIRST along the planned path at 10 %, then the carriage — 202 job, watch the phases in the sheet) → `rail 0.000 m`; then check the `*_align` overlay before the session. Other 409s from the same matrix: `hardware sessions support teleop and data collection only (<mode> on hardware: not yet)` (collect is admitted on hardware since 2026-09-07 — 04-runtime §5 / §10.5; DAgger / Online DAgger and inference stay on the Sim tab, 15-online-dagger D7; the pre-2026-09-07 string was `hardware sessions support teleop only`), `hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing [...]` (a client posted a subset — the UI never does since phase-09d; both arms always join, so the Perception Arm must be homed / error-free too), `no monitor sample` (box off / monitor paused), `controller error N is latched - clear errors first` (**Clear errors**; the Perception Arm's `C19` blocked every session until it was fixed in Studio on 2026-09-05), `rail homing in progress` (wait for the carriage / the job), `control box … is unreachable`, `hardware bring-up failed: <Arm>: <stage> - …` (the drivers were torn down again, the monitor resumed — read the stage), `profile motion not collision-free: <failure> (<pair>) - …` (phase-09d: `start_from: profile:<id>` was planned on the gate twin inside bring-up and no collision-free path exists from the measured posture — use `keep_current` or another profile; the session was torn down). |
+| `POST /api/session` kind=hardware → 409 `<Arm>: rail not homed - home it from the Hardware tab (Home rail) before starting a session` | expected after every power-on (phase-09c): both tracks boot unhomed and a session needs the carriage position for the gate twin — and since phase-09d BOTH arms are always in a session, so both tracks must be homed. Card → **Home rail** → dry-run verdict → confirm (the carriage MOVES to the operator's left end, ≤ 45 s; or, phase-09d, the sheet says `pre-positioning planned` and the ARM MOVES FIRST along the planned path at 10 %, then the carriage — 202 job, watch the phases in the sheet) → `rail 0.000 m`; then check the `*_align` overlay before the session. Other 409s from the same matrix: `hardware sessions support teleop and data collection only (<mode> on hardware: not yet)` (collect is admitted on hardware since 2026-09-07 — 04-runtime §5 / §10.5; **GELLO Manipulation is admitted too since phase-15, 2026-09-09 — 16-gello D8, so the string names it as well from that runtime on**; DAgger / Online DAgger and inference stay on the Sim tab, 15-online-dagger D7; the pre-2026-09-07 string was `hardware sessions support teleop only`), `hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing [...]` (a client posted a subset — the UI never does since phase-09d; both arms always join, so the Perception Arm must be homed / error-free too), `no monitor sample` (box off / monitor paused), `controller error N is latched - clear errors first` (**Clear errors**; the Perception Arm's `C19` blocked every session until it was fixed in Studio on 2026-09-05), `rail homing in progress` (wait for the carriage / the job), `control box … is unreachable`, `hardware bring-up failed: <Arm>: <stage> - …` (the drivers were torn down again, the monitor resumed — read the stage), `profile motion not collision-free: <failure> (<pair>) - …` (phase-09d: `start_from: profile:<id>` was planned on the gate twin inside bring-up and no collision-free path exists from the measured posture — use `keep_current` or another profile; the session was torn down). |
 | **Home rail** refused / failed (sheet shows a red verdict or an error, `ok: false`, 409) | `Sweep blocked — no safe pre-positioning path` (`status: refused`, phase-09d) = the twin sweep found a pair within 25 mm somewhere along the 0–0.65 m travel at the arm's current posture (`rail_sweep.first_blocked_m` / `first_blocked_pair`) AND no candidate posture (scene keyframe, `<arm>_home`) is reachable by a rail-position-agnostic path: fold the arm toward the factory-zero posture in xArm Studio (joints 2–7 near 0; or move the other arm) and re-open Home rail — nothing was written. (`Current posture blocks the sweep — pre-positioning planned` is NOT a refusal: confirm and the arm moves first; an older runtime shows `Sweep blocked — homing refused` instead.) 409 `clear errors first` → **Clear errors** first; 409 `end the session first` → end the hardware session; 409 `needs the digital twin` → the lab config lacks `digital_twin_scene` or the runtime venv lacks the sim extra. `ok: false … the arm moved since the sweep was checked` → keep the arm still between the dry run and the confirm. `ok: false … on_zero still 0` after the 30 s SDK wait → the track never reached its zero switch: check the track cable / `hardware_monitor.arms[].rail_*` registers, **Clear errors**, retry. UI `no answer after 60 s` → read the card's rail pill; the runtime may still have finished. While homing the arm reads `stale` + `maintenance_busy` and `POST /api/session` is 409. |
 | after a hardware session an arm is not back at `state 4` / brakes not engaged | `XArmDriver.disconnect()` ends with `set_mode(0)` → `set_state(4)` → `motion_enable(False)` (phase-09c D6) and the track keeps its homed flag. Check `hardware_monitor.arms[].state` once the monitor resumes; if the box still reports enabled, the disconnect writes failed (runtime log) — disable it from xArm Studio, never leave the cell enabled unattended. |
 | rail-homing job `failed` (phase-09d; the sheet marks a phase red, toast `<Arm> · rail homing job failed during <phase>: …`, `GET /api/hardware/arms/<id>/maintenance/last` → `ok: false`) | the runtime tore the job down (arm stopped + braked where it was, monitor resumed, `maintenance_busy` cleared — nothing half-connected). Read the detail: `arm moved since the sweep` (> 0.02 rad between dry run and confirm — keep it still), `session slipped in` / `rail homing in progress` (retry), a driver fault or the gate holding during `positioning` (30 s or 3× the estimate; the posture must land within 0.05 rad — an obstacle / the other arm is in the way: check the overlay, fold in Studio), `on_zero still 0` after `home_rail()` (track cable / registers, **Clear errors**, retry), register verification (`rail_homed` / `rail_enabled` not both true). The arm stays wherever the job stopped it — look before re-opening Home rail; the next dry run plans from that posture. |
@@ -986,6 +1084,11 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 | `GET /api/dora` → `enabled: false` / `external.state: disabled` although `DORA_BIND_HOST` was set | re-render and restart; `bind_host` was `0.0.0.0` or an arm-link address (the runtime refuses both), or the interface name is not up (`ip -4 addr show wlp38s0`). The token file is `<dora.var_dir>/.dora-token`. A dead remote daemon makes the coordinator answer 429 for ~50 s. |
 | Online DAgger sheet: Start disabled / `POST /api/session` 409 (phase-14) | read the reason: `no external policy attached (...)` = no node / no `spec` heartbeat within 3 s (start the policy node, S8.5); `no Online DAgger trainer attached (the policy node does not report the online_dagger capability)` = node started without `--online-dagger`; `Online DAgger session '<s>' already exists - resume it or pick another name` (the sheet offers Resume) / `... not found` (resume of a name that does not exist) / `session.json is unreadable - fix or remove it`; `dataset 'online_dagger/<s>' is being exported - retry in a moment`; `hardware sessions support teleop and data collection only` = Online DAgger is sim-only until the operator admits it (D7). A trainer whose OWN config needs an offline dataset (the PRO-DAgger reference: `offline_dataset` under `~/data/bc_demo/<name>`) reports that as `trainer_status.state: error` — record demonstrations first, the runtime does not check it. Once running: `episode_new` refused with `waiting for the trainer to report ready (...)` until the trainer's first `ready` for this session, `training in progress (...)` while it trains, `trainer error: ...`, `no Online DAgger trainer attached` when its status went stale — expected. |
 | Online DAgger session stuck in `WAITING FOR TRAINER` although the trainer says ready | the trainer's `trainer_status` does not echo the runtime's `session_id` (15-online-dagger §3; `null` counts as alive only) — fix the trainer (the shipped `OnlineDaggerLoop` / `FakeTrainer` do echo it); also check `spec` heartbeats are < 3 s apart (`telemetry.external.state`). |
+| `GET /api/gello` → `status: no_backend` (GELLO sheet: leader pill grey, Start disabled; phase-15, 2026-09-09) | one of three: (a) the runtime venv lacks the `gello` extra — `uv sync … --extra gello` (S3 / S9); `.venv/bin/python -c "import dynamixel_sdk, serial"` must work; (b) `gello.backend` is `none` in the rendered YAML — `GELLO_BACKEND=dynamixel`, re-render, restart (S4); (c) the servos are unpowered or answer none of the scanned rates — the adapter enumerates fine without them (`lsusb -d 0403:6014`, `ls /dev/serial/by-id/`) but the broadcast ping gets no reply at 57600 / 1M / 2M / 3M / 4M: check the servo power supply, then the ids (`gello.joint_ids` 1–7, `gripper_id` 8) and set `GELLO_BAUD` once known (16-gello §16 item 1 — this was the bus's state on 2026-09-09). |
+| `GET /api/gello` → `status: stale` (`age_s` growing, `rate_hz` 0; Cockpit `NO LEADER`, the follower holds) | the bus stopped answering mid-run: USB cable / adapter unplugged (`ls /dev/serial/by-id/` empty, `dmesg -w` shows `ftdi_sio … disconnected`), servo power lost, or a servo reset. The reader restarts with backoff by itself; the follower HOLDS the last command (`no_leader`) and re-engages automatically once fresh samples are within the engage tolerance (16-gello §6.1). Replug / re-power; no restart needed. |
+| `GET /api/gello` → `status: error`, log `Permission denied: '/dev/ttyUSB0'` | the runtime account is not in `dialout` (`id mavis`; `sudo usermod -aG dialout mavis`, then restart `user@<uid>` so the manager carries the group) or the udev rule is missing (`ls -la /dev/ttyUSB0` must read `root dialout 0660`; `FORCE_UDEV=1 bash scripts/deploy/install-system-deps.sh`, S5). A lingering account gets nothing from `TAG+="uaccess"` — only the GROUP fallback counts. |
+| leader `rate_hz` ≈ 30 instead of ≈ 100; runtime log `WARNING … latency_timer 16 ms` at connect | the ftdi_sio `latency_timer` rule did not apply (it fires on `add` only): `cat /sys/bus/usb-serial/devices/ttyUSB0/latency_timer` → 16. Replug the adapter after installing the S5 rules, or once by hand `echo 1 \| sudo tee /sys/bus/usb-serial/devices/ttyUSB0/latency_timer`, then restart the runtime. 16 ms per USB transfer caps eight servos at ~30 Hz — the follower still works but lags. |
+| GELLO sheet: `collides: <a> ↔ <b> at N mm` / `POST /api/session` 409 `GELLO posture collides: <a> / <b> at <mm> mm - move GELLO and retry` | by design (16-gello §0 item 5, D4): the leader's posture, placed on the kitchen twin with the Perception Arm at its hold posture, hits an appliance / the table / the other arm — nothing moved. Move GELLO until the preview reads `clear` (the PNG tints the colliding bodies red), then Start. `joint_limit` = the leader is outside the xArm's joint range; `not_calibrated` → S8.1c; `GELLO leader not available (…)` → the rows above. |
 | Hardware session started from a profile but the arms are still at the measured posture; amber `SESSION — start_from refused: <Arm> faulted (controller state <n>, code C<k>) - use Clear errors & resume, then Go to profile` in the Cockpit | 2026-09-08 evening: a controller fault (or a RECOVERING arm whose inputs are still held) outlasted `hardware_session.start_from_fault_grace_s` (3.0 s) — nothing moved, the session is RUNNING. Do what the banner says: **Clear errors & resume**, then Cockpit → profile row → **Go to profile** (twin-planned, gated, any input cancels). Before the grace existed the one-tick RECOVERING right after enabling refused the plan silently (03:25 / 18:44 logs). |
 
 ---
@@ -1050,3 +1153,10 @@ dora 外部接口（端口 6113 / 53391 / 7447，绝不 `0.0.0.0`）；Online DA
 在 policy 仓自己启动的 `mavis-policy-node --online-dagger <fake|pkg.mod:make_trainer> [--trainer-config …]` 进程里（S8.5），skill 用
 `curl -s http://<lab-host>:8765/api/online_dagger/skill.tgz | tar xz -C ~/.claude/skills/` 安装（→ `mavis-online-dagger-trainer/`）；
 改配置或升级后**必须重启** runtime。
+
+2026-09-09：phase-12 / 13 / 14 已于 05:46 提交推送（ws e16d2c1，`UPDATE=1` 即可部署）；phase-15 **GELLO Manipulation**（被动 GELLO leader 臂在
+关节空间驱动 Manipulation Arm、Perception Arm 跟随外部 viewpoint 节点、厨房孪生 `mavis_v2_kitchen`、真机放开；契约 `docs/design/16-gello.md`）
+实施中、未提交。落地时：runtime `uv sync … --extra gello`（S3 / S9）；udev `0403:6014` → `dialout` + ftdi_sio `latency_timer` 1 ms
+（本机已有规则文件，须 `FORCE_UDEV=1 bash scripts/deploy/install-system-deps.sh` 重跑，S5）；渲染
+`GELLO_BACKEND=dynamixel GELLO_USB_SERIAL=FTAKROCJ TWIN_OVERLAY_SCENE=mavis_v2_kitchen`（S4）后重启；舵机通电后按 S8.1c 标定
+（`POST /api/gello/calibrate {op: match_arm}`）；`*_align` 叠加核对厨房箱体（±3 cm）；排障见 S11（`no_backend` / `stale` / 权限 / `latency_timer` 16）。

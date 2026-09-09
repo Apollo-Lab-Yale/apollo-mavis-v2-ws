@@ -457,6 +457,58 @@ Phase behavior (identical skeleton for all four modes; overview §4):
    (the SDK `x_code` title, e.g. `controller error 24: Speed Exceeds Limit`,
    kept through RECOVERING, `""` when running) and `arms[*].recovering`.
 
+### 5.1 GELLO Manipulation launch (phase-15, 2026-09-09; 16-gello §5)
+
+`mode: gello` (core `SessionSpec.gello: GelloSessionConfig{viewpoint: auto | external |
+hold}`, `start_from` MUST be `keep_current`, no task / dataset / policy / online_dagger)
+is admitted on BOTH workcells — `_validate_hardware` lists it beside teleop and collect
+(16-gello D8; the 409 for the rest now reads `"hardware sessions support teleop, data
+collection and GELLO Manipulation only (<mode> on hardware: not yet)"`). The launch is
+**check → plan → move (one arm at a time) → engage**:
+
+1. **Check** (`SessionManager._check_gello`, BEFORE any side effect, after `_validate` /
+   `_validate_hardware`, in this 409 order): both arms in the session (`"GELLO Manipulation
+   needs both arms in the session (Manipulation Arm + Perception Arm) - missing [...]"`);
+   the leader (`"GELLO leader not available (<status / detail>)"` — reader absent, not
+   `connected`, uncalibrated, stale or invalid sample); `q_goal["grip"] = unwrap(leader,
+   q_meas) + the measured rail` (the monitor sample on hardware — `frozen_state`, rail flip /
+   fallback as for the twin arms; the launched scene's KEYFRAME in sim, which is what
+   `SimWorkcell.start` resets to) inside the joint-limit table less 0.5° (`"GELLO posture
+   outside the Manipulation Arm's joint limits (joint N = x.xx rad, limit ±y.yy)"`);
+   `q_goal["view"] = gello.view_posture_rad + [gello.view_rail_m]`; the kitchen twin at the
+   full goal (`GelloPreviewService.evaluate` — the SAME cached twin per (kind, scene) that
+   serves `POST /api/gello/preview`, with the scene's `graspable` handles whitelisted
+   against the gripper, D7) → `"GELLO posture collides: <a> / <b> at <mm> mm[, …] - move
+   GELLO and retry"` (every pair, tightest first); `viewpoint: external` → the hub's fresh
+   spec must be compatible with the view layout (`"no external viewpoint node attached
+   (…)"`, `"viewpoint node action_names … != view layout …"`, frame / state-name
+   variants — `gello/viewpoint.py::compatibility`).
+2. **Bring-up**: the loop is a `GelloLoop` (§6.1) with NO tracker provider (D9). Sim: the
+   mode branch of `_bringup_sim` on the requested scene (the UI sends `mavis_v2_kitchen`);
+   hardware: `connect_hardware_rig(tracker=False, loop_factory=…, grasp_whitelist=True)` —
+   the rig is unchanged otherwise. Both twins get `set_grasp_whitelist("grip",
+   scene.meta.graspable)`.
+3. **The start motion** replaces `start_from`: `PlanRequest(q_start = measured, q_goal = the
+   checked goals, speed_scale)` on the session twin — hardware INSIDE bring-up like
+   `_plan_profile_start` (`_plan_gello_start`, into `ActiveSession.planned_start`), sim in
+   `_start_from_worker` — executed by the usual `_start_from_worker` → `_execute_arms` path
+   (one arm at a time in `arm_order`, `plan_gate_hold_s`, `start_from_fault_grace_s`,
+   measured arrival, `start_from_progress` / `plan_status` on the wire) INSIDE the loop's
+   motion window (`gello_motion {active}`, an internal command): GELLO reads `motion` for
+   the whole sequence and the engage rule runs ONCE when the window closes — `tracking`
+   within `engage_tol_rad`, else `out_of_sync` with the per-joint deltas in telemetry.
+   A plan failure (`no_escape`, `goal_in_collision`, `timeout`) is NOT a 409 on either kind:
+   the arms stay where they are, the session runs, GELLO reads `out_of_sync` and
+   `session.fault_detail` carries `"GELLO launch motion not planned: <failure> (<pair>) -
+   the arms have not moved; move GELLO toward the arm (or Go to profile) and Resume"`.
+4. **In-session motions** (`R`, `goto_profile`, `POST /api/session/return_home`) keep their
+   targets and their two-phase, one-arm-at-a-time execution; in gello mode each one first
+   forces `paused` (the loop's `_op_reset_to_initial` / `_op_goto_profile` before the manager
+   hook; the manager's `_return_to_initial_motion` again through `gello_pause` before the
+   first plan) and holds the motion window across both phases, leaving GELLO `paused`
+   afterwards — the operator presses **Resume**. `teardown()` produces no motion; the
+   viewpoint source is stopped after the loop (`policy_reset{session_stop}`).
+
 ## 6. Control loop — teleop pipeline
 
 `ControlLoop.tick()` at 100 Hz, all modes (order fixed):
@@ -956,6 +1008,64 @@ class StateSnapshot:
     gate: CollisionReport; clearances: list[tuple[tuple[str, str], float]]
     episode: EpisodeStatus | None; watchdog_tripped: bool
 ```
+
+### 6.1 GELLO source — `GelloLoop` and the engage machine (phase-15; 16-gello §6)
+
+`gello/loop.py::GelloLoop(ControlLoop)` is the mode loop of a GELLO Manipulation session
+(the `GatedPolicyExecutor` pattern): `active_arm` pinned to the Manipulation Arm,
+`_resolve_arms` = `grip: stopped → hold | plan active (or the manager's motion window) →
+_plan_step | else → _gello_step`; `view: stopped → hold | plan active → _plan_step |
+viewpoint fresh → _viewpoint_step | else hold`. Every hold is "hold the last command".
+
+- **`gello/engage.py::EngageMachine`** (16-gello D3 / §6.1), stepped every tick from the
+  newest `GelloSample` (`RuntimeBus.gello`, written by `devices/gello.py::GelloReader`, §14
+  `gello:`): `no_leader` (sample missing / older than `stale_s` / invalid), `motion` (a plan
+  or the motion window owns the arm), `paused` (sticky: `gello_pause`, every `FaultEvent` /
+  RECOVERING of the Manipulation Arm, and before every planned motion — left only by
+  `gello_resume`), the engage rule `max_j |unwrap(q_leader)_j − q_meas_j| ≤ engage_tol_rad`
+  (0.10) → `tracking` (the ±2π branch of joints 1/3/5/7 fixed here), else `out_of_sync`;
+  while tracking the leash `max_j |q_leader_j − q_cmd_j| > leash_rad` (0.80) → `out_of_sync`
+  (re-engagement is automatic once the rule passes again). The pause reason survives a
+  motion window (`"paused: Return to the initial condition"`).
+- **`_gello_step`** (tracking only): `q[:7] = clip(unwrap(sample.q))`, `q[7]` from
+  `_rail_rate(self.sources)` (←/→ from every source at that source's scale — exactly the
+  rail-only branch of `_teleop_step`; the rail keys work in EVERY GELLO state), the gripper
+  `round(gripper_frac / gripper_quantum) · gripper_quantum` through `ArmSender.put_gripper`
+  on the policy path's cadence (`GRIPPER_SEND_EVERY_N_TICKS`) whenever the quantised value
+  changed. `held_to_twist` is never called for translate / rotate / gripper / clutch keys and
+  `_gripper_step` is a no-op: nothing but the leader and ←/→ can move the Manipulation Arm.
+  The result passes `_cap_joint_step` and the gate like every other source; the tick reports
+  `CommandSource.GELLO`. In SIM the loop lowers `dq_max_rad` AND `jog.slew_rad_per_tick` to
+  `gello.max_joint_vel_rad_s / rate_hz × speed_scale` (0.006 rad/tick at 100 %) — the hardware
+  streamer's cap, applied BEFORE the base class builds its `PlanExecutor` (`sim_gello_caps`, the
+  `apply_teleop_caps` + `apply_executor_caps` pairing; 2026-09-09 review: the executor left at
+  0.02 rad advanced its waypoint index while the cap held the command short and every planned
+  motion cut its corners) — so a sim proof-of-motion has the hardware's lag (the kitchen e2e
+  measures a 0.6 rad/s follow). The gripper is re-sent whenever the leader's quantised value
+  differs from the value IN FORCE (`_grip_frac`, also written by a profile's gripper target
+  and by a recovery re-seed). `unwrap_to_reference` is limit-aware (16-gello §15.2 item 11).
+- **`_viewpoint_step`**: the Perception Arm's block from the `ViewpointSource` (§13.3
+  `gello.viewpoint`; `gello/viewpoint.py`) through the Online DAgger application path —
+  `split_action` over `arms_meta = [("view", has_rail)]`, `ActionAnchor.apply_delta`
+  (measured ⊕ Δ → IK, `SlewLimits`), the rail delta, the gripper dim ignored — then the cap
+  and the gate. The source attaches only while the session is RUNNING and no planned motion
+  owns the arm; a NaN three-strike pauses it until the operator's Resume.
+- **Faults**: a `FaultEvent` / RECOVERING of the Manipulation Arm forces `paused`; the
+  RECOVERING exit rule (§15 "no live input") treats a TRACKING GELLO as live input and a
+  paused / out-of-sync / leaderless one as released.
+- **Actions**: `gello_pause` / `gello_resume` (idempotent; no key — the keymap is
+  operator-owned; `gello_resume` is nacked `"planned motion in progress - Resume after it
+  ends"` while the manager's motion window or an executor plan owns the Manipulation Arm, and
+  `R` / `goto_profile` pause the follower only once accepted — 2026-09-09 review; outside a
+  gello session both nack `"not a GELLO Manipulation session"`, the base `ControlLoop`
+  handler); `switch_arm` / `switch_arm_prev` nack `"GELLO drives the Manipulation Arm;
+  the Perception Arm follows the viewpoint node"`, `takeover*` / `handback` `"takeover not
+  available in GELLO Manipulation"`, the episode ops `"GELLO Manipulation records nothing (v1)
+  - no episodes"`, `joint_target` `"joint panel not available in GELLO Manipulation (…)"`;
+  `train_now` keeps `"not an Online DAgger session"`; `tracker_settings` is unaffected.
+- **Health line**: ` gello=<state> age=<ms> lag=<rad>[ viewpoint=attached|hold|paused(<n> NaN)]` after the
+  tracker segment (`ControlLoop._mode_health`); `session_extra["gello"]` carries the session
+  half of the telemetry block (§13.3).
 
 ## 7. Direct joint-control path (jog / goto)
 
@@ -1896,7 +2006,7 @@ generated from them — 05-ui §2). Errors: `{"detail": str}` with 4xx/5xx.
 | `DELETE /api/profiles/{id}` | → 204 | 409 if it is the designated initial condition |
 | `GET /api/policies` | → `PolicyInfo[]{policy_id, path, action_space, action_frame, policy_version, promoted}` | checkpoint registry for dagger/inference (core §12 model) |
 | `GET /api/session` | → `SessionInfo` \| 404 | reconnect resync |
-| `POST /api/session` | `SessionSpec{…, speed_scale}` → `SessionInfo{session_id, epoch, mode, arms, streams, state, kind, speed_scale}` | 409 if a session exists, a tracker calibration is in progress (`"tracker calibration in progress"`, phase-10), requested `kind` unavailable, scene/arm mismatch, dagger without a policy, or inference with no promoted deploy checkpoint (`policy=None` resolves to latest for dagger, promoted deploy for inference — 12-dagger §9). Returns after BRINGUP; START_FROM progress via telemetry. `streams` = camera ids + `"sim"` and/or `"twin"` (sim); `[]` for a hardware session (the preview cameras are ADOPTED, not re-added — §13.4). **Hardware refusal matrix (phase-09c/09d, `SessionManager._validate_hardware`, all before anything is touched; `detail` substrings):** `mode ∉ {teleop, collect}` → `"hardware sessions support teleop and data collection only (<mode> on hardware: not yet)"` (collect admitted 2026-09-07, §10.5; a collect body is additionally checked by `_check_dataset_spec` BEFORE this matrix — 409 `"dataset … already exists …"` / `"unknown dataset … start it as a new dataset instead"` / `"… is being exported - retry in a moment"` / `"… is a legacy LeRobot v3 dataset (read-only) …"`, and after connect by `dataset_incompatibility` → 409 `"dataset … cannot be continued by this session: <why> …"`; `return_to_start` without a return profile → 409; no live hardware camera → 409 `"data collection needs at least one live hardware camera …"`); empty arms → `"session needs at least one arm"`; an arm outside `workcells.hardware.arms` / outside the twin scene → `"arms [...] not in the hardware workcell"` / `"… not in scene"`; **not EVERY configured arm (phase-09d)** → `"hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing ['view'] (phase-09d: both arms are always part of the session)"`; no / unknown `digital_twin_scene` (or the `[sim]` extra missing); no read-only monitor configured → `"no read-only hardware monitor - the digital twin cannot be posed for the gate"`; a rail homing in flight on ANY arm (`maintenance_busy`: the monitor op OR a phase-09d `RailHomingJob`) → `"rail homing in progress on the Perception Arm - wait for it to finish"`; per selected arm (user-facing name first): the read-only monitor not `running`/`stale` or without a sample → `"Manipulation Arm: no monitor sample (monitor error: …) - the read-only monitor must be connected before a hardware session (the digital twin cannot be posed)"`; probe `refused`/`unreachable` → `"…: control box 192.168.1.201 is unreachable - power it on / check the network first"`; `error_code != 0` → `"…: controller error 31 is latched - clear errors first"`; the twin expects a rail the monitor did not find → `"…: the digital twin 'mavis_v2' expects a linear track but the monitor found none"`; `rail_present and not (rail_homed and rail_enabled)` → **`"Manipulation Arm: rail not homed - home it from the Hardware tab (Home rail) before starting a session (carriage position unknown)"`**; `start_from` profile not covering the arms. Post-connect: a monitor poll thread still inside the SDK after 15 s, a per-arm bring-up error (`"hardware bring-up failed: Manipulation Arm: rail - [rail] …"`), a connected arm whose track is not `ready` (`"… rail - linear track error after connect (carriage position unknown …)"`), a dof mismatch with the twin, a stale first state, or — phase-09d — a `start_from` profile motion the gate twin cannot plan (`"profile motion not collision-free: goal_in_collision (grip_right_inner_knuckle / table) - the digital twin found no safe path from the measured posture to profile '…'"`) → teardown + 409. `hardware_session_active` (the monitor hand-over predicate) turns true only AFTER this matrix passed, right before `_bringup_hardware` pauses the monitor: a refused request never flips it (a supervisor round inside the validation window would otherwise disconnect the monitors and 409 with "monitor paused"). `speed_scale` outside (0, 1] is pydantic's 422. `GET /api/session` answers `state: bringup` while the hardware bring-up runs (D5). **Online DAgger (2026-09-08 evening, §10.7; 15-online-dagger §3 / §7 / §12; the morning's "PRO-DAgger" text with its `offline dataset …` 409s is superseded):** a body with `online_dagger` set (`mode: dagger`, `policy_source: external`) is additionally checked by `_check_online_dagger` AFTER `_check_dataset_spec` + the hardware matrix and BEFORE `_check_return_to_start` — 409 `"Online DAgger session '<s>' already exists - resume it or pick another name"`, `"Online DAgger session '<s>' not found"`, `"Online DAgger session '<s>': session.json is unreadable - fix or remove it"`, `"dataset 'online_dagger/<s>' is being exported - retry in a moment"` (or the legacy-tree text), `"no external policy attached (dora bridge is not attached)"` / `"no external policy attached (no policy_spec heartbeat within 3 s)"`, `"no Online DAgger trainer attached (the policy node does not report the online_dagger capability)"`; `return_to_start` without a return profile is 409 for dagger too (D6). 422: `"online_dagger requires mode dagger"`, `"online_dagger requires policy_source 'external'"`, `"online_dagger derives the rollouts dataset - leave dataset unset"`, `"return_to_start is a collect / dagger-mode field"`, unknown `online_dagger` keys (`extra="forbid"`), `session_name` > 64 chars / off `SLUG_RE`. `SessionInfo` echoes `online_dagger` (and `policy_source`, `fault_detail`; not `dataset` / `return_to_start`) |
+| `POST /api/session` | `SessionSpec{…, speed_scale}` → `SessionInfo{session_id, epoch, mode, arms, streams, state, kind, speed_scale}` | 409 if a session exists, a tracker calibration is in progress (`"tracker calibration in progress"`, phase-10), requested `kind` unavailable, scene/arm mismatch, dagger without a policy, or inference with no promoted deploy checkpoint (`policy=None` resolves to latest for dagger, promoted deploy for inference — 12-dagger §9). Returns after BRINGUP; START_FROM progress via telemetry. `streams` = camera ids + `"sim"` and/or `"twin"` (sim); `[]` for a hardware session (the preview cameras are ADOPTED, not re-added — §13.4). **Hardware refusal matrix (phase-09c/09d, `SessionManager._validate_hardware`, all before anything is touched; `detail` substrings):** `mode ∉ {teleop, collect}` → `"hardware sessions support teleop and data collection only (<mode> on hardware: not yet)"` (collect admitted 2026-09-07, §10.5; a collect body is additionally checked by `_check_dataset_spec` BEFORE this matrix — 409 `"dataset … already exists …"` / `"unknown dataset … start it as a new dataset instead"` / `"… is being exported - retry in a moment"` / `"… is a legacy LeRobot v3 dataset (read-only) …"`, and after connect by `dataset_incompatibility` → 409 `"dataset … cannot be continued by this session: <why> …"`; `return_to_start` without a return profile → 409; no live hardware camera → 409 `"data collection needs at least one live hardware camera …"`); empty arms → `"session needs at least one arm"`; an arm outside `workcells.hardware.arms` / outside the twin scene → `"arms [...] not in the hardware workcell"` / `"… not in scene"`; **not EVERY configured arm (phase-09d)** → `"hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing ['view'] (phase-09d: both arms are always part of the session)"`; no / unknown `digital_twin_scene` (or the `[sim]` extra missing); no read-only monitor configured → `"no read-only hardware monitor - the digital twin cannot be posed for the gate"`; a rail homing in flight on ANY arm (`maintenance_busy`: the monitor op OR a phase-09d `RailHomingJob`) → `"rail homing in progress on the Perception Arm - wait for it to finish"`; per selected arm (user-facing name first): the read-only monitor not `running`/`stale` or without a sample → `"Manipulation Arm: no monitor sample (monitor error: …) - the read-only monitor must be connected before a hardware session (the digital twin cannot be posed)"`; probe `refused`/`unreachable` → `"…: control box 192.168.1.201 is unreachable - power it on / check the network first"`; `error_code != 0` → `"…: controller error 31 is latched - clear errors first"`; the twin expects a rail the monitor did not find → `"…: the digital twin 'mavis_v2' expects a linear track but the monitor found none"`; `rail_present and not (rail_homed and rail_enabled)` → **`"Manipulation Arm: rail not homed - home it from the Hardware tab (Home rail) before starting a session (carriage position unknown)"`**; `start_from` profile not covering the arms. Post-connect: a monitor poll thread still inside the SDK after 15 s, a per-arm bring-up error (`"hardware bring-up failed: Manipulation Arm: rail - [rail] …"`), a connected arm whose track is not `ready` (`"… rail - linear track error after connect (carriage position unknown …)"`), a dof mismatch with the twin, a stale first state, or — phase-09d — a `start_from` profile motion the gate twin cannot plan (`"profile motion not collision-free: goal_in_collision (grip_right_inner_knuckle / table) - the digital twin found no safe path from the measured posture to profile '…'"`) → teardown + 409. `hardware_session_active` (the monitor hand-over predicate) turns true only AFTER this matrix passed, right before `_bringup_hardware` pauses the monitor: a refused request never flips it (a supervisor round inside the validation window would otherwise disconnect the monitors and 409 with "monitor paused"). `speed_scale` outside (0, 1] is pydantic's 422. `GET /api/session` answers `state: bringup` while the hardware bring-up runs (D5). **Online DAgger (2026-09-08 evening, §10.7; 15-online-dagger §3 / §7 / §12; the morning's "PRO-DAgger" text with its `offline dataset …` 409s is superseded):** a body with `online_dagger` set (`mode: dagger`, `policy_source: external`) is additionally checked by `_check_online_dagger` AFTER `_check_dataset_spec` + the hardware matrix and BEFORE `_check_return_to_start` — 409 `"Online DAgger session '<s>' already exists - resume it or pick another name"`, `"Online DAgger session '<s>' not found"`, `"Online DAgger session '<s>': session.json is unreadable - fix or remove it"`, `"dataset 'online_dagger/<s>' is being exported - retry in a moment"` (or the legacy-tree text), `"no external policy attached (dora bridge is not attached)"` / `"no external policy attached (no policy_spec heartbeat within 3 s)"`, `"no Online DAgger trainer attached (the policy node does not report the online_dagger capability)"`; `return_to_start` without a return profile is 409 for dagger too (D6). 422: `"online_dagger requires mode dagger"`, `"online_dagger requires policy_source 'external'"`, `"online_dagger derives the rollouts dataset - leave dataset unset"`, `"return_to_start is a collect / dagger-mode field"`, unknown `online_dagger` keys (`extra="forbid"`), `session_name` > 64 chars / off `SLUG_RE`. `SessionInfo` echoes `online_dagger` (and `policy_source`, `fault_detail`; not `dataset` / `return_to_start`). **GELLO Manipulation (phase-15, §5.1; 16-gello §9.2):** a `mode: gello` body 409s, after the existing guards, in the order `"GELLO Manipulation needs both arms in the session …"` → `"GELLO leader not available (…)"` → `"GELLO posture outside the Manipulation Arm's joint limits (…)"` → `"GELLO posture collides: <a> / <b> at <mm> mm - move GELLO and retry"` → (`viewpoint: external` only) `"no external viewpoint node attached (…)"` / `"viewpoint node action_names … != view layout …"`; 422 from core: a `task` / `dataset` / `policy` / `online_dagger`, `start_from` other than `keep_current`, `gello` on another mode. `SessionInfo.gello` echoes the block |
 | `POST /api/session/return_home` | → `ReturnHomeResult{ok, status: done\|skipped\|failed\|cancelled\|timeout\|refused, detail, arms, profile_id}` | 2026-09-08 (§10.5). Walk the workcell back to its designated initial-condition profile — joints first with the carriages held, then the carriages, each phase twin-planned + gated + interruptible — and report where the arms ended up. **SYNCHRONOUS**: the Cockpit's "End session" awaits it before the DELETE (05-ui §8.2), which is why the client deadline is 240 s while the runtime bounds each phase by the plan's own budget. Operational refusals are a **200 with `ok: false`**, never an HTTP error: no session (`refused`, `"no active session"`), an open episode (`refused`), a non-running or faulted session (`failed`), an unplannable path (`failed`, the twin's reason + failing pair), operator input (`cancelled`), a gate hold past budget (`timeout`). `skipped` is a SUCCESS — no initial condition designated for this kind, the profile covers no session arm, or the arms are already there. The `reset_to_initial` key (`R`) fires the same motion over /ws/control, fire-and-forget |
 | `DELETE /api/session` | → 204 | TEARDOWN (idempotent). Cancels an in-flight plan and produces **no motion of its own** — the return above is a separate, explicit call |
 | `GET /api/datasets` | → `DatasetInfo[]` | 2026-09-07 (§10.6; core §12): every dataset under `datasets_root`, newest first — `repo_id`, `root`, `layout: episode_dirs \| lerobot_v3`, `total_episodes`, `total_frames`, `fps`, `robot_type`, `kind`, `task`, `cameras`, `arms`, `modified_at`, `in_use`, `export {state: none\|stale\|fresh\|running\|failed, path, at, episodes}`. Reads `manifest.json` / `episode.json` only (no lerobot import). 2026-09-08: also every dataset under the mapped namespace roots (§10.6 "Per-namespace roots"); rows carry `namespace` + `path` (additive) |
@@ -1914,6 +2024,9 @@ generated from them — 05-ui §2). Errors: `{"detail": str}` with 4xx/5xx.
 | `GET /api/online_dagger/skill` | → `text/markdown; charset=utf-8` (the `SKILL.md`) \| 404 | 2026-09-08 evening (§10.7; 15-online-dagger §7 / §9, D8). Session-less. The skill is package data (`online_dagger/skill/`); `RuntimeConfig.online_dagger.skill_dir` overrides the directory; 404 `"Online DAgger skill not found: <OSError>"` when it has no `SKILL.md`. Superseded (2026-09-08 evening): the morning's `/api/pro_dagger/{skill,skill.tgz,sessions}` rows — those routes never shipped and answer 404 (pinned by `tests/test_server_contract.py`) |
 | `GET /api/online_dagger/skill.tgz` | → `application/gzip`, `Content-Disposition: attachment; filename="mavis-online-dagger-trainer.tgz"` \| 404 | the whole skill directory as a gzip tarball rooted at `mavis-online-dagger-trainer/` (deterministic member order) — `curl -s http://<host>:<port>/api/online_dagger/skill.tgz \| tar xz -C ~/.claude/skills/`; never an empty tarball (404 instead) |
 | `GET /api/online_dagger/sessions` | → `OnlineDaggerSessionInfo[]{session_name, path, created_at, task, rollouts, last_used_at}` | session-less; every `<online_dagger root>/*/session.json` (the mapped `online_dagger` namespace root, else `<datasets_root>/online_dagger`), newest `last_used_at` first; `rollouts` = `current.rollouts_saved`; an unreadable file is skipped with a warning; `[]` when the root does not exist. The launch sheet's resume picker |
+| `GET /api/gello` | → `GelloInfo{backend: dynamixel\|fake\|none, status: no_backend\|starting\|connected\|stale\|error, detail, port, baud, seq, rate_hz, age_s, q_raw, q, gripper_frac, calibrated, joint_offsets_rad, joint_signs, scene_id, scene_label, view_posture_rad, view_rail_m, calibration_path, hardware_admitted, gripper_open_rad, gripper_closed_rad}` | phase-15 (16-gello §4 / §8.4 / §9.2; core §12 `protocol/gello.py`). Session-less: the Runtime-owned `GelloReader`'s device half (the same fields as `telemetry.gello`), the twin the GELLO card launches (`gello.scene_id` = the hidden `mavis_v2_kitchen`, `scene_label` its registry title), the Perception Arm's GELLO hold posture, the calibration file and its echo, `hardware_admitted: true` (D8). Never 409 |
+| `POST /api/gello/calibrate` | `GelloCalibrateRequest{op: match_arm\|gripper_open\|gripper_closed\|clear, kind: hardware\|sim}` → `GelloCalibrateResult{ok, detail, joint_offsets_rad, gripper_open_rad, gripper_closed_rad}` | phase-15 (16-gello §4, D10). Session-less: 409 `"GELLO calibration is not available while a session is active or starting - end the session first"`; the three reading ops 409 `"no fresh GELLO leader sample (status …)"` (`clear` needs no leader; an UNCALIBRATED but fresh, non-jump sample is accepted — `fresh_sample(require_calibrated=False)`, 2026-09-09 review — so the first `match_arm` of a real leader works); `match_arm` 409 `"no fresh monitor sample of the Manipulation Arm (monitor <status>…) - nothing to match against"` (hardware: the monitor must be connected AND the sample younger than `hardware_monitor.stale_s`; the preview reports `no_workcell` on the same condition) / `"the sim workcell has no Manipulation Arm posture …"` (sim) when the arm's current joints are unknown, and stores `round((raw − sign·q_arm) / (π/2))·π/2` per joint in `var/gello_calibration.json` (a `gello.joint_offsets_rad` config value overrides the file — the detail says so); `gripper_open` / `gripper_closed` store the raw gripper reading (409 without a gripper channel); `clear` deletes the file. The reader reloads at once; the result is echoed in `GET /api/gello` |
+| `POST /api/gello/preview` | `GelloPreviewRequest{kind: hardware\|sim, scene?, speed_scale?}` → `GelloPreviewResult{status: clear\|collision\|joint_limit\|no_leader\|not_calibrated\|no_workcell\|scene_error, ok, detail, pairs: [{a, b, dist_m}], q_goal: {grip: [8], view: [8]}, leader_q: [7], image_png_b64, camera}` | phase-15 (16-gello §5.4; §5.1 above). Session-less: the §5.1 launch check on the cached kitchen twin of `(kind, scene or gello.scene_id)` (`gello/preview.py::GelloPreviewService`) plus a PNG of `cam_kitchen` (`cam_front` when the scene lacks it) rendered on a dedicated EGL render thread from a private un-inflated model with the colliding pairs' geoms tinted red (`geom_matid = -1` first — `geom_rgba` is ignored while a material is assigned). **200 for every posture** (`ok` iff `status == clear`; the sheet enables Start on it); 409 only `"no <kind> workcell is configured"`; a scene without both arms is `scene_error`, an unknown Manipulation Arm posture on hardware (no monitor sample) `no_workcell`. Never moves anything; the sheet polls it at 2 Hz (~30 ms with the twin cached) |
 | `GET /api/dora` | → `DoraInfo` | phase-12 (14-dora §2.6, §16): the connection facts foreign clients need (bind host, coordinator / daemon / zenoh ports, `zenoh_connect`, dataflow, placeholders, machines) — never the auth token. `POST /api/dora/machines/{id}/join` → 202 `DoraInfo` \| 404 `"machine '<id>' is not in dora.machines"` (§17) |
 
 **Not REST** (binding decision, 05-ui §4): episode new/save/discard, profile
@@ -1951,6 +2064,10 @@ server-wide, §13.5). ActionName is exactly the core §10 set (mirrored by
 { "t": "action", "name": "joint_target",
   "args": {"arm_id": "arm0", "positions": [/* full q incl. rail slot */],
            "mode": "jog" | "goto"} }
+{ "t": "action", "name": "gello_pause" | "gello_resume" }  // phase-15: GELLO Cockpit buttons,
+                                                            // no key; idempotent (§6.1); nacked
+                                                            // "not a GELLO Manipulation session"
+                                                            // in every other mode
 // server → client, per action:
 { "t": "ack", "name": "...", "ok": true, "detail": "" }
 ```
@@ -2038,6 +2155,18 @@ validating | done | failed`, `done`, `total`, `detail`), built by
 `ws_telemetry` from the export job's progress object the same way
 `build_hardware_monitor_telemetry(runtime)` builds its block; `null` when no
 export has run in this process. Session-less like `microphone`.
+
+**`gello: GelloTelemetry`** (additive, phase-15, 2026-09-09; core §11 `protocol/gello.py` +
+`protocol/telemetry.py`; appended LAST on `TelemetryMsg`, after `datasets`; 16-gello §8.3).
+Always present: the DEVICE half from the Runtime-owned `GelloReader` (`backend, status,
+detail, port, baud, seq, rate_hz, age_s, q_raw, q, gripper_frac, calibrated,
+joint_offsets_rad, joint_signs` — the same fields as `GET /api/gello`, pre-session too) and
+the SESSION half from `session_extra["gello"]` written by the `GelloLoop` every tick
+(`state: no_leader | out_of_sync | tracking | paused | motion`, `state_detail` — the
+operator-facing reason, e.g. `"leader 0.50 rad from the arm (joint 3) - move GELLO within
+0.10 rad"`, `lag_rad[7]` = unwrap(leader) − measured, `max_lag_rad`, `engaged_arm` (`grip`
+while tracking), `viewpoint {mode, attached, policy_id, detail}`), all `None` / `""`
+without a gello session. `ws_telemetry.build_gello_telemetry(runtime, snap, now)`.
 
 **`hardware_monitor: HardwareMonitorTelemetry`** (additive, phase-09a; core §11
 `protocol/hardware_monitor.py`; after `microphone`, before `datasets`). Always present: `{enabled: false, paused: false, arms: [],
@@ -2450,6 +2579,31 @@ hardware_session:            # phase-09c/09d (§5 hardware BRINGUP, §13.1 home_
   home_rail_step_m: 0.005    # D4: 5 mm -> 131 checks over the 0.65 m travel
   bringup_timeout_s: 60.0    # HardwareWorkcell.bring_up budget inside POST /api/session
                              #   and inside the rail-homing job's connect
+gello:                       # phase-15 (16-gello §4 / §9.1): the passive GELLO leader arm
+  backend: none              # none | fake | dynamixel (repo none; lab render GELLO_BACKEND=dynamixel,
+                             #   needs the [gello] extra: dynamixel-sdk + pyserial, imported lazily
+                             #   in devices/gello.py only)
+  port: /dev/ttyUSB0         # serial node; usb_serial (GELLO_USB_SERIAL, e.g. FTAKROCJ) resolves
+  usb_serial: null           #   the ttyUSB node by its sysfs USB serial instead
+  baud: null                 # null = scan 57600 / 1M / 2M / 3M / 4M (GELLO_BAUD pins one)
+  joint_ids: [1, 2, 3, 4, 5, 6, 7]
+  gripper_id: 8              # null = no gripper channel
+  joint_signs: [1, 1, 1, 1, 1, 1, 1]   # OPERATOR-OWNED once set
+  joint_offsets_rad: null    # null = var/gello_calibration.json (POST /api/gello/calibrate match_arm)
+  poll_hz: 100.0
+  stale_s: 0.2               # older sample -> no_leader (hold)
+  max_jump_rad: 0.5          # consecutive raw jump above this -> invalid sample (never a target)
+  engage_tol_rad: 0.10       # leader within this of the measured arm -> tracking
+  leash_rad: 0.80            # leader farther than this from the command while tracking -> out_of_sync
+  gripper_quantum: 0.01
+  max_joint_vel_rad_s: 0.6   # the follower's per-joint cap in SIM too (hardware: ServoLimits)
+  view_posture_rad: [2.646, -1.598, 0.018, 1.637, 0.25, 2.007, 0.029]  # Perception Arm hold posture
+  view_rail_m: 0.0
+  scene_id: mavis_v2_kitchen # the twin the GELLO card launches (hidden from GET /api/scenes)
+  calibration_path: ${APOLLO_HOME}/var/gello_calibration.json
+# twin_overlay.scene (phase-15, 16-gello D6): null = the hardware workcell's digital_twin_scene;
+# the lab render may set mavis_v2_kitchen (TWIN_OVERLAY_SCENE) so the *_align overlays draw the
+# appliance outlines session-less. Only the overlay follows it (gate / sweep twins do not).
 egl_device_id: 0
 logging:                     # 2026-09-07 ("Logging" below)
   level: INFO                # DEBUG | INFO | WARNING | ERROR, both handlers

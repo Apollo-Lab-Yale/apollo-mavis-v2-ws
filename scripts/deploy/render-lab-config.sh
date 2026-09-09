@@ -32,6 +32,15 @@
 #                       (the runtime refuses them and reports `external.state: disabled`).
 #   DORA_MACHINES="gpubox,laptop"  optional comma list of remote consumer machine ids allowed to
 #                       join (`dora.machines`, each with the default viewer + observer placeholders)
+#   GELLO_BACKEND=dynamixel  phase-15 (16-gello §9.3): the GELLO leader arm's reader backend
+#                       (`gello.backend`: none | fake | dynamixel). Empty/unset = leave the repo's
+#                       `none` (GET /api/gello says no_backend). `dynamixel` needs the [gello] extra.
+#   GELLO_USB_SERIAL=FTAKROCJ  `gello.usb_serial`: resolve the ttyUSB node by its FTDI USB serial
+#                       (the lab adapter; empty = keep `gello.port`, /dev/ttyUSB0)
+#   GELLO_BAUD=1000000  `gello.baud`; empty = keep the repo's null (auto-scan 57600 .. 4M)
+#   TWIN_OVERLAY_SCENE=mavis_v2_kitchen  `twin_overlay.scene`: the twin the *_align overlays
+#                       render (16-gello D6: the kitchen so the appliance outlines can be aligned
+#                       session-less); empty = keep null (= the workcell's digital_twin_scene)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_common.sh
@@ -58,6 +67,10 @@ export CAMERA_SERIALS="${CAMERA_SERIALS:-}"
 export TRAINER_PORT="${TRAINER_PORT:-}"
 export DORA_BIND_HOST="${DORA_BIND_HOST:-}"
 export DORA_MACHINES="${DORA_MACHINES:-}"
+export GELLO_BACKEND="${GELLO_BACKEND:-}"
+export GELLO_USB_SERIAL="${GELLO_USB_SERIAL:-}"
+export GELLO_BAUD="${GELLO_BAUD:-}"
+export TWIN_OVERLAY_SCENE="${TWIN_OVERLAY_SCENE:-}"
 # KEEP_REPO_PATHS=1: leave the source config's workspace-relative ${APOLLO_HOME}/var/...
 # data + libsurvive paths untouched (self-contained dev render, scripts/dev/mavis-dev.sh);
 # unset/0 pins the absolute DATA_ROOT paths the FHS ops deploy needs.
@@ -139,6 +152,19 @@ if env["DORA_BIND_HOST"].strip():
     if machines:
         setv(("dora", "machines"), [{"id": m, "placeholders": ["viewer", "observer"]} for m in machines])
 
+# phase-15 (16-gello §9.3): the GELLO leader reader + the overlay twin scene. Empty knobs leave
+# the repo values (backend none, port /dev/ttyUSB0, baud null, twin_overlay.scene null).
+if env["GELLO_BACKEND"].strip():
+    if env["GELLO_BACKEND"].strip() not in ("none", "fake", "dynamixel"):
+        sys.exit(f"GELLO_BACKEND must be none|fake|dynamixel, got {env['GELLO_BACKEND']!r}")
+    setv(("gello", "backend"), env["GELLO_BACKEND"].strip())
+if env["GELLO_USB_SERIAL"].strip():
+    setv(("gello", "usb_serial"), env["GELLO_USB_SERIAL"].strip())
+if env["GELLO_BAUD"].strip():
+    setv(("gello", "baud"), int(env["GELLO_BAUD"]))
+if env["TWIN_OVERLAY_SCENE"].strip():
+    setv(("twin_overlay", "scene"), env["TWIN_OVERLAY_SCENE"].strip())
+
 hw = data.get("workcells", {}).get("hardware")
 if not hw:
     sys.exit("source config has no workcells.hardware block")
@@ -189,6 +215,8 @@ print(f"    cameras: {', '.join(f'{c.id}={c.kind}:{c.serial or c.device_path}:{c
 print(f"    dora: enabled={cfg.dora.enabled} bind_host={cfg.dora.bind_host} auth={cfg.dora.auth_effective} "
       f"ports={cfg.dora.coordinator_port}/{cfg.dora.daemon_port}/{cfg.dora.zenoh_port} "
       f"machines={[m.id for m in cfg.dora.machines]} var_dir={cfg.dora.var_dir}")
+print(f"    gello: backend={cfg.gello.backend} port={cfg.gello.port} usb_serial={cfg.gello.usb_serial} "
+      f"baud={cfg.gello.baud} scene={cfg.gello.scene_id}; twin_overlay.scene={cfg.twin_overlay.scene}")
 for p in (cfg.ui_dist, cfg.tracker.libsurvive_config_path):
     if p is not None and not p.exists():
         print(f"    note: {p} does not exist yet")

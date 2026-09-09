@@ -151,6 +151,7 @@ class SceneMeta:
     title: str | None = None        # display name; runtime SceneInfo.label = title or description
     hidden: bool = False            # dev/CI scene: filtered from list(), still built by id
     microphones: dict[str, bool]    # per arm_id, AFTER SceneOverrides.microphones (§3)
+    graspable: tuple[str, ...] = () # world geoms a session may whitelist against a gripper (§4.1, §4.4)
 
 class SceneRegistry:                # REGISTRY = SceneRegistry() at import,
     def list(self, include_hidden: bool = False) -> list[SceneMeta]: ...  # scans assets/scenes/*.yaml
@@ -162,8 +163,9 @@ class SceneRegistry:                # REGISTRY = SceneRegistry() at import,
 
 `list()` hides `hidden: true` scenes by default so the UI/API (`GET /api/scenes`)
 see exactly one scene — **`mavis_v2`, titled "APOLLO MAVIS V2 Digital Twin"**; the
-eight dev/CI scenes (§4.3) stay in the package for tests, benchmarks and the
-guardrail script, which address them by id.
+eight dev/CI scenes (§4.3) and the hidden GELLO kitchen twin `mavis_v2_kitchen`
+(§4.4, selected implicitly by the GELLO card) stay in the package for tests,
+benchmarks, the guardrail script and the runtime, which address them by id.
 
 ### 4.1 Descriptor schema
 
@@ -189,14 +191,50 @@ arms:                                       # attach prefix "<id>_"
   - {id: right, ...}
 cameras:       # fixed MJCF cameras: xyaxes = image right, image up; looks along -z = -(x cross y)
   - {name: cam_front, pos: [2.0, 0.0, 1.2], xyaxes: [0, 1, 0, -0.5, 0, 1], fovy: 45}
-environment:   # plane | box | mesh; collider: convex_hull | mesh_copy | boxes;
-  - ...        # baked inflated collider copies: visual false, group 3, alpha 0
+environment:   # world geoms: plane | box | mesh (§4.1 "Environment geoms")
+  - {name: table, type: box, size: [0.6, 0.4, 0.015], pos: [0, 0, 0.72],
+     rgba: [0.62, 0.48, 0.32, 1]}                     # collidable (default), MuJoCo group 0
+  - {name: tag_1, type: box, size: [0.0005, 0.1024, 0.1024], pos: [-0.36, -1.0262, 1.489],
+     quat: [0.7071, 0, 0, 0.7071],                    # local +x = outward normal, +z = tag up
+     texture: textures/tagStandard41h12_00001.png,    # asset-relative PNG FILE
+     collidable: false}                               # -> contype = conaffinity = 0, group 1
+  - {name: fridge, type: mesh, mesh: kitchen/fridge.stl, scale: [1, 1, 1],
+     pos: [...], group: 2}                            # file mesh; collider = its convex hull
+graspable: [fridge_door_handle, range_handle]  # optional; world geoms a session may
+               # whitelist against a gripper (DigitalTwin.set_grasp_whitelist); build-checked
 keyframe:      # optional; default = per-arm "home". NOTE: q is MJCF qpos
   left: {q: [0.325, 0, -0.247, 0, 0.909, 0, 1.15644, 0], gripper: 1.0}
                # order (rail slide FIRST, §3) — internal to scene authoring
 allowed_pairs: # optional; structural pairs, twin pair labels (§4.2)
   - [left_rail_platform, table]
 ```
+
+**Environment geoms** (`EnvironmentSpec`; extended 2026-09-09 for the kitchen twin,
+16-gello §10). `type: plane | box` take `size` (MuJoCo half-extents); **`type: mesh`
+is implemented for FILE meshes** (the pre-phase-15 text called it "phase-03+"): `mesh`
+is an asset-relative STL/OBJ under `assets/`, `scale` its per-axis scale, `size` must
+be absent, and the **collider is MuJoCo's convex hull of the mesh** (a mesh_copy or
+box-decomposed collider is not offered). `texture` (asset-relative PNG) makes the
+builder add ONE 2D texture + material per distinct file (`texuniform: false`, material
+`tex_<sanitised path>_mat`) and assign it to the geom; the renderer maps the whole
+image onto each box face with, for the identity quat, the image's right along local +y
+and its top along local +z on the +x face (verified by the kitchen tag-detection test).
+Textures are **files only**: `spec.to_xml()` refuses buffer textures and the XML is
+persisted with every episode, so the builder sets `spec.texturedir = asset_path()`
+beside `meshdir` and the XML carries the relative file name. `collidable: false` sets
+`contype = conaffinity = 0` — the geom is never a contact, never a monitored pair,
+never inflated by the twin, and goes to **group 1** unless `group` (0–5) says otherwise;
+`group` alone overrides MuJoCo's default group 0 for a collidable geom. Mesh / texture
+paths must be relative (no `/` prefix, no `..`) and must exist at build
+(`SceneCompileError` before MuJoCo's compiler sees them).
+
+**`graspable`** (`SceneDescriptor.graspable`, echoed on `SceneMeta.graspable`): world
+geom names a session may whitelist against a gripper — the GELLO session calls
+`DigitalTwin.set_grasp_whitelist("grip", meta.graspable)` so the fingers may touch a
+handle while every arm link stays gated against every appliance body (16-gello D7).
+Validated at build: every name must be a world geom of the built model; the descriptor
+rejects duplicates and names that point at a non-collidable geom (a whitelist on a
+visual-only plate would be a no-op).
 
 `gripper: none` + `wrist_cam: true` composes a **camera-only arm**: the gripper
 subtree is deleted, `link_tcp` sits on the link7 flange, and the D435 + stand
@@ -255,9 +293,12 @@ the debug inflation of 0.025 m. The scene author therefore declares them:
 | `dual_rail_tabletop`, `dual_mixed`, `triple_rail_row` | 2–3 | hidden | composition coverage |
 | `guardrail_env`, `guardrail_face`, `guardrail_rail` | 1–2 | hidden | safety CI cells (§11) |
 | **`mavis_v2`** | 2 | **the only visible scene** — title "APOLLO MAVIS V2 Digital Twin" | **the lab cell**: digital-twin reference for the real arms and a sim scenario |
+| `mavis_v2_kitchen` | 2 | hidden — title "APOLLO MAVIS V2 Kitchen (GELLO)" | the lab cell + the kitchen (fridge, range, counter, cabinets, wall, four AprilTags): the GELLO Manipulation twin, selected implicitly by the GELLO card (§4.4, 16-gello D6) |
 
 `hidden: true` scenes are kept in the package (built by id by tests, benchmarks and
-the guardrail script) but never reach the runtime's `GET /api/scenes` or the UI.
+the guardrail script) but never reach the runtime's `GET /api/scenes` or the UI; the
+kitchen twin is hidden for the same reason — the operator decision "`mavis_v2` is the
+only exposed scene" stays literally true.
 
 **`mavis_v2`** (Apollo lab, tape-measured 2026-09-02; the YAML header carries
 the same numbers — edit there). Arms, user-facing names with the internal ids: the
@@ -337,6 +378,89 @@ make the twin OPTIMISTIC rather than conservative: the real carriage stops 5–6
 short of the rail end where the mesh stops 8.95 cm short, so the monitored
 carriage ↔ obstacle gap is ~3.4 cm generous, and the mesh rail width leaves the
 obstacle's inner face 1.4 cm past the mesh gripper-rail edge.
+
+### 4.4 `mavis_v2_kitchen` (GELLO)
+
+The digital twin of **GELLO Manipulation** mode (phase-15; contract and measurement
+record in `16-gello.md` §3 / §10 — the numbers live THERE and in the YAML header,
+edit both together). `id: mavis_v2_kitchen`, `hidden: true`, `suitable_for: [sim,
+twin]`, title "APOLLO MAVIS V2 Kitchen (GELLO)". The cell geometry is `mavis_v2`'s:
+`arms`, `cam_front` / `cam_top`, `table`, `obstacle`, `allowed_pairs` and the
+Manipulation Arm's keyframe are copied **verbatim** from `mavis_v2.yaml`
+(`tests/test_mavis_v2_kitchen.py` asserts the blocks are equal, so §4.3 stays the one
+authority for the cell). What the kitchen adds:
+
+- **Appliances as dimensioned boxes** on the faces the Perception Arm's wrist D435i
+  measured on 2026-09-09 from the GELLO hold posture (one colour frame + the median of
+  45 depth frames, deprojected with the colour intrinsics and the overlay's `view_wrist`
+  principal-point nudge `[21, 13]`; details in 16-gello §3). The anchor planes: fridge
+  side **x = 0.075**, fridge door **y = −1.027**, range front **y = −1.222**, drawer
+  fronts **y = −1.279**, counter top z = 0.926 (modelled at the 36-inch standard 0.914);
+  the kitchen run is parallel to world X (tags 0 and 4 share x to 1 mm over 88 cm of
+  height). Spec dimensions: GE GDE21ESKSS 29¾ × 69⅞ × 34⅝ in; 30-inch GE range 29⅞ ×
+  47 × 28 in; counter 36 in high, 24 in deep; upper cabinets 12 in deep at 54–84 in.
+  `size` = half-extents, `pos` = centre, computed from these ranges (world metres):
+
+  | geom | x | y | z | note |
+  |---|---|---|---|---|
+  | `fridge_body` | −0.681 … 0.075 | −1.856 … −1.027 | 0 … 1.775 | case + doors |
+  | `fridge_door_handle` | 0.015 … 0.045 | −1.027 … −0.977 | 0.75 … 1.65 | vertical bar, +X edge of the upper door — graspable |
+  | `fridge_drawer_handle` | −0.545 … −0.055 | −1.027 … −0.977 | 0.475 … 0.510 | freezer drawer bar — graspable |
+  | `range_body` | 0.480 … 1.239 | −1.883 … −1.222 | 0 … 0.914 | |
+  | `range_backguard` | 0.480 … 1.239 | −1.883 … −1.783 | 0.914 … 1.194 | |
+  | `range_handle` | 0.530 … 1.189 | −1.222 … −1.172 | 0.600 … 0.630 | oven door bar — graspable |
+  | `counter` | 0.075 … 0.480 | −1.889 … −1.279 | 0 … 0.914 | drawer cabinet between the two |
+  | `upper_cabinet` | 0.075 … 1.289 | −1.883 … −1.578 | 1.372 … 2.134 | |
+  | `kitchen_wall` | −1.00 … 1.50 | −1.933 … −1.883 | 0 … 2.40 | |
+
+  **Accuracy ±3 cm per face** (depth at 1.5–2.2 m ±2–3 cm, camera-model convention
+  ±2 cm) until the `*_align` overlays on this scene have been compared with the real
+  wrist images — a phase-15 acceptance step. Reach: the Manipulation Arm's base line is
+  y = −0.179, so the fridge door / handles (y ≈ −1.03 / −0.98) are at the limit of its
+  reach and the range is beyond it — the fridge is the obstacle that matters for the
+  gate. Not modelled: the cart in front of the fridge, the tripod, the hood, the door as
+  a hinged body.
+- **Four AprilTag plates** (`tag_0`, `tag_4` on the fridge's +X side panel at
+  x = 0.0755, `tag_1` on the fridge door at y = −1.0262, `tag_3` on the range's oven
+  door at y = −1.2215; centres from the measurement, 16-gello §3): non-collidable 1 mm
+  boxes `size [0.0005, 0.1024, 0.1024]` (a 0.205 m sheet = the 9-bit tagStandard41h12
+  tag plus one white bit of margin at 18.6 mm / bit; the detected quad is the inner 5
+  bits = 0.0931 m as measured), textured with `assets/textures/tagStandard41h12_*.png`
+  (AprilRobotics apriltag-imgs, BSD-2, 704 × 704 = 64 px per bit). Identity quat for
+  the +X plates, yaw +90° (`[0.7071, 0, 0, 0.7071]`) for the +Y plates: the tag's right
+  along local +y, its top along local +z, upright and unmirrored as seen from outside.
+- **`cam_kitchen`** at `(−0.15, 1.0, 2.0)`, `xyaxes [−1, 0, 0, 0, −0.6, 1]`, fovy 60:
+  the operator-side overview for the GELLO launch preview (looks −Y and 31° down, image
+  right = −X); the fridge front and the Manipulation Arm at its keyframe are in frame.
+- **`graspable: [fridge_door_handle, fridge_drawer_handle, range_handle]`** (16-gello
+  D7): a GELLO session whitelists them against the Manipulation Arm's gripper; every
+  arm link stays gated against every appliance body.
+- **Keyframe**: Perception Arm at the **GELLO hold posture** `view: [0.0, 2.646, −1.598,
+  0.018, 1.637, 0.25, 2.007, 0.029]` (MJCF order, rail first — rail 0 = the operator's
+  left end, camera on the kitchen: from the twin the wrist camera then sits at
+  (0.460, 0.394, 1.579) m with its axis (−0.243, −0.907, −0.343)); Manipulation Arm at
+  the `mavis_v2` initial state (`[0.65, π, 0, 0, 0, 0, 0, 0]`, gripper open).
+
+**Tests** (`tests/test_mavis_v2_kitchen.py`): the twin audits clean at δ = 0.008 and
+0.025 with the microphone off and on (540 / 571 monitored pairs, nothing within 5 cm at
+the keyframe); the cell blocks equal `mavis_v2`'s; every box matches the ranges above;
+the plates stand ≤ 1 mm proud of their faces, are visual-only (group 1, not in
+`Addressing.env_geom_ids`, never a monitored pair, never inflated); the graspable
+whitelist removes exactly the gripper-body ↔ handle pairs and nothing else; and the
+**tag-detection test** (EGL) renders `view_wrist_cam` at the keyframe with the REAL
+colour intrinsics plus the overlay nudge applied to the MjSpec camera (the twin-overlay
+recipe) and runs `pupil-apriltags`: ids 0 / 1 / 3 / 4 decode with centres and corners
+within 25 px of the real 2026-09-09 detections (`tests/data/kitchen_tags_20260909.json`;
+measured 0.3–0.7 px) in the same corner order (upright, unmirrored). Two facts recorded
+by that test: the fridge-side plates are seen edge-on (~10 px wide at 640 × 480) and
+MuJoCo's isotropic mipmapping blurs them below decodability at native resolution — the
+four-tag assertion renders the same pinhole camera **supersampled 2×** and halves the
+coordinates, while the native render must still decode the frontal tags 1 and 3; and the
+twin's modelled **microphone body occludes tag 4** at the bottom-centre of the image
+(the real frame shows no occlusion — the mic geometry is still the unverified item of
+§4.3), so the four-tag run is mic-off and the mic-on run asserts 0 / 1 / 3. Renders for
+the operator: `kitchen_final_cam_kitchen.png`, `kitchen_final_view_wrist_cam*.png`
+(phase-15 report).
 
 ## 5. Scene composition via `mujoco.MjSpec`
 
