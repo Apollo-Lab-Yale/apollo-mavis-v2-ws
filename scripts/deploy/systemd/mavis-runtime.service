@@ -23,6 +23,9 @@ Environment=MUJOCO_GL=egl
 # The runtime honours $APOLLO_CONFIG when --config is absent; keep both in sync.
 Environment=APOLLO_CONFIG=/var/lib/apollo-mavis-v2/mavis_v2_lab.yaml
 Environment=PYTHONUNBUFFERED=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
 # The venv interpreter directly, not `uv run`: that needs uv on PATH and network at
 # boot and may re-lock/resync (only a plain `uv sync` drops pysurvive).
 ExecStart=/opt/apollo-mavis-v2/apollo-mavis-v2-runtime/.venv/bin/python -m apollo_mavis_v2_runtime --config /var/lib/apollo-mavis-v2/mavis_v2_lab.yaml

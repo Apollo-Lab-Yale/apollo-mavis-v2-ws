@@ -1,7 +1,19 @@
 # apollo-mavis-v2 — System Overview & Contract
 
-Status: v0.3 (2026-09-01; renamed and re-scoped 2026-09-03; §8 UI-pages
-paragraph amended 2026-09-03 for the phase-11 MAVIS Welcome page). This document is
+Status: v0.4 (2026-09-08 — §1 the external interface paragraph (phase-12,
+merged into the main trees the same day, `14-dora-interface.md` §16.4), §2 the
+2026-09-01 "no Dora in v1" decision marked superseded in part, §4 item 3 online
+interactive learning = the **Online DAgger shell** over that interface
+(`15-online-dagger.md` v2.0; operator decision 2026-09-08 evening — the runtime knows
+no DAgger algorithm, PRO-DAgger is a reference implementation in the policy repo;
+the morning's "PRO-DAgger" clause and `15-pro-dagger.md` are superseded, the latter
+kept as history), §5 the `world` translate-frame default, §10 the doc map gains
+14-dora and 15-online-dagger). v0.3 (2026-09-01; renamed and re-scoped 2026-09-03; §8 UI-pages
+paragraph amended 2026-09-03 for the phase-11 MAVIS Welcome page; amended
+2026-09-07 — §0 user-facing arm names, §1 Python floor per repo, §3.3 / §4.2
+episode-directory store with a derived LeRobot v3 export (10-frames §11),
+§4.1 / §8 one-mode joint panel, §5 input interfaces: the keyboard is a peer of
+the Vive controller, episode keys). This document is
 the **spine** of the stack: every other design doc and every sub-repo must stay
 consistent with it. All major technology decisions are resolved against
 `docs/research/` (several were benchmarked live on the target machine).
@@ -10,9 +22,12 @@ consistent with it. All major technology decisions are resolved against
 
 **MAVIS v2** (Manipulation And Viewpoint Selection, version 2) is one physical
 cell in the Apollo Lab (Yale): two UFACTORY xArm7 arms, each mounted on a
-0.65 m linear track, on opposite rails of a shared tabletop. The **grip arm**
-carries the xArm gripper and a wrist camera; the **view arm** carries only a
-wrist camera and is the perception / viewpoint-selection arm. The software in
+0.65 m linear track, on opposite rails of a shared tabletop. The
+**Manipulation Arm** (arm id `grip`) carries the xArm Gripper G2 and a wrist
+camera; the **Perception Arm** (arm id `view`) carries a wrist camera and the
+RØDE microphone and is the viewpoint-selection arm. Those two names are what
+every person-facing surface says (2026-09-04); the ids stay internal in
+configs, specs and telemetry. The software in
 these repos exists for exactly this cell — real hardware or its MuJoCo digital
 twin (`apollo-mavis-v2-sim` scene `mavis_v2`, the authoritative geometry, see
 03-sim §4.3) — and is not a general xArm7 framework. Where the code is generic
@@ -33,6 +48,22 @@ apollo-mavis-v2-hardware    apollo-mavis-v2-sim   implementations of core interf
                 apollo-mavis-v2-ui             web frontend (React 18 + Vite + TS)
 ```
 
+**External interface (phase-12, implemented 2026-09-08; `14-dora-interface.md`
+v1.0, §16 implementation record).** The runtime publishes every observation
+stream (wrist / static cameras with the camera pose stamped on every frame,
+depth where available, arm states, microphone, telemetry, the session contract)
+over **dora-rs 1.0.1** whenever the process runs — no mode, no session required —
+and consumes an external policy's actions in DAgger / inference sessions
+(`SessionSpec.policy_source: external`). The bridge is one in-process component
+(`apollo_mavis_v2_runtime.dora_bridge`, thread `dora-bus`; the 100 Hz control
+thread never calls dora), a private coordinator / daemon pair bound to
+`dora.bind_host` (an IPv4 or an interface name such as `wlp38s0`; `0.0.0.0` and
+the arm-link addresses are refused), and one dataflow with dynamic placeholders
+`policy` / `viewer` / `observer` plus `viewer_<id>` / `observer_<id>` per joined
+LAN machine. Foreign policies live in the independent
+`apollo-mavis-v2-policy-node` repo, which copies the spellings and never imports
+the stack.
+
 Hard rules:
 
 - `core` depends on nothing in the stack (numpy + pydantic only; **no** MuJoCo,
@@ -43,7 +74,8 @@ Hard rules:
   digital-twin safety requires both extras; composition happens in runtime.
 - `ui` never imports Python; it talks to runtime exclusively over HTTP/WebSocket.
 - Python packages: `apollo_mavis_v2_core`, `apollo_mavis_v2_hardware`,
-  `apollo_mavis_v2_sim`, `apollo_mavis_v2_runtime`. Python ≥3.10, managed with `uv`.
+  `apollo_mavis_v2_sim`, `apollo_mavis_v2_runtime`. Python ≥3.10 for core /
+  sim / hardware, **≥3.12 for runtime** (lerobot's floor); managed with `uv`.
 
 ## 2. Process model
 
@@ -57,14 +89,28 @@ Single-process Python runtime by default:
   (own GPU process — GPU 1 — communicating via dataset dir + checkpoint dir +
   a small control channel), and later, per-camera encoder subprocesses if GIL
   jitter appears.
-- **Decision (2026-09-01): no Dora in v1** (see `docs/research/dora-middleware.md`):
-  dora 1.0 requires Python ≥3.11 (we run 3.10), is still in RC with breaking wire
+- **Superseded in part (2026-09-08) — see `14-dora-interface.md` (v1.1) and the
+  next bullet.** Decision (2026-09-01): no Dora in v1 (see `docs/research/dora-middleware.md`):
+  dora 1.0 requires Python ≥3.11 (core / sim / hardware run 3.10; runtime is
+  3.12 since phase-07), is still in RC with breaking wire
   changes, has no xArm/domain nodes to reuse, and lacks Python request/reply
   tooling. Migration seams are kept mechanical instead: messages are
   Arrow-representable core schemas, threads communicate via typed queues, and
   all commands flow through a `submit(cmd) -> Future` bus with correlation IDs.
   If GIL jitter shows up, first split cameras into a subprocess — the training
   worker is a separate process from day one.
+- **Dora at the boundary, not inside (decided 2026-09-03, implemented phase-12,
+  merged 2026-09-08).** The interior verdict above stands: the 100 Hz control
+  thread, the bus, the recorder and the twin never touch dora. The runtime's
+  EXTERNAL interface is dora-rs 1.0.1 (§1 paragraph above; `14-dora-interface.md`):
+  one in-process `DoraBridge` on its own `dora-bus` thread publishes the
+  observation streams for the process lifetime and consumes an external policy's
+  actions (and, since phase-14, an Online DAgger trainer's status — §4 item 3); a
+  private coordinator / daemon pair per runtime, never a shared control plane.
+  `dora.enabled: false` in the repo config keeps the runtime byte-for-byte the
+  phase-11 one. The in-process `AsyncTrainer` (GPU 1) stays for
+  `policy_source: checkpoint`; for `policy_source: external` training lives in the
+  policy node (12-dagger §7 scope note, 14-dora §11.3).
 
 ## 3. Core domain model
 
@@ -152,10 +198,12 @@ modes; up to 4 cameras (3 wrist + 1 environment), typically 2.
 - `Policy` — `reset()`, `act(Observation) -> Action`, `load_weights(path)`
   (hot-reload at episode boundaries), spec metadata (obs/action layout +
   frame conventions + policy_version).
-- `EpisodeRecorder` — `start/add_frame/save/discard`; backed by **LeRobot
-  dataset v3** via the real `lerobot` library (`LeRobotDataset.create` /
-  `add_frame` / `save_episode` / `clear_episode_buffer` / `finalize`,
-  `streaming_encoding=True`, NVENC on the 4090s).
+- `EpisodeRecorder` — `start/add_frame/save/discard`; backed since 2026-09-07
+  by the **episode-directory store** — one directory per episode holding its
+  parquet, one mp4 per camera (lerobot's `StreamingVideoEncoder`, NVENC on the
+  4090s), the audio WAV and a JSON sidecar — from which a **LeRobot v3 dataset
+  is exported** by stream-copy remux (10-frames §11, 04-runtime §10). (v0.3
+  wrote LeRobot v3 directly through `LeRobotDataset.create … finalize`.)
 - `TeleopInput` — abstract held-key-state provider (implemented by runtime's
   WS bridge from the browser).
 
@@ -195,9 +243,10 @@ arms; **Tab** cycles which one keyboard teleop drives; non-active arms hold.
    target-pose integration → collision-aware differential IK → per-tick
    clamped joint servo (≤ firmware step limits). Additionally, a **direct
    joint-control panel** in the UI: per-joint drag sliders and numeric entry
-   (all 7 joints + rail) for reaching a specific configuration; small deltas
-   stream through slew-limited joint servo, large jumps route through the twin
-   planner — both stay behind the twin gate. Save profiles from here,
+   (all 7 joints + rail) for reaching a specific configuration; every input
+   is a `jog` DESTINATION the loop walks toward at constant speed behind the
+   twin gate (2026-09-07, operator's call: no planned "go to" from the panel,
+   04-runtime §7). Save profiles from here,
    including "set current state as initial condition".
 2. **Data collection** — teleop + episode recording. Recording runs at
    20–30 fps while the 100 Hz servo loop interpolates. Every dataset (all
@@ -205,7 +254,14 @@ arms; **Tab** cycles which one keyboard teleop drives; non-active arms hold.
    `wallclock_ns: int64` features so plain-teleop and DAgger datasets stay
    schema-compatible for merging. One dataset repo per
    (task × arm-count × frame convention); the convention is recorded in
-   `features['action']['info']`.
+   `features['action']['info']`. Episodes are stored **one directory each**
+   (`episodes/<episode_id>/`) and a LeRobot v3 dataset is a derived export
+   (10-frames §11, 2026-09-07) — deleting an episode removes one directory
+   and re-encodes nothing. Three keys drive the episode lifecycle (`N` new,
+   `Enter` save, `Backspace` discard, §5); after every save / discard the arms
+   return to the start profile BY DEFAULT — twin-planned, gated, cancelled by
+   any operator input, opt-out per session (04-runtime §10.5; operator
+   decision 2026-09-07).
 3. **DAgger** — HG-DAgger semantics with async training
    (`12-dagger-protocol.md`): policy drives; **Space** toggles human takeover;
    3-state `control_mode` (`policy|human|takeover_transition`, transition
@@ -214,7 +270,28 @@ arms; **Tab** cycles which one keyboard teleop drives; non-active arms hold.
    process, GPU 1) fine-tunes on human-labeled frames (50/50 new vs aggregate
    sampling), writes versioned checkpoints; runtime hot-swaps weights only at
    episode boundaries. Delta-EE actions applied to the current *measured* pose
-   keep human↔policy switches jump-free.
+   keep human↔policy switches jump-free. **Online interactive learning on this
+   cell = the algorithm-agnostic Online DAgger shell over the external interface
+   (operator decision 2026-09-08 evening; `15-online-dagger.md` v2.0):** the
+   user-facing middle mode is **Online DAgger** — the same `dagger` session with
+   `policy_source: external` and an `online_dagger` block. The runtime keeps
+   ROLLOUT-LEVEL control only: it performs rollouts, exposes take-over / hand-back
+   (Space and the explicit `takeover` / `handback` actions, published as gate events),
+   labels every step `actor` novice / expert, saves the kept rollouts
+   (`~/data/online_dagger/<session_name>/rollouts`, discards leave nothing), gates new
+   rollouts on the trainer's generic `trainer_status` (pause while training, wait for
+   ready), relays the operator's **Train now** and reports what the trainer says. The
+   policy AND its training — which DAgger variant, hyper-parameters, reference pools,
+   when to train, the weight swap — live in the policy repo as one dora node
+   (14-dora §6; PRO-DAgger's projected reference gradient is the shipped reference
+   implementation on top of the generic loop, `mavis_policy_node.pro_dagger`); the
+   runtime counts no iterations and stores no training artefact. It returns the
+   arms to the start profile between rollouts (D6) and serves the agentic skill
+   (`mavis-online-dagger-trainer`) a policy repo's coding harness uses to set the
+   loop up. Sim only until the operator admits it on hardware (15-online-dagger D7).
+   Superseded (2026-09-08 evening) — the morning's clause "PRO-DAgger … the runtime
+   owns the iteration state machine (R kept rollouts → `iteration_complete` → …) …
+   `~/data/pro_dagger/<session_name>/`" (`15-pro-dagger.md`, history only).
 4. **Inference** — policy drives; no recording (optional eval logging).
    **Space** still toggles human takeover (same TakeoverGate machinery as
    DAgger) as a *safety escape*: when the policy enters an unsafe state, the
@@ -227,7 +304,7 @@ arms; **Tab** cycles which one keyboard teleop drives; non-active arms hold.
 
 | Key | Gamepad | Action |
 |---|---|---|
-| W / S | — | translate +x / −x (forward/back) |
+| W / S | — | translate forward / back (`control.translate_frame`, default the operator-fixed world frame — 04-runtime §6) |
 | A / D | — | translate left / right |
 | E / Q | — | translate up / down |
 | I / K | — | roll + / − |
@@ -239,16 +316,40 @@ arms; **Tab** cycles which one keyboard teleop drives; non-active arms hold.
 | Z | LB | switch to previous arm |
 | Tab | RB | switch active arm |
 | Space | — | takeover toggle (DAgger: recorded as intervention; inference: safety escape, never recorded) |
+| R | — | return to the initial condition (twin-planned, gated, cancelled by any movement input; no-op with none designated) |
 | N | — | start new episode (collect/DAgger) |
 | Enter | — | save current episode |
 | Backspace | — | discard current episode |
 
-Note: the user's spec listed K for both roll and pitch; resolved as I/K = roll,
-J/L = pitch (IJKL cluster). Teleop & collection pages must display a keybinding
+Note: the translate keys name the KEY axes (x forward, y left, z up); which
+physical frame they land on is the runtime's `control.translate_frame`, whose
+default is the operator-fixed **world** frame — `W` away from the operator
+(−Y), `A` to the operator's left (+X), `E` up (operator decision 2026-09-08
+evening; that morning's default, the active arm's wrist-camera frame, was
+superseded the same day and stays selectable as `camera`, with `base` = the
+pre-2026-09-08 arm-base axes — 04-runtime §6). Rotations are always about the
+TCP axes. The user's spec listed K for both
+roll and pitch; resolved as I/K = roll, J/L = pitch (IJKL cluster). Teleop & collection pages must display a keybinding
 hint overlay. Keymap is defined once in `core.protocol.keymap` and served to UI;
 the **Gamepad** column is the `KeymapEntry.gamepad` field (13-tracker §3), so
 the UI never hard-codes the pad mapping. The tracker clutch is a *held
 modifier* (not an axis): the rail is never driven by the tracker.
+
+**Input interfaces (2026-09-07, operator decision).** The keyboard and the
+Vive controller (13-tracker) are **peers**: the table above is the keyboard's
+full teleop set; the controller supplies the pose (clutched by its trigger)
+and injects gripper and rail as the same held wire codes, and its menu click
+fires the same discrete `switch_arm` action; the gamepad mirrors the rows of
+its column. Precedence when both are live: while ANY
+source holds the clutch (trigger / `C` / RT) the tracker pose drives
+translation and rotation and the keyboard's translate / rotate keys are
+ignored for that tick; gripper and rail inputs from every source merge
+(union, per-code max scale); with the clutch released the keyboard drives the
+arm directly. The episode keys `N` / `Enter` / `Backspace` fire only while
+keyboard capture is armed and, like every key, are unique across the table (no
+code is both a held and a discrete row). A 2026-09-07 core change that flagged
+every held row `keyboard=False` ("teleop is the Vive only") is reverted by
+phase-13 — do not remove keyboard teleop again.
 
 ## 6. Safety & collision (all modes, all command sources)
 
@@ -355,7 +456,10 @@ per-arm status, the single locked scene *APOLLO MAVIS V2 Digital Twin*
 (`mavis_v2`), `start_from` choice (keep current state vs load a profile), and
 four mode launcher cards — Hardware launchers enabled only once every
 configured arm is reachable (`hardware_ready`); task / policy are collected in
-an in-page `<dialog>` sheet, not on the page
+an in-page `<dialog>` sheet, not on the page (the Data Collection sheet also
+names the dataset — new / continue existing — and offers the optional return
+to start), and since 2026-09-07 a **Datasets** panel (per dataset: episodes,
+frames, export status; per episode: delete; export to LeRobot v3 — 05-ui §8.1)
 → **Mode pages** (teleop / collect / DAgger / inference) with camera streams,
 sim & twin renders, keybinding overlay, collision banner, episode controls.
 Teleop page additionally has the direct joint-control panel (per-joint sliders
@@ -385,9 +489,19 @@ blur/visibilitychange.
 - `03-sim.md` — MuJoCo workcell, scene registry, digital twin, IK solvers, rendering.
 - `04-runtime.md` — session engine, control loop, recorder, DAgger, server.
 - `05-ui.md` — frontend structure, pages, streams, input capture.
-- `10-frames-and-data.md` — frame conventions + dataset format.
+- `10-frames-and-data.md` — frame conventions + dataset format + on-disk
+  layout (episode directories, LeRobot v3 export).
 - `11-safety-collision.md` — twin sync, checking, planning, inflation.
 - `12-dagger-protocol.md` — takeover, aggregation, async training, hot-reload.
 - `13-tracker-teleop.md` — Vive tracker/controller teleop (clutch model,
   controller buttons, pose filter) and the tracker calibration wizard
   (base stations + yaw, `/api/tracker/calibration`; phase-10).
+- `14-dora-interface.md` — the external interface over dora-rs 1.0 (stream /
+  command catalogue, external policy contract, LAN consumers, the
+  `apollo-mavis-v2-policy-node` repo; §16 implementation record, §16.4 merge).
+- `15-online-dagger.md` — Online DAgger: the algorithm-agnostic shell for
+  interactive learning over that interface (coordinator, `actor` column, the
+  generic trainer contract, gate events, `takeover` / `handback` / `train_now`,
+  session directory, per-namespace dataset roots, the served skill; §12
+  implementation record). `15-pro-dagger.md` (v1.0, 2026-09-08 morning) is
+  superseded by it and kept for history only.

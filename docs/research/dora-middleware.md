@@ -4,7 +4,34 @@
 **Sources:** github.com/dora-rs/dora @ `b37f8fc` (main, 2026-08-31), repo docs (`docs/*.md`), PyPI `dora-rs`, github.com/dora-rs/dora-hub, github.com/dora-rs/dora-lerobot.
 **Question:** Should the xArm7 teleop / data-collection / DAgger / inference stack use Dora dataflow middleware, and if so where?
 
-**TL;DR recommendation: not for v1.** Build the planned single-process runtime (option A) with transport-agnostic core interfaces. Two hard blockers today: (1) Dora 1.0 (the version with services, fault tolerance, record/replay — everything you'd want it for) requires **Python >= 3.11**, and our machine is 3.10; the 3.10-compatible stable release (0.5.0) is a different, older codebase missing those features. (2) The Dora ecosystem provides **no xArm node, no maintained LeRobot recorder, no MuJoCo digital-twin collision checker** — i.e. almost none of our hard work is reusable; we would write the same code plus YAML plumbing and pay a cross-process hop inside the 100–250 Hz safety-critical path (arm -> twin collision check -> arm). Dora slots in cleanly later at exactly the seams identified in section 8.
+> **Status update (2026-09-03, implemented 2026-09-08 — phase-12).** The boundary half of this
+> verdict is superseded; the interior half stands. dora-rs **1.0.1** is now the runtime's EXTERNAL
+> integration bus (`docs/design/14-dora-interface.md`, v1.0): the runtime process attaches as one
+> dynamic node `mavis_runtime` for its whole lifetime and publishes both wrist cameras (+ the sim
+> depth sibling) with the camera pose stamped on every frame, both arms' states (read-only between
+> sessions), the microphone, telemetry, the `session` contract message and `events`; the only
+> inbound command family is the external policy's (`policy_action` / `policy_spec` /
+> `policy_status`, `SessionSpec.policy_source: external`). Nothing inside the 100 Hz control loop
+> touches dora, the AsyncTrainer stays a ZMQ subprocess and the browser UI never speaks dora.
+> What changed since 2026-09-01: the runtime moved to Python **3.12** (phase-07), dora 1.0 went GA
+> (1.0.0 on 2026-09-02, 1.0.1 on 2026-09-03; `dora-rs` + `dora-rs-cli` are pip wheels, no cargo);
+> the "no reusable nodes" point is irrelevant at the boundary (the runtime IS the node). Measured on
+> the lab host (phase-12 acceptance, 2026-09-08): two-hop `obs_state -> policy -> action` RTT at
+> 30 Hz over 1000 samples p50 0.8 ms / p99 2.3 ms / max 5 ms, 0 lost; one-hop 921 KB rgb8 frames
+> in-process send p99 <= 1 ms; `dora-bus` + `dora-publisher` threads 5–7 % of one core at the
+> full publish load. New observations worth keeping (all in 14-dora §8/§9/§16): zenoh opens
+> multicast scouting + per-NIC UDP + a wildcard TCP listener unless `DORA_ZENOH_MULTICAST=off` /
+> `DORA_ZENOH_LISTEN=tcp/127.0.0.1:0` are set in EVERY node process; dynamic nodes need a
+> coordinator-hosted dataflow (`dora up/start`, not `dora run`); interpreters must be pinned in the
+> YAML; the coordinator's 1 MiB WebSocket cap breaks `dora topic echo/hz` on image topics; the node
+> API prints JSON WARN diagnostics to **stdout** per >= 600 KB output and `RUST_LOG=error` does NOT
+> silence them (the runtime dup2s fd 1 to a log while attached); `dora doctor` is the one CLI
+> surface that lists registered daemons (`dora status --format json` and `dora list` do not);
+> `next(timeout)` returns an `ERROR "Receiver timed out"` event on timeout, `None` only when every
+> sender is gone. Versions table erratum: "0.5.0 = latest stable" was true on 2026-09-01 only;
+> 1.0.1 is the pinned version (`runtime[dora]` extra, `uv.lock`).
+
+**TL;DR recommendation (2026-09-01, interior verdict unchanged): not for v1 INSIDE the runtime.** Build the planned single-process runtime (option A) with transport-agnostic core interfaces. Two hard blockers today: (1) Dora 1.0 (the version with services, fault tolerance, record/replay — everything you'd want it for) requires **Python >= 3.11**, and our machine is 3.10; the 3.10-compatible stable release (0.5.0) is a different, older codebase missing those features. (2) The Dora ecosystem provides **no xArm node, no maintained LeRobot recorder, no MuJoCo digital-twin collision checker** — i.e. almost none of our hard work is reusable; we would write the same code plus YAML plumbing and pay a cross-process hop inside the 100–250 Hz safety-critical path (arm -> twin collision check -> arm). Dora slots in cleanly later at exactly the seams identified in section 8.
 
 ---
 

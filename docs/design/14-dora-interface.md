@@ -1,6 +1,30 @@
 # 14 — External interface over Dora (dora-rs 1.0) (binding once approved)
 
-Status: **draft v0.2 (2026-09-03) — decisions applied, pending final review.**
+Status: **v1.2 (2026-09-08, evening, late) — phase-14 is the Online DAgger SHELL of
+`15-online-dagger.md` v2.0 (operator decision 2026-09-08 evening: the runtime knows no DAgger
+algorithm; PRO-DAgger is a reference implementation in the policy repo). Sections touched,
+v1.1 text superseded in-body and kept: §4.1 / §4.2 `events` (`gate` now actually published,
+`episode_saved.online_dagger`, `episode_discarded`, `train_now`; `iteration_complete` /
+`pro_dagger_phase` REMOVED from `EVENT_KINDS` — never shipped), §4.2 `SessionAnnounce.
+online_dagger`, §5 the `policy_trainer_status` row (the 10-field generic
+`TrainerStatusAnnounce`), §6.1 the capability `"online_dagger"` + the 409s as shipped, §6.2
+the generic trainer role → 15-online-dagger §3 / §9, §11.3, §13 `ExternalStatus.capabilities`
+/ `.trainer_status` + the deltas, §16.5 note; late-evening spelling fix in §4.2 — the
+`episode_discarded` hook is `DaggerRecorderThread.on_episode_discarded`.** v1.1 (2026-09-08, evening) — phase-12 MERGED
+into the main working trees of the five sub-repos on top of phase-13 (§16.4: the two test
+adaptations and the known flakes) and extended by phase-14 (then spelled PRO-DAgger; additive,
+`mavis_schema` stays 1): §1 import confinement widened to the recorder. Superseded (2026-09-08
+evening) — the v1.1 phase-14 list (`SessionAnnounce.pro_dagger`, `iteration_complete` /
+`pro_dagger_phase`, the `pro_dagger` capability and 409s) and the late docs-pass note on the
+`episode_discarded` scope: the scope rule itself stands (Online DAgger sessions only, §4.2),
+the spelling is now `online_dagger`.
+v1.0 (2026-09-08) — IMPLEMENTED in phase-12 (worktree branches `phase-12` of
+core / hardware / sim / runtime / ui + the new `apollo-mavis-v2-policy-node` repo; §16 is the
+implementation record with every deviation from the v0.3 contract and the acceptance numbers
+measured on the lab host). v0.3 (2026-09-07) added the user's requirement that consumers on
+OTHER MACHINES of the lab LAN can subscribe (§0 changelog, §2.2, §2.3, §2.6, §9, §12),
+verified against a two-daemon dora 1.0.1 experiment on the lab host (artifacts
+`/tmp/dora-lan-exp/`, `results/summary.json`).
 Written from four independent dora-rs 1.0.1 experiments run on the lab machine
 on 2026-09-03 (artifacts: `/tmp/dora-bench`, `/tmp/dora-exp-mavis`,
 `/tmp/dora-tripod-exp`, `/tmp/dora-probe`; throwaway venv `/tmp/dora-venv`)
@@ -69,6 +93,29 @@ and config.
   provide later (Appendix A).
 - Cell facts corrected: two control boxes (not three), IPs above, no F/T
   sensor; user-facing arm names introduced.
+
+**Changelog v0.2 → v0.3 (2026-09-07, user requirement + experiment):**
+
+- **Publishing is process-lifetime, unconditional, no mode.** Restated because
+  the wording "fixed viewpoint" was read as a switchable "tripod mode": there is
+  none. Whenever the runtime process runs, every stream of §4 is published.
+- **LAN subscribers are v1, not v2.** A consumer on another machine of the
+  lab network (another repo's program, another robot's controller) subscribes
+  through dora's own multi-daemon mechanism: the runtime's private control plane
+  binds a configured LAN address (`dora.bind_host`, never a control-box NIC),
+  the remote host runs its own `dora daemon --machine-id <id>` against that
+  coordinator, and the rendered dataflow deploys per-machine placeholder nodes
+  (`deploy: {machine: <id>}`) that the remote attaches to as dynamic nodes
+  (§9). Verified 2026-09-07 with two daemons on one host over the LAN
+  address and the TCP path: 921,600 B frames @30 Hz p50 4.7 ms / p99 6.8 ms,
+  0 gaps; 28 B state @100 Hz p99 1.0 ms.
+- Coordinator auth (`--auth`) is ON whenever the control plane is not
+  loopback-only; the token is never served over REST (§9).
+- Every dora node the runtime or its examples create (including
+  `Node("mavis_runtime")`) sets `DORA_ZENOH_MULTICAST=off` and
+  `DORA_ZENOH_LISTEN=tcp/127.0.0.1:0` — without them a dynamic node opens
+  multicast and UDP sockets on every NIC including the control-box NICs
+  (measured; §9).
 
 Why the 2026-09-01 verdict ("not for v1", `docs/research/dora-middleware.md`)
 is reversed *at the boundary only*:
@@ -152,6 +199,14 @@ names runtime-wide with a per-file-ignore for that package; an AST scan test
 like `tests/test_chokepoint.py` enforces it). core / sim / hardware add `dora`
 and `pyarrow` to their `banned-api` lists. The package is deliberately *not*
 named `dora/` so it can never shadow the PyPI module.
+**Amended 2026-09-08 (phase-13 merge; §16.4).** `dora` stays confined to
+`dora_bridge/`. `pyarrow` has THREE sanctioned import sites since phase-13:
+`dora_bridge/` (the bus codec), `dagger/` (the trainer spool parquet) and
+`recorder/` (`episode_recorder.py` writes `episodes/<id>/frames.parquet`,
+`export_lerobot.py` stacks them into the LeRobot v3 export — 10-frames §11, 04-runtime
+§10); the runtime's `pyproject.toml` `TID251` message and
+`tests/dora_bridge/test_import_confinement.py` (`PYARROW_ALSO_OK = {dagger, recorder}`)
+both say so. Every import is still lazy (the import-time subprocess check is unchanged).
 
 ## 2. Topology & lifecycle
 
@@ -198,14 +253,30 @@ block serving; failures leave the bridge `unavailable`):
 ```
 1. check versions: python `dora.__version__` == `dora --version` (else disabled + detail)
 2. render <var_dir>/mavis_v2.dora.yml from RuntimeConfig (§2.3); `dora validate --strict-types` it
-3. setsid  dora coordinator --port <coordinator_port> --store memory            (cwd = var_dir)
-   setsid  dora daemon --coordinator-port <coordinator_port>
+3. setsid  dora coordinator --interface <bind_host> --port <coordinator_port> --store memory
+                            [--auth]                                             (cwd = var_dir)
+   setsid  dora daemon --machine-id <machine_id> --coordinator-addr <bind_host>
+                       --coordinator-port <coordinator_port>
                        --local-listen-port <daemon_port>
-                       --zenoh-no-multicast --zenoh-listen 127.0.0.1:<zenoh_port>   (cwd = var_dir)
-   wait for `dora status` (DORA_COORDINATOR_PORT exported) ≤ 5 s
-4. dora start <yaml> --name mavis_v2 --detach   → dataflow uuid7 (cwd = var_dir; out/ lands there)
-5. os.environ["DORA_ZENOH_CONNECT"] = "tcp/127.0.0.1:<zenoh_port>"; Node("mavis_runtime",
-   daemon_port=<daemon_port>) on the bus thread → state `attached`
+                       --zenoh-no-multicast --zenoh-listen <bind_host>:<zenoh_port>      (cwd = var_dir)
+   wait for `dora status --coordinator-addr <bind_host> --coordinator-port <P>` ≤ 5 s
+   (with `--interface <LAN IP>` the coordinator does NOT listen on loopback: every
+   CLI call the runtime makes passes --coordinator-addr <bind_host>; v0.3)
+4. dora start <yaml> --name mavis_v2 --detach --coordinator-addr <bind_host> --coordinator-port <P>
+   → dataflow uuid7 (cwd = var_dir; out/ lands there). The rendered YAML deploys the
+   local nodes on <machine_id> and, for every configured remote machine whose daemon
+   is REGISTERED at this moment, its placeholders on that machine (§2.3, §9)
+5. os.environ: DORA_ZENOH_CONNECT=tcp/<bind_host>:<zenoh_port>, DORA_ZENOH_MULTICAST=off,
+   DORA_ZENOH_LISTEN=tcp/127.0.0.1:0 (v0.3 — a dynamic node otherwise opens multicast +
+   per-NIC UDP + a wildcard TCP listener); Node("mavis_runtime", daemon_port=<daemon_port>)
+   on the bus thread → state `attached`
+6. every `dora.rescan_s`: re-read the set of registered daemons (`machines[].registered`);
+   **v1.0 (§16.1): placeholders for a remote machine are rendered only on its explicit
+   `POST /api/dora/machines/{id}/join`** (re-render, `dora stop mavis_v2 --grace-duration 2s`,
+   `dora start`, wait for dora's start barrier = the remote consumer's attach, re-attach;
+   `ExternalStatus.dataflow_restarts += 1`; attached consumers see STOP / INPUT_CLOSED and
+   re-attach — the rule §6.2 already imposes on the policy node); a registered daemon that
+   vanishes drops its placeholders on the next rescan
 ```
 
 Shutdown (`Runtime.stop()`): `dora stop mavis_v2 --grace-duration 2s`, then
@@ -271,6 +342,17 @@ nodes:
     inputs: {tick: dora/timer/hz/1}
     outputs: [heartbeat]
 ```
+
+Since v0.3 every node above carries `deploy: {machine: <dora.machine_id>}` (the
+key `dora validate --strict-types` accepts in 1.0.1; `_unstable_deploy` and a
+top-level `machine:` are rejected), and for every configured remote machine
+(`dora.machines`, §12) whose daemon is registered when the YAML is rendered the
+renderer adds `viewer_<machine_id>` / `observer_<machine_id>` placeholders (ids
+stay `[a-zA-Z0-9_]`) with `deploy: {machine: <machine_id>}` and the same inputs
+as the local `viewer` / `observer`. A machine that is not registered gets no
+node — `dora start` refuses a dataflow that names an absent machine (`no
+matching daemon for machine id …`, verified) — and is picked up by the rescan
+(§2.2 step 6).
 
 Rules baked into the renderer: every runtime input is `queue_size: 1,
 drop_oldest` except `events`-like fan-in (`policy_status`); `input_timeout` is
@@ -353,16 +435,25 @@ model `DoraInfo`):
 
 ```json
 {"enabled": true, "state": "attached",
- "coordinator_port": 6113, "daemon_port": 53391,
- "zenoh_connect": "tcp/127.0.0.1:7447", "dataflow_name": "mavis_v2",
+ "bind_host": "192.168.0.88", "machine_id": "lab", "auth": true,
+ "coordinator_addr": "192.168.0.88", "coordinator_port": 6113, "daemon_port": 53391,
+ "zenoh_connect": "tcp/192.168.0.88:7447", "dataflow_name": "mavis_v2",
  "dataflow_id": "0199…", "node_id": "mavis_runtime",
  "placeholders": ["policy", "viewer", "observer"],
- "dataflow_yaml": "/home/…/apollo/dora/mavis_v2.dora.yml", "mavis_schema": 1}
+ "machines": [{"id": "gpubox", "registered": true,
+               "placeholders": ["viewer_gpubox", "observer_gpubox"]}],
+ "dataflow_restarts": 1,
+ "dataflow_yaml": "/home/…/var/dora/mavis_v2.dora.yml", "mavis_schema": 1}
 ```
 
-A client does `export DORA_COORDINATOR_PORT=6113 DORA_ZENOH_CONNECT=tcp/127.0.0.1:7447`
-and `Node("policy", daemon_port=53391)`. The same facts are printed by
-`python -m apollo_mavis_v2_runtime.dora_bridge.nodes.env` for shell use.
+A **same-host** client does `export DORA_ZENOH_CONNECT=tcp/<bind_host>:7447
+DORA_ZENOH_MULTICAST=off DORA_ZENOH_LISTEN=tcp/127.0.0.1:0` and
+`Node("policy", daemon_port=53391)` (no coordinator env, no token — a dynamic
+node only talks to its daemon's loopback port). A **remote** client follows the
+§9 recipe (own daemon with `--machine-id`, then `Node("viewer_<id>")`). The
+auth token is deliberately NOT in this response (§9). The same facts are printed
+by `python -m apollo_mavis_v2_runtime.dora_bridge.nodes.env` for shell use;
+`daemon_port` is only meaningful on the lab host (loopback).
 
 ## 3. Wire conventions
 
@@ -494,6 +585,13 @@ class SessionAnnounce(BaseModel):            # core protocol/external.py
     dataset_root: str | None = None          # collect / dagger
     run_id: str | None = None                # dagger
     deprecated_keys: list[str] = []
+    online_dagger: OnlineDaggerAnnounce | None = None   # phase-14 (additive, appended last):
+                                             #   non-null iff spec.online_dagger —
+                                             #   {session_name, session_dir, rollouts_dir}
+                                             #   (15-online-dagger §6). Superseded (2026-09-08
+                                             #   evening): v1.1's six-field pro_dagger:
+                                             #   ProDaggerAnnounce (ref_grad_dir, offline_dataset,
+                                             #   offline_dataset_dir) — the shell knows no anchor
 ```
 
 **`events`** — `EventEnvelope{kind, t_mono, wallclock_ns, session_id, payload}`
@@ -504,6 +602,56 @@ spool_path, run_id}` — what an external trainer needs), `episode_discarded`,
 checkpoint_path}`; in-process policies), `policy_version_changed`
 (external policies, §6.5), `reset_watermark`, `session_error`. Unknown kinds
 are additive.
+
+**Events added / made real by phase-14 (2026-09-08 evening, additive; 15-online-dagger §3 /
+§6 / §12; `EVENT_KINDS` is append-only — `collision, gate, episode_saved, episode_discarded,
+policy_anomaly, policy_swap, policy_version_changed, reset_watermark, session_error,
+train_now` (10), the goldens pin the order):**
+- `gate` — declared since v0.3, **now actually published** (`{arm_id, mode, seq, source:
+  keyboard | action | auto_advance | episode_reset, episode_id}`): every `TakeoverGate`
+  transition — Space, the explicit `takeover` / `handback` actions (`source: "action"`,
+  additive spelling), auto-advance, the episode-boundary reset (whose `episode_id` names
+  the episode that just CLOSED). Published for EVERY policy session with the bridge on: an
+  Online DAgger session through its coordinator's `SerialWorker` (ordered against
+  `episode_saved` / `episode_discarded`), a plain external / checkpoint dagger or inference
+  session through `SnapshotPublisher.enqueue_event()` (a 256-deep deque drained on the
+  `dora-publisher` thread; `DoraWiring.publish_gate_events`) — never a bus call on the tick.
+- `episode_saved` — the `summary` carries the capture-time `episode_id` and the
+  `n_expert_frames` / `n_novice_frames` actor counts (the recorder does
+  `dataclasses.replace(summary, episode_index=, episode_id=)` before publishing);
+  in an Online DAgger session the payload gains `online_dagger: {episode_id,
+  rollouts_saved, actor_counts: {novice, expert}, policy_version, spool_path}`
+  (`rollouts_saved` includes this rollout; `spool_path` — also the top-level key — is
+  `null` when the trainer spool could not be written, the rollout still counts).
+  Superseded (2026-09-08 evening) — v1.1's `pro_dagger: {iteration, rollout_index,
+  rollouts_per_iteration, …}` block.
+- `episode_discarded` — declared since v0.3, **actually published in Online DAgger
+  sessions ONLY** (the scope rule of the late docs pass stands; the code is the reality).
+  The only publish site is `OnlineDaggerCoordinator.on_episode_discarded`
+  (`dagger/online_dagger.py`), reached through the recorder-thread hook
+  `SessionManager._online_dagger_discard_hook`, assigned only inside the Online DAgger
+  branch of `_build_external_policy_stack`; the plain external-DAgger branch (and the
+  in-process DAgger builder) leave `DaggerRecorderThread.on_episode_discarded` at its `None`
+  default, and the collect builder's plain `RecorderThread` has no such hook at all, so a
+  discard there is visible on `telemetry.episode` only (open item, 15-online-dagger §12.3
+  item 3; spelling corrected 2026-09-08 late evening — the hook is defined on the dagger
+  subclass `DaggerRecorderThread` in `dagger/recorder.py`, not on the base `RecorderThread`
+  in `recorder/thread.py`). Inside an Online DAgger session it fires on every discard: `{episode_index,
+  episode_id, reason}` with `reason` `""` (operator `episode_discard`), `"empty episode
+  discarded"` (every frame filtered), `"session teardown"` (a rollout still open at
+  teardown) or `"save failed twice - recording degraded (buffer kept)"` (the degraded-save
+  path; the only discard whose temp directory is KEPT, 04-runtime §15). Nothing is
+  persisted for a discarded rollout; a trainer that watched it live drops what it landed.
+  The envelope's `session_id` is pinned at submit time (never `""` for a teardown discard).
+- `train_now` (new) — the Cockpit's **Train now** (`ActionMsg train_now`; no key):
+  `{rollouts_saved, requested_by: "operator"}`; the trainer decides whether to honour it
+  (the fakes ignore it while no rollout is kept).
+- Superseded (2026-09-08 evening) — v1.1's `iteration_complete` (`{iteration, session_name,
+  episode_ids, spool_paths, rollouts_dir, ref_grad_dir, replay_buffer, hparams, …}`) and
+  `pro_dagger_phase` (`{iteration, rollout_index, phase, detail}`): REMOVED from
+  `EventKind`, never shipped. The shell publishes no iteration- or algorithm-level event;
+  the trainer counts rollouts and decides when to train; the runtime reports what the
+  trainer says (`telemetry.dagger.online_dagger`).
 
 **Cameras.** The publish point is a tap in `EncoderWorker` right after the
 `frame.seq` dedup — per-stream fps pacing and the pre-session previews come
@@ -562,6 +710,7 @@ Appendix A).
 | `policy_action` | `policy/action` | `Float32[K*D]` row-major, K chunk rows × D dims | `observation_id` (int), `chunk_len` K (int ≥ 1), `action_dim` D (int), `chunk_dt_s` (float), `policy_id` (str), `policy_version` (int), `compute_ms` (float), optional `image_seq_used` (list[int]), `finite` (bool) | 1, drop_oldest |
 | `policy_spec` | `policy/spec` | `Utf8[1]` JSON `PolicySpecAnnounce` | — | 1 |
 | `policy_status` | `policy/status` | `Utf8[1]` free text (dora-hub `status` convention) | — | 8 |
+| `policy_trainer_status` (additive, phase-14, 2026-09-08; row reworded 2026-09-08 evening) | `policy/trainer_status` | `Utf8[1]` JSON `TrainerStatusAnnounce` — the 10-field GENERIC contract (15-online-dagger §6): `mavis_schema`, `trainer_id`, `node_version`, `state: idle \| preparing \| training \| ready \| error`, `session_id` echo (`null` = alive only), `policy_version` (acting version after the last swap), `progress` (0..1), `metrics: dict[str, float]` (free-form finite scalars, e.g. `loss`, `proj_rate`), `detail`, `uptime_s`; every float `allow_inf_nan=False`. Superseded (2026-09-08 evening): v1.1's algorithm fields (`iteration`, `ref_grad{…}`, epoch / step / `n_proj` / pool sizes / `scale_check`) — a trainer puts whatever it wants into `metrics` | — (the common inbound keys; same `seq` counter as the node's other outputs) | 8 |
 | `tick` | `dora/timer/hz/10` | — | — | bridge watchdog |
 | `probe_heartbeat` | `probe/heartbeat` | `Int64[1]` | — | dataflow liveness |
 
@@ -570,6 +719,16 @@ Appendix A).
 policy via the dora service pattern, §11.3), `cmd_request` / `cmd_response`
 (generic `CommandBus` exposure — session / episode ops stay REST + WS in v1).
 Reserving the names keeps a later addition additive.
+
+The `policy` placeholder's declared outputs are `[action, spec, status, trainer_status]`
+(`POLICY_OUTPUTS`, append-only) since phase-14; the rendered dataflow and
+`dataflows/mavis_v2.example.dora.yml` carry the new input as `policy_trainer_status:
+{source: policy/trainer_status, queue_size: 8}`. A `policy_trainer_status` is cached by
+the `ExternalPolicyHub` (newest wins, aged against `spec_stale_s`), surfaced as
+`ExternalStatus.trainer_status` and handed to the running Online DAgger session's
+coordinator (`ExternalPolicyHub.attach_trainer_sink` — the cached status is replayed on
+attach; the coordinator applies its own session-id rule, 15-online-dagger §3); a
+malformed one is dropped and counted like any other input.
 
 **Validation on receipt (bus thread, before anything reaches a slot):** JSON
 parses into the pydantic model (else dropped + `dropped_inputs++`, reason in
@@ -606,6 +765,28 @@ inference}` and `policy is None`. `SessionInfo` echoes it. Bring-up
    (`trainer_alive: null`), and `events.episode_saved` carries what an external
    trainer needs. Inference is unchanged apart from the source.
 4. Publish `policy_reset{reason: "session_start"}` and start `obs_state`.
+
+**Online DAgger (phase-14, 2026-09-08 evening; 15-online-dagger §3 / §6 / §7 / §12).** A
+`SessionSpec` with `mode: dagger`, `policy_source: external` and a non-null
+`online_dagger: OnlineDaggerConfig{session_name, resume, pause_while_training,
+wait_for_trainer_ready}` block is an Online DAgger session. `PolicySpecAnnounce.
+capabilities: list[str] = []` (additive, appended last) is how a node declares the
+trainer role — a trainer-capable node lists **`"online_dagger"`**;
+`SessionAnnounce.online_dagger: OnlineDaggerAnnounce | None` (additive, appended last;
+`{session_name, session_dir, rollouts_dir}`) is how the runtime tells it where the
+session lives. `POST /api/session` adds, AFTER `_check_dataset_spec` and the hardware
+refusal matrix (D7: `dagger` on hardware is still 409 there) and BEFORE the
+return-to-start check (`SessionManager._check_online_dagger`, before any side effect),
+the 409s `"Online DAgger session '<s>' already exists - resume it or pick another
+name"`, `"Online DAgger session '<s>' not found"`, `"Online DAgger session '<s>':
+session.json is unreadable - fix or remove it"`, `"dataset 'online_dagger/<s>' is being
+exported - retry in a moment"` (or the legacy-tree 409), then the shared `"no external
+policy attached (…)"` of step 1 and, with a fresh spec that lacks the capability, `"no
+Online DAgger trainer attached (the policy node does not report the online_dagger
+capability)"`. There is NO offline-dataset check (the trainer configures its own anchor).
+Superseded (2026-09-08 evening) — v1.1's `pro_dagger` block, the `"pro_dagger"`
+capability and the three `"offline dataset …"` 409s. `ExternalStatus.capabilities` /
+`.trainer_status` (§13) let the launcher show this before the POST.
 
 ### 6.2 What the policy node must do
 
@@ -664,7 +845,32 @@ class PolicySpecAnnounce(BaseModel):
     acts_total: int = 0
     last_compute_ms: float | None = None
     extrinsics_sha: str | None = None   # camera-frame policies: 10-frames §5.3 check
+    capabilities: list[str] = []        # phase-14 (additive, appended last): ["online_dagger"]
+                                        #   for a trainer-capable node (15-online-dagger §6;
+                                        #   v1.1 spelled "pro_dagger", superseded 2026-09-08 evening)
 ```
+
+**Trainer role (phase-14, 2026-09-08; generic since the same evening — 15-online-dagger §3 /
+§9 / §10 are the contract).** A node that lists `"online_dagger"` also consumes `session`
+announces carrying an `online_dagger` block and the `events` stream (`gate`,
+`episode_saved` + `online_dagger` block, `episode_discarded`, `train_now`): on the
+`running` announce it prepares itself (`trainer_status` `preparing` → `ready`, echoing the
+served `session_id`; the runtime admits rollouts only after `ready` when
+`wait_for_trainer_ready`), it counts kept rollouts ITSELF and decides when to train
+(`train_if_due`), reports `training` (+ `progress`, `metrics`; the runtime refuses new
+rollouts meanwhile when `pause_while_training`), swaps the weights into the acting policy,
+bumps `spec.version` — the node publishes the new `spec` BEFORE the `ready` status that
+carries the swapped `policy_version`, so the runtime's acting version never lags — and
+heartbeats `trainer_status` at 1 Hz + on change; at session end one final `idle` with
+`session_id: null`. WHICH algorithm it runs is its own business (PRO-DAgger is the shipped
+reference implementation, `mavis_policy_node.pro_dagger`, on top of the generic
+`mavis_policy_node.online_dagger` loop and its `OnlineDaggerTrainer` hooks). For a policy
+repo: the policy-node README's "Online DAgger trainer role" section plus the skill the
+runtime serves at `GET /api/online_dagger/skill[.tgz]` (`mavis-policy-node --online-dagger
+fake|pkg.mod:make_trainer [--trainer-config <yaml|json>]`; `--selftest online-dagger`).
+Superseded (2026-09-08 evening) — v1.1: "prepares the reference gradient from
+`offline_dataset_dir` into `ref_grad_dir` … on `events.iteration_complete` it trains the
+listed episodes … `GET /api/pro_dagger/skill[.tgz]`".
 
 ### 6.3 Staleness and hold (unchanged rule, runtime clock)
 
@@ -802,27 +1008,102 @@ a TCP listener on `*:34329`. Left alone, any process on the LAN / tailnet
 could inject `policy_action` messages; the twin gate bounds the physical
 damage, not the intent.
 
-Binding for v1 (**single host**):
+Binding for v1 (**lab host + LAN subscribers; v0.3, user requirement
+2026-09-07**), verified with dora 1.0.1 on the lab host (`/tmp/dora-lan-exp/`):
 
-- Control plane (runtime-owned): `dora coordinator --port <P> --store memory` (binds
-  loopback in 1.0) and `dora daemon --coordinator-port <P> --local-listen-port
-  <Q> --zenoh-no-multicast --zenoh-listen 127.0.0.1:<Z>`; the runtime exports
-  `DORA_ZENOH_CONNECT=tcp/127.0.0.1:<Z>` to itself before creating the node
-  (dynamic nodes do not inherit the daemon's env — `dora daemon --help`) and
-  publishes the same facts in `GET /api/dora` for foreign clients. Default
-  ports 6113 / 53391 / 7447 (never the machine-global 6013 / 53291).
-- Verification recipe (also an acceptance test): `ss -lunp | grep 224.0.0.224`
-  shows no dora / runtime / fake-node PID; `ss -ltnp` for those PIDs lists only
-  `127.0.0.1` listeners.
-- No coordinator auth in v1 (`--auth` is an operator option); the NICs facing
-  the two control boxes (Perception Arm `192.168.2.219`, Manipulation Arm
-  `192.168.1.201`) must never see zenoh traffic — `--zenoh-no-multicast` is
-  what guarantees it. Phase-09 confirms on hardware that the xArm SDK report
-  streams are unaffected.
-- Cross-machine (policy on another GPU box, other robots' code elsewhere) is
-  **v2**: `--zenoh-peer` / `--zenoh-listen <lab LAN IP>:<port>` plus an
-  allow-list or `--auth`, decided explicitly by the user; nothing in this
-  document assumes it.
+- **Bind address.** `dora.bind_host` selects the ONE interface the private
+  control plane listens on: `127.0.0.1` in the tracked config (same-host
+  only, the v0.2 behaviour); in the rendered lab config the lab Wi-Fi LAN —
+  SSID **APOLLO Lab**, `wlp38s0`, DHCP (192.168.0.88/24 on 2026-09-07; the lab
+  was on YaleSecure / 10.66.241.33 earlier the same week) — or the Tailscale
+  address. Because the Wi-Fi address is DHCP-assigned, `bind_host` also accepts
+  an INTERFACE NAME (`wlp38s0`, `tailscale0`) that the bridge resolves to its
+  current IPv4 at start (and re-resolves before a dataflow restart); the lab
+  render uses the interface name. `0.0.0.0` is refused, and so is any address
+  inside a control-box subnet (the HOST's own addresses on the two arm links,
+  192.168.1.11 and 192.168.2.12 — `workcells.hardware` arm subnets) — the
+  bridge goes `disabled` with a detail instead of binding the arm NICs.
+  Multicast stays off everywhere. To be explicit about what this rule is NOT:
+  the runtime keeps talking to the control boxes (192.168.1.201 / 192.168.2.219)
+  over those two NICs exactly as before — that is the xArm SDK path and it is
+  untouched. The rule only says where **dora listens**: on the Wi-Fi LAN where
+  the consumers are, not on the point-to-point arm links, where nothing needs
+  dora and where zenoh's default per-NIC sockets would otherwise appear
+  (measured 2026-09-07). The two paths use different interfaces and do not
+  conflict; binding one interface is what keeps them apart.
+- **Control plane (runtime-owned):** `dora coordinator --interface <bind_host>
+  --port <P> --store memory [--auth]` and `dora daemon --machine-id <machine_id>
+  --coordinator-addr <bind_host> --coordinator-port <P> --local-listen-port <Q>
+  --zenoh-no-multicast --zenoh-listen <bind_host>:<Z>` (§2.2). Facts measured:
+  with `--interface <LAN IP>` the coordinator no longer listens on loopback, so
+  every runtime CLI call carries `--coordinator-addr`; the daemon's dynamic-node
+  port `<Q>` ALWAYS binds 127.0.0.1 (so `Node(...)` attaches are same-host by
+  construction); zenoh advertises exactly the `--zenoh-listen` address and
+  remote daemons dial it. Default ports 6113 / 53391 / 7447 (never the
+  machine-global 6013 / 53291).
+- **Own node hygiene.** Before `Node("mavis_runtime")` the runtime sets
+  `DORA_ZENOH_CONNECT=tcp/<bind_host>:<Z>`, `DORA_ZENOH_MULTICAST=off`,
+  `DORA_ZENOH_LISTEN=tcp/127.0.0.1:0`. Measured without the last two: the
+  dynamic node joined multicast `224.0.0.224:7446`, opened UDP sockets on every
+  NIC **including 192.168.1.11 and 192.168.2.12**, and a wildcard TCP listener;
+  with them it has one loopback listener and no UDP. The same three variables
+  are set by every example node, by the policy-node package and are part of
+  the remote recipe below. (These are the variables the daemon itself injects
+  into spawned nodes.)
+- **Remote subscribers = dora multi-daemon.** The remote host runs the SAME
+  dora version and its own daemon against the runtime's coordinator:
+  `export DORA_COORDINATOR_ADDR=<bind_host> DORA_COORDINATOR_PORT=<P>
+  [DORA_AUTH_TOKEN=<token>]`; `dora daemon --machine-id <remote_id>
+  --coordinator-addr <bind_host> --coordinator-port <P> --local-listen-port
+  <Q2> --zenoh-no-multicast --zenoh-listen <remote_lan_ip>:<Z2>`
+  (`--zenoh-connect tcp/<bind_host>:<Z>` is optional — the coordinator hands
+  daemons each other's endpoints); then a process on that host attaches with
+  `export DORA_ZENOH_CONNECT=tcp/<remote_lan_ip>:<Z2> DORA_ZENOH_MULTICAST=off
+  DORA_ZENOH_LISTEN=tcp/127.0.0.1:0` and `Node("viewer_<remote_id>",
+  daemon_port=<Q2>)` (no token, no coordinator env — verified). `<remote_id>`
+  must be one of `dora.machines` (§12) and its daemon must be registered when
+  the dataflow is (re)started: `dora start` refuses a YAML naming an absent
+  machine, `dora node add` cannot target a remote machine (it lands on the
+  local daemon — verified), and a placeholder never migrates to a daemon that
+  registers later. Hence the rescan / restart in §2.2 step 6 and the explicit
+  `POST /api/dora/machines/{id}/join` trigger for a remote operator who has
+  just started their daemon. When a remote daemon dies the dataflow keeps
+  running for everyone else; its viewer gets `ERROR … Receiver timed out`.
+  Firewall: remote → lab TCP `<P>` and `<Z>`; lab → remote TCP `<Z2>` (every
+  daemon must be dialable by every other daemon).
+- **Measured cross-daemon cost** (two daemons on the lab host, LAN address,
+  SHM disabled by a zenoh overlay = the real TCP path): 921,600 B rgb8 @30 Hz
+  p50 4.7 ms / p90 5.7 / p99 6.8 / max 23 ms, 0 gaps; 28 B float32 @100 Hz
+  p50 0.42 / p99 0.97 ms; daemons ≈ 10–11 % of a core each. A real second
+  host adds link time (two cameras ≈ 250 Mbit/s on gigabit, ~9 ms per frame
+  pair). With SHM (same host) the image path is p50 3.9 / p99 5.2 ms.
+- **Authentication.** `dora.auth` defaults to true whenever `bind_host` is not
+  loopback. The coordinator writes a 64-character token to `<var_dir>/.dora-token`
+  (its cwd) and `~/.config/dora/.dora-token`; daemons / CLI without it get
+  `401 Unauthorized` (verified), same-user local clients read the home copy
+  automatically. **The token is never served by `GET /api/dora`**; it is read
+  from `<var_dir>/.dora-token` by the lab operator (`python -m
+  apollo_mavis_v2_runtime.dora_bridge.nodes.env` prints the export line on the
+  lab host) and handed to remote operators out of band (`DORA_AUTH_TOKEN`).
+  Limits of 1.0.1: auth covers ONLY the coordinator WebSocket (daemon
+  registration, CLI). The zenoh data plane `<Z>` and the daemon node ports have
+  no authentication and no TLS: any host that can reach `<Z>` can subscribe to
+  every stream with a raw zenoh client (verified: `dora/default/<uuid>/output/…`
+  keys, Arrow IPC payloads) and can publish onto any key — the runtime accepts
+  `policy_action` only inside a session with `policy_source: external` and a
+  matching `session_id` / `epoch` (§3.2), which bounds what an injected message
+  can do, but the observation streams are readable by anyone on the reachable
+  network. Keep `bind_host` on the trusted lab LAN or Tailscale and firewall
+  `<Z>` to the known consumer hosts; zenoh TLS / ACL via
+  `--zenoh-config-overlay` is a v2 item.
+- **Verification recipe (acceptance tests):** `ss -lunp` shows no UDP socket
+  and no `224.0.0.224` membership for the runtime, dora and node PIDs;
+  `ss -ltnp` for those PIDs lists only `<bind_host>` (coordinator, zenoh) and
+  `127.0.0.1` (daemon node ports, node listeners) — never 192.168.1.11 /
+  192.168.2.12; a second daemon with `--machine-id remote` on the lab host
+  registers, its `viewer_remote` receives frames at the numbers above; a daemon
+  without the token is rejected with 401. Phase-09 confirms on hardware that
+  the xArm SDK report streams are unaffected.
 
 ## 10. Testing without hardware
 
@@ -955,6 +1236,25 @@ version; `PolicyReloaderImpl._load` maps a timeout / `ok: false` onto its
 existing `_reject` path) is the v2 route to restore runtime-driven rollback
 for nodes that share the checkpoint filesystem.
 
+**Addendum (2026-09-08, phase-14; reworded the same evening).** The external trainer
+path sketched above is now SPECIFIED: `15-online-dagger.md` (the runtime's
+`OnlineDaggerCoordinator` owns rollout-level control only — the recording, the
+`episode_new` gate on the trainer's status, the `takeover` / `handback` / `train_now`
+API, the gate events; the policy node owns training, the swap and every algorithm
+decision; `trainer_status` / `events` / `PolicySpecAnnounce.capabilities` /
+`SessionAnnounce.online_dagger` are the wire). The recommendations of the previous
+paragraph became rules there: the swap happens between rollouts (rollouts are refused
+while the trainer reports `training` with `pause_while_training`), the runtime tracks the
+acting version from the spec heartbeat / action metadata and counts mid-episode changes
+as before (the node re-announces `spec` before the `ready` status). `PolicyResetReason`
+`"episode_boundary"` is now actually spelled at every episode boundary
+(`episode_new` / save / discard — `GatedPolicyExecutor._episode_boundary` →
+`drop_and_requery("episode_boundary")`); a handback inside an episode keeps
+`"handback"` (before phase-14 both spelled `"handback"`). `LAST_KNOWN_GOOD` /
+`weights_reload` stay the v2 route. Superseded (2026-09-08 evening) — the morning's
+"`ProDaggerCoordinator` owns the iteration state machine … `events.iteration_complete`
+… refused while `training` / `swapping`".
+
 ## 12. Configuration (`RuntimeConfig.dora`, 04-runtime §14 block)
 
 ```yaml
@@ -962,10 +1262,21 @@ dora:
   enabled: false                 # default off until phase-12 lands; true + missing extra = disabled + warning
   node_id: mavis_runtime
   dataflow_name: mavis_v2
+  bind_host: 127.0.0.1           # v0.3: the ONE interface the private control plane listens on —
+                                 #   an IPv4 address OR an interface name resolved at start
+                                 #   (lab render: wlp38s0 = the APOLLO Lab Wi-Fi, 192.168.0.88 on
+                                 #   2026-09-07, DHCP; or tailscale0); 0.0.0.0 and any control-box
+                                 #   subnet address are refused (§9)
+  machine_id: lab                # this daemon's id; every local node deploys here
+  machines: []                   # remote consumer machines allowed to join, e.g.
+                                 #   [{id: gpubox, placeholders: [viewer, observer]}] -> nodes
+                                 #   viewer_gpubox / observer_gpubox deployed on that daemon (§2.3, §9)
+  rescan_s: 5.0                  # poll registered daemons; a change restarts the dataflow (§2.2 step 6)
+  auth: null                     # null = true when bind_host is not loopback; token in <var_dir>/.dora-token
   coordinator_port: 6113         # private ports (never the machine-global 6013/53291); the runtime
   daemon_port: 53391             #   always owns coordinator + daemon (§2.2) — there is no other mode
-  zenoh_port: 7447               # daemon --zenoh-listen 127.0.0.1:<zenoh_port>; exported to self and
-                                 #   to foreign clients as DORA_ZENOH_CONNECT=tcp/127.0.0.1:<zenoh_port>
+  zenoh_port: 7447               # daemon --zenoh-listen <bind_host>:<zenoh_port>; exported to self and
+                                 #   to foreign clients as DORA_ZENOH_CONNECT=tcp/<bind_host>:<zenoh_port>
   var_dir: ~/apollo/dora         # rendered YAML, out/ logs, lock file, node-stdout.log
   attach_retry_s: [1.0, 10.0]    # backoff bounds
   bus_poll_s: 0.002
@@ -1037,7 +1348,42 @@ class ExternalStatus(BaseModel):            # telemetry.external
     action_age_s: float | None = None
     version_changes_mid_episode: int = 0
     idle_reader: Literal["off", "running", "paused", "stale"] = "off"   # §4.2
+    # v1.0 (§16.1): + dataflow_restarts: int = 0, spec_age_s: float | None = None
+    # phase-14 (2026-09-08, additive, appended last; 15-online-dagger §6/§8):
+    capabilities: list[str] = []            # the FRESH spec's PolicySpecAnnounce.capabilities
+                                            #   (["online_dagger"]); [] when no spec is fresh —
+                                            #   gates "Start Online DAgger" in the launch sheet
+    trainer_status: TrainerStatusAnnounce | None = None   # newest policy_trainer_status while
+                                            #   fresh (the session-less trainer pill); None once the
+                                            #   node detaches / falls silent > spec_stale_s
 ```
+
+**Phase-14 deltas (2026-09-08, additive; as shipped the same evening — 15-online-dagger
+§5 / §6 / §12).** core `protocol/external.py`: `IN_POLICY_TRAINER_STATUS =
+"policy_trainer_status"` appended to `RUNTIME_INPUTS`, `POLICY_OUT_TRAINER_STATUS =
+"trainer_status"` appended to `POLICY_OUTPUTS`, `EventKind` += `train_now` (10 kinds),
+`PolicySpecAnnounce.capabilities`, `OnlineDaggerAnnounce{session_name, session_dir,
+rollouts_dir}` + `SessionAnnounce.online_dagger`, `TrainerStatusAnnounce` (10 fields:
+`mavis_schema, trainer_id, node_version, state, session_id, policy_version, progress,
+metrics, detail, uptime_s`), the two `ExternalStatus` fields above; `EXPORTED_MODELS` +=
+`OnlineDaggerAnnounce`, `TrainerStatusAnnounce` (+ `OnlineDaggerConfig` /
+`OnlineDaggerSessionInfo` of 01-core §12; `OnlineDaggerStatus` rides `TelemetryMsg`
+`$defs`). Superseded (2026-09-08 evening) — the morning's `iteration_complete` /
+`pro_dagger_phase` kinds, `ProDaggerAnnounce`, `RefGradStatus` (deleted, not aliased). runtime:
+`dora_bridge/dataflow.py` renders the input (queue 8) and the output (the example dataflow
+is byte-identical to the morning's — the ids did not change); `ExternalPolicyHub` caches
+`trainer_status`, exposes `trainer_capable()` (`"online_dagger"` in the FRESH spec) /
+`trainer_status(now)` / `trainer_age_s(now)` and replays the cached status + spec version to a
+coordinator that attaches later (`attach_trainer_sink` / `detach_trainer_sink`);
+`DoraWiring.external_status` fills the two fields; `SessionFacts.online_dagger` rides the
+announce; `SnapshotPublisher.publish_event(kind, payload, session_id)` carries the kinds and
+`enqueue_event()` (deque 256) takes gate events from the tick. Both contract goldens
+(runtime `tests/dora_bridge/golden/contract_golden.json`, policy-node
+`tests/golden/contract_golden.json`) carry the two keys `TrainerStatusAnnounce` /
+`OnlineDaggerAnnounce` (field-name lists, inserted after `event_envelope_fields`),
+`event_kinds` ending `train_now`, `session_announce_fields` ending `online_dagger`,
+`policy_spec_announce_fields` ending `capabilities`; byte-identical (sha256 `4dc67e12…997d`,
+3698 B).
 
 **hardware (02-hardware §8, §4):** `RealSenseCamera` enables the depth stream +
 `rs.align` when `CameraConfig.depth` (FakeSDK coverage); `~2 ms/frame` align
@@ -1100,6 +1446,11 @@ replaced by the digital-twin scene boundary the user will provide (Appendix
 A); cell — two control boxes (Perception Arm `view` 192.168.2.219,
 Manipulation Arm `grip` 192.168.1.201), no F/T sensor.
 
+**Resolved 2026-09-07 (user):** LAN subscribers are v1 — publishing is
+unconditional for the process lifetime and consumers on other machines of the
+lab network subscribe through dora's multi-daemon mechanism (§9); there is no
+"tripod mode" of any kind.
+
 Still open:
 
 1. **Camera encoding for remote consumers** — raw rgb8 at 30 Hz is fine on
@@ -1131,6 +1482,213 @@ to park the Perception Arm: `13-tracker-teleop.md` §4, `04-runtime.md` §6.
 Core spellings: `01-core.md` §5.2/§6/§11/§12/§14/§15.
 Research: `docs/research/dora-middleware.md` (2026-09-01 + status update).
 Implementation plan: `docs/prompts/phase-12-dora-interface.md`.
+
+## 16. Implementation record (phase-12, 2026-09-08)
+
+Everything in §1–§13 is implemented as written unless listed here. Spelling authority is
+now core `protocol/external.py` (this document and that module agree; the policy-node repo
+copies the spellings and both repos pin them with the shared golden
+`tests/dora_bridge/golden/contract_golden.json` / `tests/golden/contract_golden.json`).
+
+### 16.1 Deviations from v0.3 and why
+
+| Item | v0.3 said | Implemented | Why |
+|---|---|---|---|
+| `dora.var_dir` default | `~/apollo/dora` | `${APOLLO_HOME}/var/dora` | the 2026-09-07 self-contained-paths rule (04-runtime §14): nothing under `~/apollo` |
+| Arm states between sessions on hardware (§4.2) | `IdleArmReader` holds its own read-only `XArmDriver.connect(readonly=True)` per box \| `dora.publish.idle_source: monitor \| driver` (default **`monitor`**): the reader re-publishes the phase-09a read-only `HardwareStateMonitor` samples — zero additional SDK clients; `driver` uses the new `connect(readonly=True)` (hardware §16.3) and is the path when the monitor is disabled \| "two SDK clients on one control box are unevidenced" (CLAUDE.md, 04-runtime §13.3); the monitor already pauses itself around hardware sessions. Both sources publish the same idle `StateSnapshot` (`tick == -1`, `session_extra.source == "idle"`) into `bus.snapshot` |
+| Registered-daemon discovery (§2.2 step 6) | "find the CLI / control API that lists daemons" | **`dora doctor --coordinator-addr … --coordinator-port …`** parsed (`Connected machines:` block, ids `<machine_id>-<uuid7>`; a dead daemon disappears within ≤ 5 s); run on a helper thread `dora-rescan` every `rescan_s` and on `POST /api/dora/machines/{id}/join`, never on `dora-bus` | `dora status --format json` reports one `daemon.status` only and `dora list` lists dataflows only (verified 2026-09-07); a subprocess spawn on the bus thread cost camera frames (measured slot overwrites) |
+| Idle `session` announce | `arm_ids` / `has_rail` only | also `frames` (`arm_base:<id>`), `action_space: delta_ee`, `action_names`, `state_names` of the delta_ee layout over ALL configured arms, `camera_ids` seen | a policy node must declare a matching spec BEFORE the operator starts the session (§6.1 step 2 is checked at `POST /api/session`); the fake node learns the layout from this announce |
+| Per-client `seq` (§3.2) | non-monotonic ⇒ dropped | `seq == 1` resets the per-`(input, client)` counter; nodes append their pid to `client` (`mavis-policy-node#<pid>`, `fake_policy#<pid>`) | a restarted node otherwise stays dropped until it overtakes the dead process's counter |
+| Microphone output (§2.5) | depth-1 slot | the ordered bounded FIFO (shared with `events` / `policy_reset`, 64 deep ≈ 2.5 s of audio) | `block_seq` must stay gap-free across a GIL stall of the bus thread; a slot overwrite is a lost block, a FIFO entry is a late one |
+| Every output metadata | §3.2 keys | + `send_t_mono` (the publish instant; `t_mono` is the frame's capture time for cameras) and `prewarm: true` on the one dummy frame per camera output sent right after attach | consumers measure hop latency against `send_t_mono`; `viewer_probe` skips prewarm frames |
+| stdout diagnostics (§8) | try `RUST_LOG=error` first, fd redirect as fallback | `RUST_LOG=error` is set before `import dora` AND fd 1 is `dup2`'d to `<var_dir>/node-stdout.log` (20 MB rotate) for the node's lifetime when `dora.log.quiet_node_diagnostics` | measured 2026-09-07: with `RUST_LOG=error` the node API still printed JSON WARN lines (`dora-rs/dora#2742` diagnostics, zenoh SHM watchdog) — 11 lines in the first second of two 640×480 cameras; with the redirect 0 lines reach the runtime's stdout (`PYTHON_PRINT_STILL_VISIBLE` test: Python's `sys.stdout` is re-opened on the saved fd) |
+| Detach → re-attach (§2.4) | "retry 1 s → 10 s backoff" | a detach waits `attach_retry_s[0]` (1 s) before re-running steps 3–5 even when the control plane is healthy | consumers (and `GET /api/dora`) observe `detached`; a dying daemon gets a moment to die before the respawn check |
+| `SnapshotPublisher` wake-up | driven by `bus.snapshot.wait_fresh(0.1)` | `wait_fresh(min(0.1, 0.5 / telemetry_hz))` (≥ 50 Hz), idle `arm_state` publishes EVERY idle snapshot (paced by the reader at `idle_state_hz`), loop `arm_state` decimated to `state_hz` | between sessions only 10 Hz snapshots arrive — telemetry (25 Hz) and heartbeat must not wait for them; decimating a 10 Hz stream by a 10 Hz gate lost ~10 % on jitter |
+| `viewer` / `viewer_<id>` inputs (§2.3) | `cam_view_wrist_cam` (+ depth) | `arm_state`, `session`, EVERY published `cam_*` (+ its depth sibling) | a fixed-viewpoint consumer may want either wrist camera; additive (queue 1 drop_oldest) |
+| Example dataflow interpreter | `sys.executable` | the committed `dataflows/mavis_v2.example.dora.yml` pins `python3`; the runtime's rendered `<var_dir>/mavis_v2.dora.yml` pins `sys.executable` | a byte-identical committed example cannot contain a machine-specific path |
+| Test package name | `tests/dora/` | `tests/dora_bridge/` (a package) | a top-level `tests/dora` package on `sys.path` would shadow the `dora` PyPI module |
+| Sim depth (§4.2) | "depth sibling stream" | the same `CameraFrame` carries `.depth` (uint16 mm, `depth_scale_m` 0.001); `SimWorkcell(depth_cameras=…)` / `SimCamera(depth=True)` render it with `Renderer.enable_depth_rendering()` (≈ +1.15 ms/frame at 640×480); the bridge publishes it as `cam_<id>_depth` with the SAME `frame_seq` | seq alignment by construction; `RenderService` keeps one renderer per (source, h, w) with the depth toggle wrapped in try/finally |
+| `GatedPolicyExecutor` telemetry | — | `DaggerStatus.policy_stale` / `InferenceStatus.policy_stale` = `staleness_scale(now) < 1` or the external node gone; `policy_version` string from `PolicySource.version_label()` (`"<policy_id>/v000002"` for external); the recorded `policy_version` from `current_version()` | the promised 04-runtime §15 drift, closed |
+| `SessionManager._validate` | — | skips `resolve_policy` for `policy_source: external` (no checkpoint exists) and `SessionInfo` echoes `policy_source` | otherwise every external session 409'd "no promoted deploy checkpoint" |
+| Parked pose in sim (§4.2) | preview `MjData` keeps the session's final joints | the manager captures the LAST loop snapshot's joints at teardown, `submit_state`s them to the recreated preview render source and serves them through `SimIdleSource`; the built preview scene is cached per process (a MuJoCo compile is ~0.3–0.5 s) | the parked camera pose equals the last in-session frame's pose exactly (the test asserts ≤ 1e-6) |
+| `rtt_probe` | "two-hop RTT node" | plays the RUNTIME's role (`Node("mavis_runtime")`) on a runtime-less private dataflow against `fake_policy --mode echo` | dynamic node ids are not exclusive: two `mavis_runtime` attaches would split the inputs |
+| `ExternalStatus` | as §13 | + `dataflow_restarts`, `spec_age_s` | join/rescan visibility; the spec heartbeat age |
+| **Remote machines: explicit JOIN, not registration** (§2.2 step 6, §9) | a registered remote daemon ⇒ rescan renders `viewer_<id>` / `observer_<id>` and restarts the dataflow | **dora 1.0.1 start barrier (measured 2026-09-08)**: with a dynamic placeholder deployed on another machine, `dora start` leaves EVERY node of the dataflow unstarted — the lab daemon does not spawn `probe` and a `Node("mavis_runtime")` attach on the lab daemon **blocks forever, holding the GIL** (the whole runtime process froze; a `Node()` started before the remote consumer attaches never unblocks even when it attaches later) — until the remote dynamic node has been attached. Hence: (1) registration only sets `machines[].registered` (rescan, `dora doctor`); (2) `POST /api/dora/machines/{id}/join` restarts the dataflow with that machine's placeholders and the bridge waits up to `dora.join_attach_timeout_s` (30 s) for the barrier to clear before it attaches — detected by attaching a lab-side dynamic node `canary` (declared in the rendered YAML, `nodes/canary.py`) in a SUBPROCESS: it returns 0 the moment dora lets it through and is killed at the deadline, so a closed barrier can only ever block a child process (an earlier check via `dora node list` `probe` = `Running` was fooled once by the previous same-named dataflow's probe after an unclean stop and froze the runtime — `node_status` now filters by dataflow UUID and is diagnostic only); the remote consumer must attach `viewer_<id>` inside that window; (3) an expired join rolls back to a dataflow without the machine (`machines[].detail`: "join timed out …") so local publishing never depends on a remote; (4) ANY other restart (daemon death, `dora stop`, a vanished remote daemon) renders WITHOUT remote placeholders — remotes re-join (they receive STOP / INPUT_CLOSED anyway); (5) `DoraMachineInfo` gained `joined` and `detail`. The remote recipe (§9) becomes: start `dora daemon --machine-id <id> …`, `POST /api/dora/machines/<id>/join`, attach `Node("viewer_<id>", daemon_port=<Q2>)` within 30 s (measured: joined + re-attached 0.4 s after the viewer attached) | the v0.3 flow deadlocked the runtime in the LAN acceptance test |
+| Attach churn | — | dora 1.0.1 leaks its `dora-node-runtime` Rust threads on every `Node()` (64 threads after a 6-minute restart loop) — the bridge never restarts a dataflow on a rescan unless a joined daemon vanished, and the first attach never re-queries `dora doctor` mid-restart (the query raced `dora stop` and rendered the remote out again) | observed while diagnosing the freeze above |
+| **Remote daemon loss: no automatic restart** (§9) | a joined machine whose daemon vanished loses its placeholders at the next rescan (stop + re-render + start) | **measured 2026-09-08**: the dataflow with a placeholder on a dead machine keeps Running, the lab daemon drops frames to the dead peer without ever stalling `send_output`, local consumers keep every frame — but the `dora stop` + `dora start` the v0.3 rule issued ~2 s after the loss made the dora 1.0.1 coordinator answer **`429 Too Many Requests` to every CLI call for ~50 s** (reproduced WITHOUT the runtime: a bridge-like publisher + `dora doctor`/`dora list` at ~1 call/s after the death → 429 from +15 s on, while a lone `dora list` every 4 s or a `dora doctor` every 2.5 s without a publisher stayed fine, and the same CLI at 5–20 req/s with no dead machine never tripped it — so it is the coordinator's handling of a dataflow that still deploys nodes on a dead machine, and CLI calls in that state hasten it; the exact rule is inside dora, see the report's open problems). During that window the bridge could neither `dora start` nor `dora list`, sat `unavailable`, and local consumers lost the stream. Hence v1.0: a vanished daemon only marks the machine **lost** (`machines[].registered: false`, `joined: false`, detail "daemon unregistered: its placeholders stay in the running dataflow …"); its placeholders are rendered out at the next restart for another reason (a join, a re-attach — `_attach` renders lost machines out before re-attaching, since re-attaching under a dead-machine placeholder is unverified against the start barrier); a returning daemon is `registered` again and its `POST join` is the (non-idempotent) restart that re-deploys `viewer_<id>` on the new daemon | v0.3 rule wedged the control plane |
+| Observer input queues (§2.3, §4) | every placeholder input `queue_size: 1, drop_oldest` except `events` 64 | the `observer` (a logger) keeps latest-wins only for the high-rate image / state streams; `mic_*` gets `queue_size: 32` (1.3 s at 25 Hz), `session` / `telemetry` / `policy_reset` / `heartbeat` 8, `events` 64 — with `queue_size: 1` one 40 ms consumer hiccup in a 60 s window cost one mic block (measured 2026-09-08; the runtime's own FIFO had not dropped it). Viewer and policy inputs are unchanged | a log must not lose mic blocks to a scheduler hiccup |
+| Consumer-side first-frame stall (§7, §9 recipes) | — | every camera input of a viewer/observer is `queue_size: 1, drop_oldest` (latest wins, by design), so a consumer that stalls ~200 ms loses the 2-3 frames behind it with dora's `Discarding event for input … due to queue size limit`. The one stall every Python consumer pays is **pyarrow's numpy interop set-up on the first `Array.to_numpy()` of the process** (measured 2026-09-08 with per-iteration timing in `viewer_probe`: a 190 ms "body" stall on the first steady-state event; it produced exactly one 2-frame seq gap 0.07-0.4 s after the probes' warm-up ended, on the local and the remote viewer alike, and was first misread as a transport / `dora doctor` / daemon stall — all three ruled out by experiment: rescan on/off gave identical gaps, the bridge's own `send_output` never exceeded 0.9 ms, no slot overwrite). Consumers call `pa.array([0.0]).to_numpy()` once before attaching; the repo's probes and the policy node do; after that: 0 discards, 0 gaps. `dora doctor` every `rescan_s` (27 ms per call) does NOT disturb delivery | measured |
+| Policy-node repo | package deps `dora-rs`, `numpy` | + `dev` extra carries `dora-rs-cli` (its CI e2e needs the binary); `spec` messages carry the common inbound metadata keys; `LeRobotPolicy` is written against lerobot 0.6.x API names but never executed on a real checkpoint (none on this host) | — |
+
+### 16.2 Threading facts verified (§2.5)
+
+`dora.Node` stays single-owner on `dora-bus` (no experiment moved `next()` to a second thread).
+`try_recv()` returns `None` when the queue is empty and never blocks; `next(timeout)` returns
+`{"type": "ERROR", "error": "Timeout event stream error: Receiver timed out …"}` on timeout.
+`node_config()` on 1.0.1 returns `{"inputs": {...}, "outputs": [...]}` for a dynamic node —
+the bridge checks the input set == `RUNTIME_INPUTS` and the declared outputs ⊇ the expected
+set and reports a mismatch in `ExternalStatus.detail` (empty when it matches).
+- **Control-loop interference is a tail effect, cause not yet pinned (2026-09-08, 60 s sim teleop, safety
+  twin on, 4 rgb + depth + mic + telemetry, `tests/dora_bridge/test_perf_bridge.py`)**: with the bridge
+  OFF the live loop runs 100.0 Hz, 0 overruns, control-path (non-sweep) tick median 1.89–2.05 ms, p99
+  3.0–3.2 ms; with the bridge ON 99.9–100.0 Hz, 0 overruns (1 in one of four runs), median +0.06–0.38 ms,
+  **p99 5.4–7.9 ms, 5–12 % of ticks > 5 ms, max 8.5–12.9 ms**. The v0.3 "tick p99 < 2 ms" is not met by
+  the live loop even with the bridge off (the synchronous `tests/test_perf.py` yardstick is: it stops
+  the loop thread and the hub first). Ruled out by measurement: GC (≤ 7 gen-0 passes ≤ 0.45 ms per
+  minute, no gen-1/2), the 5 ms GIL switch interval (`sys.setswitchinterval(0.001)` changed nothing —
+  reverted), dora holding the GIL in `send_output` (a pure-Python spinner thread saw max 0.94 ms gaps
+  while 921 KB frames went out at 60 Hz, identical to idle; `send_output` itself peaked at 5.4 ms but
+  released the GIL). The bridge's own per-message costs are small (camera build 0.14–0.83 ms mean /
+  ≤ 4.1 ms max — the wrist cameras carry the one-pass FK —, send 0.2–0.3 ms mean / ≤ 1.8 ms max,
+  `arm_state` send 0.12 ms). Remaining suspects: many sub-millisecond Python-level GIL holds across the
+  bus / publisher / encoder-tap threads adding up against the 100 Hz thread, and lock contention on the
+  bus snapshot. An out-of-process bridge would remove it by construction (open problem). Mitigations
+  available today without code: lower `dora.publish.obs_hz` / `state_hz` / `telemetry` rate, publish
+  fewer cameras (`dora.publish.cameras`).
+- **First-call set-up is paid before "attached"**: the first `mic_*` build of a process cost 312 ms on
+  the bus thread (pyarrow / numpy interop) — with a session running that is a 312 ms control-loop stall;
+  `codec.warm_up()` now exercises every encoder once in `_attach()` before the bridge reports attached.
+- **dora 1.0.1 `Node()` monkeypatches the stdlib `logging.basicConfig` of the HOST process** (found
+  2026-09-08 through an order-dependent test failure): after the first `Node()` in a process,
+  `logging.basicConfig` is a function compiled from `<string>` (constants `handlers`, `level`) that
+  calls the real one with `handlers=[...]`, so any later `logging.basicConfig(stream=…)` or
+  `(filename=…)` — the runtime's own entry point, or a library configuring logging lazily — raises
+  `ValueError: 'stream' or 'filename' should not be specified together with 'handlers'`. The bridge
+  saves the function before `Node()` and puts the stdlib one back if it changed (INFO log
+  "dora Node() replaced logging.basicConfig; restored the stdlib one");
+  `tests/dora_bridge/test_live_control_plane.py` asserts it. Foreign node processes (policy node,
+  viewers) live with the wrapper — they never call `basicConfig` with `stream`/`filename` after
+  attaching, or they attach first.
+
+
+### 16.3 Acceptance numbers (lab host, 2026-09-08, sim `mavis_v2` unless noted)
+
+Filled from the phase-12 test run — see the phase-12 report (`docs/prompts/phase-12-dora-interface.md`
+验收标准 checklist) for the per-item PASS/FAIL table; the headline numbers:
+
+- attach after control-plane start: **0.12–0.17 s** (`GET /api/dora` attached ≤ 5 s ✓);
+- control-loop non-interference (60 s sim teleop, bridge off → on): tick rate 100.0 → 99.9–100.0 Hz,
+  overruns 0 → 0 (1 in one of four runs), control-path median 1.89–2.05 → +0.06–0.38 ms, **p99 3.0–3.2 →
+  5.4–7.9 ms** (§16.2 for the analysis; the v0.3 "< 2 ms" is not met by the live loop in either
+  configuration);
+- two-hop RTT `obs_state → fake_policy(echo) → policy_action`, 1000 samples @30 Hz (final run):
+  **p50 0.69 ms / p90 0.82 / p99 0.94 ms / max 1.07 ms, 0 lost** (an earlier 300-sample run: p50 0.79 /
+  p99 2.3 / max 5.0 ms);
+- `dora-bus` + `dora-publisher` CPU over the 60 s acceptance window: **7.0 % of one core** (bus 2.97 s +
+  publisher 1.42 s / 60.2 s) at 4 rgb × 15 Hz + depth 15 Hz + mic 25 Hz + telemetry 25 Hz + arm_state
+  10 Hz (idle), mic `block_seq` 25.0 Hz with **0 gaps** at the observer (its `mic_*` input is
+  `queue_size: 32`; at `queue_size: 1` one 40 ms consumer hiccup in 60 s cost one block); an earlier
+  12 s window read 5.2 % + 1.7 %;
+- `send_output` per 921 KB frame: mean 0.19–0.29 ms, max ≤ 1.0 ms; payload build 0.05 ms (static
+  camera) / 0.30 ms (wrist camera incl. the one-pass FK);
+- one-hop latency at a same-host `viewer` (`send_t_mono` → receive): p50 ≈ 1–8 ms (SHM path),
+  frame age (capture → receive, includes the encoder's 15 Hz poll): p50 ≈ 58 ms;
+- stdout: 0 dora diagnostic lines on the runtime's stdout over 20 s of two cameras + depth
+  (11 lines/s went to `node-stdout.log`);
+- LAN two-daemon (`bind_host: wlp38s0` → 192.168.0.88/24 on the "APOLLO Lab" Wi-Fi, auth on, a
+  second `dora daemon --machine-id remote` on the same host, `tests/dora_bridge/test_live_lan.py`):
+  coordinator + zenoh listen on 192.168.0.88 only, node port on 127.0.0.1, no UDP socket; a
+  token-less daemon gets **401**; the remote daemon is REST-visible (`machines[].registered`)
+  **1.8 s** after it starts (rescan 2 s) with `dataflow_restarts` still 0; `POST …/join` →
+  dataflow restarted with `viewer_remote` (`deploy: {machine: remote}`), the remote viewer attached
+  and the bridge was **joined + re-attached 0.3–0.4 s after the viewer started** (start barrier
+  cleared; the `canary` subprocess reported it open **1.6 s** after `dora start`, python + dora import
+  included); the remote viewer then received `cam_view_wrist_cam` at **15.0 Hz, 0 seq gaps,
+  cross-daemon latency p50 3.7 / p90 4.6 / p99 5.95 / max 6.9 ms** (`send_t_mono` → receive),
+  frame age p50 25.7 ms, inter-arrival max 72.6 ms over the 10 s window (a concurrent second
+  local viewer raised the remote p99 to 8–12 ms — the two-consumer number, not the acceptance
+  one); a second `POST join` while joined is a 202 no-op (no restart); the runtime showed **zero
+  slot overwrites** during the window; after the remote daemon was SIGKILLed the local viewer kept
+  15 Hz with 0 gaps, `registered` flipped false **0.0 s or 47.6 s** after the kill (two runs — the
+  coordinator's 429 window, next bullet), a new daemon under the same id was `registered` again
+  **1.8 s or 41.5 s** later (same reason), and its `POST join` re-deployed `viewer_remote` with one
+  restart (canary 1.6 s, re-joined viewer 0 gaps); the whole LAN test: 72 s;
+- `dora doctor` costs **25–30 ms** per call and does not disturb delivery; the coordinator's
+  websocket API never answered 429 to **5 req/s (412 calls) or 20 req/s (1314 calls)** of `dora
+  list`, auth on or off — so the 429 below is a state, not a request-rate limit;
+- REMOTE DAEMON DEATH (SIGKILL of the joined daemon, runtime publishing to it): the dataflow stays
+  Running and local consumers keep receiving; `dora doctor` drops the machine within **≤ 2 s**;
+  publishing to the dead peer never stalled `send_output`; BUT a `dora stop` + `dora start` issued
+  right after (the v0.3 "drop its placeholders" restart) failed, because once a machine with deployed
+  nodes has died while the dataflow runs the dora 1.0.1 coordinator soon answers **`429 Too Many
+  Requests` (`dora doctor`: "Coordinator: not reachable") to every CLI call for ~50 s** — measured 4×
+  with the runtime (`registered` flipped 47.6 s after the kill in the passing LAN run) and once without
+  it (bridge-like publisher + doctor/list polls at ~1/s → 429 from +15 s), `dora stop`/`start` inside
+  that window fail too, then it recovers by itself — see §16.1 "remote daemon loss" for what the
+  bridge does about it (no restart on loss, 10 s rescan back-off while `dora doctor` fails,
+  `registered` lags up to ~60 s, a returning daemon re-joins with one restart).
+
+### 16.4 Phase-12 merged into the main trees (2026-09-08)
+
+The `phase-12` worktrees were merged onto the uncommitted phase-13 working trees of the five
+sub-repos (3-way `git merge-file` per overlapping file, index untouched, nothing committed).
+Overlaps were reconciled without dropping a line of either side — core `SessionSpec`
+(`policy_source` next to `policy`, then the phase-13 dataset / filter / return block; both
+validator groups in sequence), `TelemetryMsg` field order `…, microphone, external,
+hardware_monitor, datasets`, runtime `manager.create()` (every phase-13 409 check → the
+phase-12 `dora.before_bringup()` bracket → bring-up), `MicrophoneReader._publish` (phase-13
+`sinks` then phase-12 `taps`), `ws_telemetry` (both builders), `rest.py` imports, the UI
+`Cockpit` (`external=` chips + `onTerminate={endSessionWithReturn}`); generated artifacts
+(core `schemas/`, ui `schemas/` + `src/gen/protocol.ts`, sim `ASSET_MANIFEST.json`) were
+regenerated, never hand-merged. Verification after the merge: core 423 passed, hardware 293,
+sim 155 (13 egl), runtime 632 passed / 2 skipped (all dora-marked live tests on a private
+control plane), ui 355 / 39 files, `gen:check` OK.
+
+**Two phase-12 tests asserted pre-phase-13 shapes and were adapted** (the only test edits of
+the merge):
+
+1. `tests/dora_bridge/test_import_confinement.py` — the AST scan sanctioned `pyarrow` only
+   under `dagger/`; phase-13's recorder imports it lazily for `episodes/<id>/frames.parquet`
+   and the LeRobot export. `PYARROW_ALSO_OK = {dagger, recorder}`, matching the widened
+   `pyproject.toml` `TID251` message (§1 amendment above). `dora` stays confined.
+2. `tests/dora_bridge/test_e2e_external_policy.py::test_external_dagger_two_episodes` — read
+   the dataset as a vanilla LeRobot v3 tree (`data/**/*.parquet` + `episode_index`); rewritten
+   to the episode-directory contract: `sorted(root.glob("episodes/*/frames.parquet"))`, exactly
+   two files (capture order), the same `policy_version` assertions per file.
+
+**Known flakes (host-dependent, not merge defects; left as they are):**
+
+- `test_e2e_external_policy.py::test_409_422_matrix_then_running_fast` asserts
+  `POST /api/session` → RUNNING within **1.0 s**; `SessionManager.create()` costs 0.6–0.85 s
+  on this host (`_servo_faithful_scene` ~310 ms + the first `DoraWiring.camera_announces`
+  kinematics build ~230 ms + sim / twin / EGL bring-up), identically in the merged and the pure
+  phase-12 tree, so the ~150 ms headroom trips under load (1.53–1.66 s seen twice at the end of
+  a full run; 12 of 13 isolated runs 0.71–0.80 s). Either pre-build the announce kinematics /
+  the servo-faithful scene or treat the budget as soft.
+- The live tests' leak check is a **machine-wide `pgrep -x dora`** (`harness.dora_pids()`,
+  `test_live_streams.py`, `test_live_control_plane.py`): a concurrent dora control plane on the
+  host — here a policy-node test run in `~/projects/apollo-mavis-v2-ws-p12` spawning
+  `dora coordinator/daemon --machine-id ci` — fails them with `dora processes left behind:
+  {…}` (and its load pushed a 15 Hz probe to 11.9–13.5 Hz). Two dora suites on one host is
+  unsupported; scoping the check to the venv path / process groups would weaken the rule and
+  was not done.
+- `test_e2e_fixed_viewpoint.py::test_park_the_perception_arm_then_end_the_session` failed once
+  right after the 72 s LAN test (joint creep 2.5e-5 rad vs the 1e-6 PD-settle tolerance),
+  green in isolation in both trees; `test_live_control_plane.py::test_control_plane_port_busy_…`
+  failed once on a busy port and passed on re-run.
+- `test_perf_bridge.py::test_teleop_tick_rate_with_bridge_on_and_off`: the `overruns == 0`
+  guard fails 1-in-2 in isolation (one overrun per 5 s window) with the old AND the new encoder
+  loop — the documented GIL-tail open problem (§16.2), not loosened.
+- Also fixed on the way (phase-14 verification): `streams/hub.py` `EncoderWorker` sampled the
+  depth-1 slot once per fixed 1/fps grid tick and aliased against the sim `RenderService`'s
+  equal-rate grid (pre-session `cam_view_wrist_cam` at 11.9–14.5 Hz with contiguous seqs); the
+  poll now waits inside its period for the next distinct seq and re-anchors (14.98 Hz, 0 gaps,
+  frame-age p99 62–67 → 11.7 ms; `tests/test_video_hub_pacing.py`).
+- Docs drift the merge surfaced and this revision closes: §1 import confinement (above);
+  the `events.episode_saved` payload does carry the capture-time `episode_id` (inside
+  `summary`, §4.2).
+
+### 16.5 Phase-14 on top (2026-09-08 evening) — pointer
+
+The Online DAgger shell rides this bridge unchanged: no new stream or command id beyond
+`policy_trainer_status` / `trainer_status` (already in v1.1), `EVENT_KINDS` + `train_now`,
+`SessionAnnounce.online_dagger`, `PolicySpecAnnounce.capabilities`; the private control plane,
+the "never on the tick" rule (§2.5 — the coordinator's `SerialWorker` and the publisher's
+`enqueue_event` deque are the two new off-tick paths) and the goldens are the mechanism.
+Its own implementation record — deviations, the e2e `tests/dora_bridge/
+test_e2e_online_dagger.py` (3 tests, 30.9–32.3 s on the private control plane), the refusal
+strings, `session.json`, open items — is `15-online-dagger.md` §12; the morning's PRO-DAgger
+v1.0 record is `15-pro-dagger.md` §15 (history only, never shipped).
 
 ## Appendix A — v2 candidates: external viewpoint-command surface (removed from v1)
 

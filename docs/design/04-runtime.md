@@ -19,7 +19,28 @@ rail homing with twin planning: §5 every configured arm in a hardware session
 the `RailHomingJob` motion, `start_from=profile` planned inside bring-up,
 `PlanExecutor` straight-segment slew; §13.1 `pre_position` / 202 / `refused` /
 `GET …/maintenance/last` / the every-arm 409; §13.3 `arms[*].maintenance`; §14;
-§15 job rows). Conforms to
+§15 job rows; amended 2026-09-07 — data collection re-based on the
+episode-directory store (§10 rewritten, §10.5 / §10.6 new; §13.1
+`/api/datasets`; §14 `recorder`), `mode: collect` admitted on hardware (§5),
+teleop-cap / pose-filter status notes (§6), speed default 0.5 (1.0 since
+2026-09-08 evening, §10.5) and the arming incident (§14), test-guard notes
+(§16); amended 2026-09-08 — §6 keyboard
+translate frame `ControlConfig.translate_frame` (`camera` / `world` / `base`,
+published as `SessionTelemetry.translate_frame` §13.3): `camera` was the
+morning's default, the operator flipped the default to `world` the same
+evening; amended 2026-09-08 (evening) — the phase-12 dora bridge merged onto
+the phase-13 trees (§17; 14-dora §16.4), and phase-14 — **Online DAgger, the
+algorithm-agnostic shell (`15-online-dagger.md` v2.0; operator decision 2026-09-08
+evening, replacing the morning's PRO-DAgger v1.0 wording, kept in `15-pro-dagger.md`
+as history)**: §5 the hardware refusal for dagger is unchanged, §10.6 the
+`online_dagger` namespace, §10.7 Online DAgger sessions, §13.1 `GET /api/datasets/
+layout` / `/api/online_dagger/{skill,skill.tgz,sessions}` + the `POST /api/session`
+409s (`/api/pro_dagger/*` never shipped → 404), §14 the `datasets:` and
+`online_dagger:` blocks, §15 trainer rows, §16 tests — v1.0 statements superseded
+in-body with a dated note); amended 2026-09-08 (late evening) — §10.5 the
+`start_from` fault grace (`hardware_session.start_from_fault_grace_s`, a model
+default, no YAML key) written down where CLAUDE.md / DEPLOYMENT already pointed.
+Conforms to
 `00-overview.md` (spine, v0.3) and mirrors `05-ui.md` protocol shapes exactly. Research ground truth: `web-teleop-stack.md`,
 `lerobot-data.md`, `dagger-online-training.md`, `xarm-python-sdk.md`.
 
@@ -34,7 +55,8 @@ Depends on `apollo_mavis_v2_core`; `hardware` and `sim` are optional extras
 Server deps: `fastapi`, `uvicorn[standard]`, `opencv-python`, `lerobot>=0.6`
 (pinned), `numpy`, `pydantic`; trainer extra adds `torch`, `pyzmq`. Internal
 units everywhere: **m / rad / wxyz quats** — mm/deg conversion happens only
-inside `hardware`.
+inside `hardware`. Runtime requires **Python ≥ 3.12** (lerobot's floor),
+unlike core / sim / hardware (≥ 3.10).
 
 ## 2. Package layout
 
@@ -75,6 +97,8 @@ src/apollo_mavis_v2_runtime/        # pyproject extras: [hardware] [sim] [traine
 │               watchdog.py (InputWatchdog + ArmReportWatchdog §8)
 ├── profiles/   store.py (core ProfileStore re-export + save_from_snapshot §9)
 ├── recorder/   episode_recorder.py (§10), features.py (schema builders §10.2)
+#   + datasets.py (DatasetStore §10.6), audio.py (EpisodeAudioSink §10.5),
+#     sidecars.py (10-frames §9), export_lerobot.py + tools/export_lerobot.py (§10.6)
 ├── dagger/     gate.py, loop.py (GatedPolicyExecutor/DaggerSession/InferenceSession),
 │               policy_runner.py, recorder.py (DaggerRecorder), reloader.py, client.py,
 │               trainer/ (AsyncTrainer process pkg — entrypoint
@@ -106,7 +130,7 @@ session state is singleton). Real-time work never runs on the event loop:
 | `EncoderWorker` ×streams | stream fps | `cv2.imencode` JPEG q80 (1–3 ms/frame) | Encode-once; WS + MJPEG share the buffer |
 | `TwinOverlayRenderer` (phase-09a) | `twin_overlay.fps` (12) | its OWN `BuiltScene` copy, `MjData` and two `mujoco.Renderer`s (RGB + segmentation) for the `<camera_id>_align` overlays | Session-less; renderers created and closed in-thread (GL affinity); ~1 ms RGB + ~4.5 ms segmentation per stream; never touches the gate's `DigitalTwin` (§13.4) |
 | `hw.<arm>.monitor-ro` ×N + `HardwareStateMonitor` supervisor (phase-09a/b) | 10 Hz (+ ~2 Hz registers) / 0.5 s | one READ-ONLY xArm SDK client per hardware arm (`apollo_mavis_v2_hardware.ArmStateMonitor`) | Session-less; zero writes unless an explicit maintenance request (`clear_errors` / `apply_backstops`, executed on this thread, REST only waits; §13.1); released (`paused`) while a hardware session owns the box (§13.3) |
-| `RecorderThread` | 20–30 fps | the LeRobot dataset writer (single owner) | `add_frame`/`save_episode`; never touched from other threads |
+| `RecorderThread` | 20–30 fps | the episode-directory store (`EpisodeDirRecorder`, single owner; §10) | `add_frame`/`save`; never touched from other threads |
 | `PolicyRunner` | 10–30 Hz | policy `act()`, GPU 0 | DAgger/inference only (§11) |
 | sim stepping thread | 500 Hz | `mj_step` (sim workcell) | Lives in `apollo_mavis_v2_sim`; runtime treats sim like hardware |
 | **AsyncTrainer process** | — | GPU 1 fine-tuning | Separate process from day one (§11); crash-isolated |
@@ -195,6 +219,15 @@ class SessionSpec(BaseModel):         # pydantic, DEFINED in core.protocol.sessi
     policy: str | None = None         # checkpoint id; None = latest (dagger only) /
                                       #   promoted deploy ckpt (inference; 409 if none
                                       #   promoted — 12-dagger §9)
+    dataset: str | None = None        # collect (2026-09-07, §10.5): repo id to record into,
+                                      #   "<ns>/<name>" or a bare name (⇒ "apollo/<name>";
+                                      #   DATASET_RE); None = derived from task (10-frames §8.1)
+    dataset_resume: bool = False      # False = must NOT exist yet (409 "already exists");
+                                      #   True = must exist and match this session (409)
+    return_to_start: bool = True      # collect (§10.5; DEFAULT ON, operator 2026-09-07): after
+                                      #   every save / discard a twin-planned, gated return to
+                                      #   the start_from / initial-condition profile; 409 at
+                                      #   POST if none exists and the flag is left on
 ```
 
 Phase behavior (identical skeleton for all four modes; overview §4):
@@ -210,8 +243,13 @@ Phase behavior (identical skeleton for all four modes; overview §4):
 
    **Hardware bring-up (phase-09c/09d, `SessionManager._bringup_hardware` over
    `SessionManager.connect_hardware_rig`; `docs/prompts/phase-09c-hardware-session.md`,
-   `docs/prompts/phase-09d-rail-homing-planning.md`; teleop only for now — other
-   modes 409 `"hardware sessions support teleop only (phase-09c)"`).** Since
+   `docs/prompts/phase-09d-rail-homing-planning.md`; teleop AND collect — data
+   collection admitted on hardware 2026-09-07 (§10.5); DAgger / inference 409
+   `"hardware sessions support teleop and data collection only (<mode> on
+   hardware: not yet)"` — unchanged by phase-14 (2026-09-08): an Online DAgger
+   session (`mode: dagger` + `policy_source: external` + `online_dagger`, §10.7) is
+   refused on hardware by the same line BEFORE its own checks run, 15-online-dagger
+   D7).** Since
    phase-09d a hardware session ALWAYS includes every configured arm
    (`SessionSpec.arms` must equal `workcells.hardware.arms`, else 409
    `"hardware sessions include every configured arm (Manipulation Arm, Perception
@@ -303,7 +341,10 @@ Phase behavior (identical skeleton for all four modes; overview §4):
        gate twin synced with the measured states, `twin.plan(PlanRequest)` —
        RRT-Connect, frozen arms as obstacles, the rail slot follows the profile
        or stays; the same `execute_plan` path as sim, executed by the start_from
-       worker from `ActiveSession.planned_start` without planning again). A
+       worker from `ActiveSession.planned_start` without planning again —
+       **one arm at a time in the planner's `arm_order`** since 2026-09-08
+       evening, the waypoints dict keyed in that order by `_ordered_waypoints`;
+       §10.5 "Sequential execution"). A
        failed plan tears the session down with 409 `"profile motion not
        collision-free: goal_in_collision (grip_right_inner_knuckle / table) - …"`
        — a hardware session never starts with a motion the twin refused. Then
@@ -366,6 +407,14 @@ Phase behavior (identical skeleton for all four modes; overview §4):
    same fraction of its remaining delta, the fastest at `jog.slew_rad_per_tick`)
    — exactly the segments the planner edge-checked; a per-joint clip would bend
    the path off the validated line and the hardware gate would hold it for good.
+   Since 2026-09-09 a segment is walked in `ceil(ratio)` EQUAL ticks (no tiny
+   remainder tick onto the waypoint: the gate's escape rule demands ≥ 10 um of
+   opening on EVERY tick of a pinched arm, and a 3-13 % remainder tick was held
+   and bent the next tick off the validated path; 11-safety §9). Every
+   `PlanRequest` the runtime builds carries the session's `speed_scale`
+   (`ControlLoop(speed_scale=…)` for the joint-panel goto, the manager for
+   `start_from` / returns / `goto_profile`, `JOB_SPEED_SCALE` for rail homing):
+   the planner judges a pinched start's escape tick by tick at that speed.
 3. **RUNNING** — the mode loop (§6–§7, §10–§12). Modes differ only in action
    sources (human/policy), recorder on/off, and takeover semantics.
 4. **TEARDOWN** (DELETE /api/session, fatal error, SIGTERM) — stop policy
@@ -436,10 +485,49 @@ def held_to_twist(held: frozenset[str], keymap: Keymap, r: TeleopRates) -> Twist
 Per-arm teleop step (active arm only; non-active arms hold their last
 commanded q — they are *not* re-servoed to measured state, avoiding drift):
 
-- **Twist frame**: the arm's control frame = `arm_base:<id>` axes at the
-  current TCP; translations along base axes, rotations about TCP axes. The
-  recording frame (`SessionSpec.frames`) affects only dataset conversion
-  (§10.3), never control math.
+- **Twist frame** (translations CHANGED 2026-09-08, operator request; default
+  flipped from `camera` to `world` the same evening, operator decision).
+  Rotations are about the **TCP axes** — unchanged, and self-consistent
+  whatever the arm is doing. Translations follow
+  `ControlConfig.translate_frame`:
+  - `world` (**default** since 2026-09-08 evening) — the operator frame, fixed
+    to the table: `W` away from the operator (−Y), `A` to the operator's left
+    (+X), `E` up. Never follows the tool.
+  - `camera` (the wrist-image alternative; the 2026-09-08 morning default,
+    superseded the same day) — the active arm's **wrist-camera** frame: `W`/`S`
+    along the optical axis, `A`/`D` image left/right, `E`/`Q` image up/down.
+    The operator teleops off the wrist stream, and the old base frame meant a
+    rotated tool sent every key somewhere else on screen ("the whole axis set
+    is misaligned after I rotate the EE"). The camera's WORLD orientation comes
+    from the model, per arm, via `SceneKinematics.wrist_cam_quat_world`
+    (`quat_mul(tcp_quat, cam_from_tcp)`, the constant computed once at
+    construction from `site_xmat`/`cam_xmat`). It **must** be per arm: the
+    gripper base is mounted `quat="0 0 0 1"` under link7, a 180° turn about the
+    tool axis, so the Manipulation Arm's TCP frame is that much rotated against
+    the Perception Arm's and one constant key→TCP matrix reverses `A`/`D` and
+    `E`/`Q` on the default teleop arm (pinned in
+    `tests/test_camera_frame.py`). An arm with no wrist camera (some test
+    scenes) falls back to the TCP frame with the same forward axis. **Property
+    of this frame to say out loud: `E`/`Q` mean up/down in the WRIST IMAGE, not
+    world up/down** — with the tool pointing at the table they run roughly
+    horizontally, and `W` runs into the table. That is correct camera-frame
+    behaviour and what makes the keys match the stream.
+  - `base` — pre-2026-09-08: the arm's `link_base` axes. Fixed as the rail
+    slides, but in this cell `base_quat` is a +90° z rotation and joint 1 = π,
+    so it reads yawed 180° against the operator (`W` toward the operator, `A`
+    to their right). Kept for the test suites that pin world-axis
+    displacement.
+
+  The recording frame (`SessionSpec.frames`) affects only dataset conversion
+  (§10.3), never control math, and the canonical policy action frame stays
+  `arm_base:<id>` (`dagger/policy_runner.py` is untouched by this knob).
+
+  The live frame is published as `SessionTelemetry.translate_frame` (§13.3) and
+  captioned above the KeymapOverlay (05-ui §8.2): the keymap labels the KEY axes
+  ("forward", "up") and never a frame, so nothing else in the UI could tell the
+  operator what those keys currently point at. Switching frames is one config
+  line (`translate_frame: camera` for the wrist-image behaviour) and needs a
+  runtime restart.
 - **Target integration + leash**: `target ⟵ target ⊕ twist·dt`, then clamp to
   a leash around the *measured* EE pose: ≤ 0.025 m / ≤ 0.2 rad geodesic. The
   leash bounds IK divergence (mink converges silently to nearest-reachable)
@@ -479,9 +567,181 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   stops the arm within one streamer tick. The arm's top speed is unchanged (it
   always was the streamer's); a faster FEEL is `speed_scale` / `ServoLimits`,
   chosen deliberately. `TrackerTeleop.slip_count` / `slip_pos_total_m` count the
-  discarded travel for the loop's health line (§14 "Logging").
-- **Per-tick joint clamp**: `|q_i − q_last_i| ≤ dq_max` (0.04 rad/tick ≈
-  4 rad/s) before the gate; cartesian step stays < 2.5 mm at default rates.
+  discarded travel for the loop's health line (§14 "Logging"). The joint
+  bound comes from `ExecutorCaps.joint_step_rad` (the streamer's own
+  `max_joint_vel / rate_hz`), NOT from `ExecutorCaps.slew_rad_per_tick`, which
+  `apply_executor_caps` also bounds by the host JOG slew — a jog cap must
+  never leak into teleop. Status: not yet verified on the arms — the
+  2026-09-07 01:12 session ran at scale 1.0 before the caps landed; a runtime
+  restart is needed to pick them up.
+
+  **That was not the whole delay — the pose filter was the bigger half
+  (2026-09-07, measured).** After the caps landed the operator still reported a
+  lag on the trigger, and the One Euro filter turned out to be misparameterised:
+  `beta` is in **Hz per (m/s)**, so the shipped `beta: 0.05` added 0.015 Hz at a
+  0.3 m/s hand and the cutoff never left `min_cutoff_hz: 1.0` — an "adaptive"
+  filter degenerated into a FIXED first-order low-pass, τ = 159 ms. Against a
+  constant-velocity ramp the filtered pose trailed the hand by **148 ms / 15 mm
+  at 0.1 m/s and 131 ms / 39 mm at 0.3 m/s**; 39 mm is past the 25 mm leash, so
+  the two defects compounded — the filter's own lag pushed the target into the
+  leash, which truncated and slipped the travel away. Retuned to `beta: 5.0`:
+  **7.6 mm / ~25 ms** at 0.3 m/s (4.3 mm / 43 ms at 0.1, 11.7 mm / 15 ms at 0.8),
+  costing nothing measurable at rest — the real controller measures 0.1 mm p-p,
+  an order below `deadband_m`. `d_cutoff_hz` **stays at 1.0 on purpose**: it is
+  the cutoff of the speed estimate, so raising it reacts to acceleration sooner
+  (`beta 10` + `d_cutoff 10` measured 5.2 mm / ~17 ms) but couples input noise
+  into that estimate and lifts the cutoff while the hand rests — against 3 mm-std
+  input, rest suppression falls 4.9× → 2.8×. Eight milliseconds is not worth a
+  third of the jitter rejection while libsurvive keeps corrupting the lighthouse
+  calibration, since the corrupted regime is the noisy one. `deadband_m` also
+  went 2 → 1 mm (still 10× the measured noise) to halve the dead travel at the
+  start of a motion.
+  Re-measure with the same two experiments (ramp lag, rest std over 20 s) before
+  touching these; `control/pose_filter.py`'s docstring carries the numbers. The
+  `reset()` on every clutch engage was checked and is NOT a factor — a resting
+  hand leaves the speed estimate near zero, so a reset and a warm filter give
+  identical engage transients. Status: the retune is measured offline (ramp +
+  rest-noise experiments) and not yet verified on the arms.
+- **Per-tick joint step cap** (`dq_max`, 0.04 rad/tick in the repo config; a
+  HARDWARE loop lowers it to the streamer's own `max_joint_vel / rate_hz` —
+  0.006 rad/tick at speed scale 1.0, 0.003 at 0.5, `apply_teleop_caps` — and
+  carries the streamer's lever-weighted Cartesian bound `jog.plan_cart_step_m` /
+  `plan_lever_arm_m` = `ServoLimits.max_cart_step_m` × `lever_arm_m`, 4 mm/tick
+  at 1.0, `apply_executor_caps`): before the gate the joint step `q[:7] −
+  q_last[:7]` is bounded by **uniform scaling** — the WHOLE step is divided by
+  the larger of `max|dq_j| / dq_max` and `Σ|dq_j|·lever_j / plan_cart_step_m`
+  whenever that ratio exceeds 1, so the joint-space direction, and with it the
+  Cartesian direction the IK solved for, is preserved and the arm is merely
+  slower (`ControlLoop._cap_joint_step`; the rule `PlanExecutor.step` already
+  used for planned segments, both bounds included — in sim `plan_cart_step_m`
+  is None and only `dq_max` applies). Both bounds are exactly the two clips the
+  hardware `_ServoStreamer` would otherwise apply itself (02-hardware §3.3), so
+  with the host cap in force the streamer's clips are inactive and the executed
+  path is the commanded one, up to its acceleration ramp. A non-positive
+  `dq_max` HOLDS the arm (the fail-safe direction; `ControlConfig.dq_max_rad` is
+  validated `> 0`). The rail slot is a separate axis with its own
+  controller-side speed and keeps an independent bound. The loop counts the
+  ticks the cap bound (`clamp_ticks`; `dq_capped=+N` on the health line, §14):
+  on a hardware loop a held translate key binds it on nearly every tick, because
+  the key requests 0.12 m/s (100 %) while the streamer's lever-weighted capacity
+  for a translating TCP is **~0.04–0.09 m/s** (0.02–0.05 m/s at 50 %) — that,
+  not `apply_teleop_caps`' 0.4 m/s `tcp_mps` ceiling, is the real top speed of
+  keyboard teleop on the cell. Uniform scaling trades speed for direction:
+  whenever one joint (or the lever sum) saturates, EVERY axis slows instead of
+  the direction bending — for the keyboard, the tracker, policy and plan steps
+  alike. A capped KEYBOARD tick also pulls the integrated target back along the
+  DRIVEN axes to the pose the capped step reaches (`_hold_key_target`): the
+  translation along the commanded direction and the rotation about the
+  commanded axis, nothing else — the off-axis position and the undriven
+  orientation stay pinned to the line the seed defined so the IK keeps
+  correcting them instead of ratcheting each tick's residue into the anchor. A
+  key is a velocity command with no absolute reference, so a target that runs
+  ahead of a joint-capped arm only winds up to the leash (the QP then chases a
+  25 mm error into its own per-joint velocity box, bending the direction
+  again) and keeps the arm going for a leash after the key is released. The
+  tracker path is untouched: there the hand pose IS the reference and the
+  target catches up within the leash by design (above). The IK is untouched:
+  it still warm-starts from its own last output (03-sim §9), so after a capped
+  tick its state sits one truncated step ahead of the command; with the
+  pull-back that offset stays constant (the next request is exactly the cap,
+  which passes unscaled) instead of growing to the 0.05 rad reseed and
+  snapping back.
+
+  **History — operator report 2026-09-09: "when I press forward/back with the
+  keyboard the arm also drifts up/down; a single-axis key should move only
+  along that axis".** Until then the step was `np.clip`ped PER JOINT: whenever
+  one joint saturated the others kept their full step and the direction bent.
+  Measured on the `mavis_v2` sim (real `ControlLoop` + `MinkIKSolver` +
+  servo-faithful `SimWorkcell` in lockstep, translate frame `world`, 2 s holds,
+  the host-side caps of a hardware bring-up — the sim's servo has NO streamer —
+  world-frame TCP before → after settle). Harness: `python -m
+  apollo_mavis_v2_runtime.tools.axis_purity_measure` (not collected by pytest;
+  carries every isolation control below: `--config dq=0.04 | leash=1 | nores`,
+  `--cap uniform | joint-only | per-joint-clip`, `--no-pullback`, `--streamer`,
+  `--tracker`, postures P0–P3). The live-server subset is
+  `tests/test_teleop_axis_purity.py` (egl, P0 only, both arms, both speeds;
+  fails with the old clamp at 100 %, the 50 % rows are a timing-dependent
+  regression guard); the pure behaviours — exact uniform scaling, both bounds,
+  the pull-back geometry, `clamp_ticks`, the `dq_max <= 0` hold — are
+  `tests/test_joint_step_cap.py` (FakeWorkcell, milliseconds).
+  - Manipulation Arm from the initial posture, 100 %: `S` 6.4 mm off-axis
+    (−6.0 mm in Z) + 1.68° over 237 mm with the cap binding 93 of 200 ticks;
+    `Q` 1.8° at 50 % (64 ticks). One `W` further (P1): `W` 39.5 mm off
+    (−39.4 mm Z, i.e. DOWN) + 1.2° over 181 mm at 100 % (148 ticks), 15.5 mm
+    (−15.4 Z) + 2.0° over 107 mm at 50 % (96 ticks) — the operator's symptom.
+    Deeper in (P3): `Q` 34 mm off with only 69 mm on-axis, 16 IK slips.
+    Perception Arm at P3: `S` 18.9 mm (−18.6 Z) + 1.8°.
+  - Isolation: the same rates with `dq_max` 0.04 (cap never binds) give
+    < 0.7 mm and < 0.1° on every one of those keys ⇒ the clamp is the cause
+    (suspect a). Leash 1 m instead of 0.025: numbers identical to the digit ⇒
+    the leash is not a factor (b). Residual freeze disabled: unchanged on the
+    core cases ⇒ not a cause (c). IK weighting (d): with the cap inactive the
+    IK floor is < 0.7 mm / 240 mm. The requested keyboard rate does exceed
+    the joint cap in many postures — 28–197 of 200 ticks capped at 0.12 m/s
+    and 0.006 rad/tick — so (e) is real and is why the keyboard target must
+    not run ahead.
+  - Uniform scaling against `dq_max` alone: 100 % `S` 3.7 mm / 0.19° (1 slip —
+    the IK's warm state ran 0.05 rad ahead of the capped command and snapped
+    back), P1 `W` 9.8 mm (5 slips), P3 `Q` still 26–41 mm (the target at the
+    leash, the QP saturating). With the keyboard target pull-back added: `S`
+    0.53 mm / 0.066°, P1 `W` 0.09 mm / 0.078°, P3 `Q` 0.35 mm on 72 mm; worst
+    ratio anywhere 1.5 mm per 100 mm (50 %, P3 `Q`, the arm doing a third of
+    the requested rate); 0 IK slips everywhere (were up to 16). Making the sim
+    IK linearize at the commanded seed as well was tried and gave the same
+    numbers, but it stalls a caller that seeds from the MEASURED q (the
+    guardrail CI's `cross_arm_rail_converge` never reached its block), so the
+    IK stays as it was. Not a clamp effect and left alone: the Perception Arm's
+    `W` from the initial posture runs its elbow (joint 4) into the −11° stop
+    after ~190 mm, where the link2/link4 contact pushes the TCP up — the
+    workspace boundary.
+  - **Second layer (review, 2026-09-09 evening): the sim has no streamer.**
+    That first fix bounded the per-joint step only; the real `_ServoStreamer`
+    also clips per joint at `max_joint_vel·dt`, per joint at the acceleration
+    step, then scales so `Σ|dq_j|·lever_j ≤ max_cart_step_m`. The lever
+    estimate is 5–10× conservative for a keyboard step (a host step of 6–12 mm
+    lever-weighted at 100 % against the 4 mm cap; 3–6 mm vs 2 mm at 50 %), so
+    on the real arm the streamer would have executed a third to a half of every
+    host step, the command would have wound up to the 25 mm leash (the
+    pull-back anchors to the COMMANDED pose and fires only when the host cap
+    binds — which it did not), and the streamer's own per-joint clip would have
+    bent the direction every tick: the mechanism the fix removed, one layer
+    down. Closed-loop emulation of the streamer on the lockstep harness
+    (`--streamer`; host-only rows bit-identical to the run above): 100 % P0
+    Manipulation Arm `W` 28 mm off on 109 mm (26 %), `S` 60 mm (50 %) + 3.2°,
+    `Q` 131 mm + 15.4°; 50 % `W` 22 mm on 55 mm (40 %), `S` 35 mm (58 %) +
+    2.4°; the streamer's velocity clip bound on 207–248 of 250 ticks, lag up to
+    0.35 rad, while the host cap bound 0 ticks. **Fix: fold the streamer's
+    Cartesian bound into the same uniform ratio** (`plan_cart_step_m` /
+    `plan_lever_arm_m`, already on every hardware loop). Emulation after: every
+    non-elbow-stop row ≤ 0.35 mm per 100 mm and ≤ 0.06° at 100 %, ≤ 0.65 mm /
+    100 mm and ≤ 0.06° at 50 % (P0 and P1, both arms); the streamer's velocity
+    clip acts on 0 ticks, its lag ≤ 0.004 rad (the acceleration ramp at key
+    press); host-only and streamer-emulated rows are identical to the digit,
+    so the sim result now transfers. On-axis travel per 2 s hold: 83–182 mm
+    at 100 % (0.04–0.09 m/s) and 44–97 mm at 50 % against 240 / 120 mm
+    requested; `dq_capped` 195–200 of 200 ticks. Live-server run
+    (`test_teleop_axis_purity.py`, both arms, both speeds): worst 0.31 % /
+    0.044° on the Manipulation Arm at 100 %.
+  - Tracker path, same harness (`--tracker`: hand scripted at 0.3 m/s along
+    each world axis, clutch held, filter off, P0, both arms, streamer
+    emulated). Before (per-joint clip): off-axis up to 100 mm per 100 mm +
+    14.5° (Manipulation Arm −z), 33–57 mm on `±y`; the streamer's velocity clip
+    on 213–249 of 250 ticks. After: ≤ 33 mm per 100 mm, ≤ 0.5°, streamer clip
+    0 ticks; on-axis rate unchanged within the noise (0.05–0.10 m/s at 100 %,
+    e.g. `+x` 200 vs 183 mm, `−z` 114 vs 129 mm per 2 s). The remaining
+    off-axis component is the leash, not the cap: a hand outrunning the arm
+    3–6× parks the target at the 25 mm leash and the single-step QP trades
+    position for orientation inside its velocity box, with 400–550 mm of the
+    600 mm hand travel slipped into the anchor (`leash_slips`). That is the
+    tracker design (the hand pose is the reference, no pull-back) and it is
+    invisible at hand speeds the arm can follow.
+  - OPEN: the streamer's C24 backoff (`_ServoStreamer.set_scale(0.5)` for
+    10 s) halves the streamer's steps below the host `dq_max` /
+    `plan_cart_step_m` and re-introduces its per-joint clip for that window;
+    the driver does not publish its effective scale, so the host cannot follow
+    it yet. Not yet verified on the real arms — what to watch on the health
+    line: `dq_capped` binding on nearly every keyboard tick and a small
+    `cmd-meas` lag.
 - **Gate** (§8): `supervisor.filter(q_cmd, q_meas, source)`; violating arms
   hold last-safe (escape rule excepted) + `CollisionEvent` → telemetry.
 - **Rail**: rail arms carry an 8th q slot; rail keys integrate a target
@@ -554,15 +814,15 @@ commanded q — they are *not* re-servoed to measured state, avoiding drift):
   the menu button and the grip button advances `ControllerState.edge_seq` and
   sets `edge_input` to the input that produced it (the classified
   `trackpad_*`, `None` for a deadzone click, `menu_click`, `grip_click`;
-  `note_edges`). Default `controller_map`: `{clutch: trigger_click,
+  `note_edges`). `controller_map` — **the operator's map, code default and lab
+  config alike; do not change it without being asked**: `{clutch: trigger_click,
   gripper_open: trackpad_up, gripper_close: trackpad_down, rail_neg:
   trackpad_left, rail_pos: trackpad_right, arm_next: menu_click, arm_prev:
-  none}` (the reference map the tests pin); **the lab config
-  `configs/mavis_v2.yaml` departs from it since 2026-09-07** — `gripper_close:
-  grip_click, gripper_open: menu_click, arm_next: trackpad_up, arm_prev:
-  trackpad_down` — so the two actions that must never miss sit on plain
-  buttons and the pad carries arm switching (also on the keyboard and in the
-  UI); bindable inputs are `trigger_click`, `trackpad_left|right|up|down`,
+  none}`. (It was briefly remapped onto the plain buttons on 2026-09-07 to work
+  around the stale-axes bug above; that was the wrong fix — the bug belongs in
+  `note_edges`, which now resolves a deadzone click late, and the map was
+  reverted the same day.) Bindable inputs are `trigger_click`,
+  `trackpad_left|right|up|down`,
   `menu_click`, `grip_click`, `none` (system is never bindable: menu + system
   is the pairing combo); every input binds at most one action, held actions
   accept any input and the discrete actions accept any input except
@@ -707,10 +967,37 @@ client-side to ~20 Hz. Both paths pass the hardware safety gate
 
 - **`jog`** (slider streaming): per-arm `jog_target`; each tick the loop
   slews commanded q toward it, `dq/tick ≤ jog_slew` (0.02 rad/tick; rail
-  2 mm/tick), joint-space direct (no IK), then gate → `q_cmd`. New targets
-  overwrite (LatestSlot). Jog with `max|Δq| > goto_threshold` (0.15 rad) ⇒
-  Ack `ok=false` — the UI must send `goto`.
-- **`goto`** (large jump / numeric entry): build a core `PlanRequest`
+  2 mm/tick; on hardware the bring-up lowers `jog.*` to the connected
+  driver's servo bounds, so the panel runs at the arm's own rate — §5 step
+  11), joint-space direct (no IK), then gate → `q_cmd`. New targets
+  overwrite (LatestSlot). **Any delta is accepted** (the 0.15 rad
+  `goto_threshold_rad` nack was dropped 2026-09-07, operator's call): a jog
+  target is a DESTINATION, never a step, so a large delta is just a longer
+  constant-speed move and every intermediate posture is gated like any other
+  command. The UI joint panel is exactly this and has no second mode — a slider
+  drag is followed continuously and dragging faster than the arm can move leaves
+  it trailing and catching up. The price is that a straight joint-space line into
+  an obstacle is HELD by the gate instead of routed around it.
+  A jog step is multiplied by the **WS input watchdog** scale like any other
+  WS-sourced motion, so a latched deadman silently drops it (`_jog_step` returns
+  None at `scale <= 0.0`). Since the jog outranks teleop in `_resolve_arms` and
+  the deadman check returns before `JogState.step` can retire the target, a
+  pending target used to wedge the arm in `JOINT_JOG` for the rest of the
+  session — it froze the 2026-09-07 live session. The latch edge therefore calls
+  `JogState.clear_all()`: the arm falls back to teleop and no stale destination
+  resumes when the browser returns (11-safety §10.1, 05-ui §5.2).
+- **Interruptible plans (2026-09-07, phase-13).** `execute_plan {interruptible:
+  true}` is the return-to-start motion (§10.5): a jog on ANY arm, an arm switch,
+  a takeover toggle, a browser disconnect, a driver fault (all interruptible
+  plans) or the PRESENCE of any movement code from any source — regardless of
+  the WS watchdog scale — cancels it (`ControlLoop.plan_cancel_reason`: `jog`,
+  `arm switch`, `movement key`, `browser disconnected`, `driver fault`); the
+  internal `cancel_plan` op cancels it from a worker. The profile's gripper
+  target is applied on arrival, never at load. `start_from` and rail-homing
+  plans stay non-interruptible (held movement key only, as before).
+- **`goto`** (twin-planned routing; no longer reachable from the joint panel,
+  kept for the profile `start_from` and rail-homing paths): build a core
+  `PlanRequest`
   (`q_start` = measured full q, `q_goal = {arm_id: positions}`; core §6) →
   `twin.plan(req) -> PlanResult` (per-arm sequential, 11-safety §9),
   validity-checked on inflated geoms, executed as a waypoint stream through
@@ -829,47 +1116,104 @@ control WS as ActionMsg, management CRUD is REST §13.1):
   §5.2; waypoints stream through the gated slew-limited path (§7 goto).
   Profile not covering the session arms → 409 / Ack false.
 
-## 10. EpisodeRecorder (LeRobot v3)
+## 10. EpisodeRecorder — episode-directory store (LeRobot v3 is an export)
+
+Status (2026-09-07, operator decision; **10-frames §11 is the layout
+authority**, this section is the runtime's side of it; implementation:
+`docs/prompts/phase-13-keyboard-episode-datasets.md`). The recorder writes
+**one directory per saved episode** under the dataset root
+(`episodes/<episode_id>/{frames.parquet, video/<camera_id>.mp4, audio.wav,
+episode.json}`) and a **LeRobot v3 dataset is derived** from those directories
+by an export job — a remux, never a re-encode. Phase-07 (v0.1 of this
+section) wrote LeRobot v3 directly through `LeRobotDataset.create / add_frame
+/ save_episode / clear_episode_buffer / finalize`; a 2026-09-07 interim
+variant (v3 with a 1 MB `video_files_size_in_mb` cap so lerobot's
+`delete_episodes` would copy whole files) was written but never shipped —
+deleting one episode still rewrote every parquet, renumbered every index and
+loaded torch on the REST path, and the layout was not per episode. The row
+schema (§10.2), the frame conversion (§10.3), the 25 fps pacing and the
+100 Hz interpolation rule are unchanged. The code in the working tree as of
+2026-09-07 is still the interim variant — phase-13 replaces
+`LeRobotEpisodeRecorder`, `recorder_state.json` / `repair_unfinalized_datasets`,
+`pending_delete` / `finalized`, `meta/apollo/audio/`, extends
+`dataset_incompatibility` to the feature `info` blocks and renames the
+"is being rewritten" 409 to "is being exported".
 
 ### 10.1 Ownership & API
 
-`RecorderThread` is the **single owner** of the `LeRobotDataset` writer (the
-v3 writer is single-process/single-owner; reading while writing raises). All
-other threads talk to it via its inbox (episode ops from CommandBus) and the
-`snapshot` slot.
+`RecorderThread` is still the **single owner** of the episode being written:
+all other threads talk to it via its inbox (episode ops from the CommandBus)
+and the `snapshot` slot. It drives an `EpisodeDirRecorder` that implements
+core's `EpisodeRecorder` ABC (core §5.2):
 
 ```python
-# recorder/episode_recorder.py — implements core's EpisodeRecorder ABC (core §5.2)
-class LeRobotEpisodeRecorder(EpisodeRecorder):
-    def __init__(self, cfg: RecorderConfig, session: SessionSpec,
-                 features: dict, dataset_root: Path): ...
-    # open: LeRobotDataset.create(repo_id, fps=cfg.fps, features=features,
-    #   root=..., robot_type=..., use_videos=True, streaming_encoding=True)
-    #   — or LeRobotDataset.resume(repo_id, root=...) if the dir exists.
-    def start(self, meta: dict[str, object]) -> None: ...   # opens buffer
-        # (episode_new op; meta carries task etc.)
+# recorder/episode_recorder.py
+class EpisodeDirRecorder(EpisodeRecorder):
+    def __init__(self, cfg: RecorderConfig, features: dict, root: Path,
+                 repo_id: str, robot_type: str, default_task: str): ...
+    # open or create <root>/manifest.json (10-frames §11.5); a resumed dataset is
+    # checked with dataset_incompatibility() BEFORE anything else (fps, robot_type,
+    # feature signatures incl. the info blocks) -> SessionError (409); the encoder
+    # is pinned from manifest.video (codec family; "auto" re-probes within it,
+    # 10-frames §7.5); every stale episodes/.tmp-* is swept (§10.4)
+    def start(self, meta: dict[str, object]) -> None: ...
+    # episode_new (CONTROL-LOOP thread, via RecorderThread.request): mint
+    # episode_id (10-frames §11.3), remember meta (task etc.), empty the row
+    # buffer — no filesystem or thread creation here; the RECORDER thread
+    # then immediately mkdirs episodes/.tmp-<id>/ and calls
+    # StreamingVideoEncoder.start_episode(video_keys, temp_dir=that dir)
+    # (its 160-330 ms GIL stall lands right after N, §10.5 "GIL stall")
     def add_frame(self, frame: dict[str, object]) -> None: ...
-        # frame dict built from StateSnapshot + camera images (§10.3)
-    def save(self) -> int: ...          # ds.save_episode(); episode_index (episode_save op)
-    def discard(self) -> None: ...      # ds.clear_episode_buffer() (episode_discard op)
-    def finalize(self) -> None: ...     # MANDATORY (parquet footers)
+    # recorder thread; feed_frame() per camera and append the non-video
+    # columns + timestamp (frame_index / fps), frame_index, task to the
+    # in-memory buffer (idle-frame filter applied first, §10.5); count the
+    # frames fed per camera
+    def save(self, sidecar: dict[str, object],
+             audio: EpisodeAudioSink | None = None) -> tuple[int, str]: ...
+    # finish_episode() -> {key: (mp4 path, stats | None)}; move each mp4 to
+    # video/<camera_id>.mp4 and rmtree the encoder's tmp*/ leftovers; verify
+    # fed - encoder._dropped_frames == rows per camera and stats is not None
+    # (else export_ok False + export_note); frames.parquet (pyarrow, one row
+    # group); non-video stats (lerobot compute_episode_stats semantics), video
+    # stats reshaped (3,1,1) / 255 like lerobot's writer; audio.finish() into
+    # the tmp dir; episode.json = sidecar + video/audio/stats blocks, LAST;
+    # os.replace tmp -> episodes/<id>/; refresh manifest counters +
+    # last_export.stale; returns (ordinal in capture order, episode_id).
+    # RecorderThread assembles `sidecar` (extrinsics, frames_dropped,
+    # gate_events, episode_summary, meta_base) BEFORE calling save, so the
+    # sidecar is inside the directory at publication; its _episode_saved hook
+    # (DAgger spool) receives (ordinal, episode_id)
+    def discard(self) -> None: ...      # cancel_episode(); rmtree the tmp dir
+    def finalize(self) -> None: ...     # idempotent: discard an open episode,
+                                        # close the encoder, sweep; nothing can
+                                        # be left half-written
+    @property
+    def episodes_saved(self) -> int: ...  # manifest.episodes
+    @property
+    def total_frames(self) -> int: ...    # manifest.frames
+    @property
+    def episode_id(self) -> str | None: ...  # the open episode's id
 ```
 
 Loop: paced at `cfg.fps` (default **25**, range 20–30) off the `snapshot`
 slot; per frame pull `read_latest()` from each recorded camera (max_age
-2/fps, else drop + count `frames_dropped`); `add_frame`. The 100 Hz control
-loop is never recorded directly — it interpolates between recorded actions
-(lerobot `interpolation_multiplier` pattern, here 100/fps = 4). Encoding:
-`streaming_encoding=True`, `rgb_encoder.vcodec="auto"` → NVENC (`h264_nvenc`,
-with `bf=0` for lerobot's `g=2`; resumed datasets keep their codec family —
-10-frames §7.5) on the 4090s, so `save_episode()` is near-instant between
-episodes.
+2/fps, else drop the whole frame + count `frames_dropped`); one-frame
+lookahead so `action` is the delta of the commanded TCP between consecutive
+recorded frames; `add_frame`. The 100 Hz control loop is never recorded
+directly — it interpolates between recorded actions (lerobot
+`interpolation_multiplier` pattern, here 100/fps = 4). Encoding: lerobot's
+`StreamingVideoEncoder` with `rgb_encoder.vcodec="auto"` → NVENC
+(`h264_nvenc`, `bf=0` for lerobot's `g=2`; a resumed dataset keeps its codec
+family — 10-frames §7.5) on the 4090s, one encoder thread per camera per
+episode, so saving is near-instant (a rename). `lerobot` is imported lazily
+inside `recorder/` only; the REST listing path (§10.6) never imports it.
 
 ### 10.2 Dataset schema (always, every mode that records)
 
 One dataset repo per **(task × arm-count × frame convention)**; repo id
-`apollo/xarm7_{task}_{n}arm_{conv}` (grammar: 10-frames §8.1) under
-`cfg.datasets_root`. `robot_type` distinguishes real (`xarm7_{n}arm_rail`)
+`apollo/xarm7_{task}_{n}arm_{conv}` (grammar: 10-frames §8.1) when
+`SessionSpec.dataset` is None, else the operator's `<ns>/<name>` (§10.5),
+under `cfg.datasets_root`. `robot_type` distinguishes real (`xarm7_{n}arm_rail`)
 from sim (`xarm7_{n}arm_rail_mujoco`) — 10-frames §7.5.
 
 ```python
@@ -905,8 +1249,12 @@ features = {
 # policy_version (int32).
 ```
 
-Plain teleop writes `intervention=False`, `action_source=1`. The five lerobot
-bookkeeping features are auto-added — never put them in `add_frame` dicts.
+Plain teleop writes `intervention=False`, `action_source=1`. The lerobot
+bookkeeping columns `episode_index` / `index` / `task_index` are assigned by
+the export (10-frames §11.8); `timestamp` and `frame_index` are written by the
+recorder; none of them is ever in an `add_frame` dict. `features` (with the
+info blocks) is stored in `manifest.json` and is what a resumed session must
+match.
 
 ### 10.3 Frame conversion at record time
 
@@ -918,19 +1266,552 @@ Frame conversion applies to **EE-space quantities**: each arm's
 Joint/gripper/rail dims — and whole `action_space == "joint"` blocks — are
 frame-free (10-frames §3.4) and pass through unconverted. Frames are fixed per dataset (mixing frames in one
 `action` feature is statistically toxic). Camera-frame choices snapshot the
-extrinsics into episode metadata.
+extrinsics into episode metadata. On hardware the kinematics for the
+conversion and the wrist-camera extrinsics come from the digital-twin
+`BuiltScene` (the MJCF camera `<id>` or `<id>_cam` stands in for the real
+camera; the factory D435 intrinsics from `CameraConfig.intrinsics` go into
+`episode.json`).
 
-### 10.4 Crash-safe finalize
+### 10.4 Crash safety
 
-The recorder runs inside a `VideoEncodingManager`-style guard: TEARDOWN,
-SIGINT/SIGTERM, and a `finally` in `RecorderThread.run` all call
-`discard()` (if a buffer is open) then `finalize()` exactly once.
-`finalize()` failures are logged and retried once; the session dir keeps
-`recorder_state.json` `{repo_id, episodes_saved, finalized}` so an
-unfinalized dataset is detected at next startup and repaired via `resume()` +
-`finalize()`. Invalid transitions (`episode_save` while `saving`,
-`episode_new` while `recording`) → Ack `ok=false`; the UI follows telemetry
-`EpisodeStatus.state ∈ idle|recording|saving`.
+An episode lives in `episodes/.tmp-<episode_id>/` until `save()` renames it
+into place; `episode.json` is written last, so a directory without it is by
+definition incomplete. TEARDOWN, SIGINT/SIGTERM and the `finally` in
+`RecorderThread.run` all call `discard()` (if an episode is open) then
+`finalize()` exactly once; `finalize()` failures are logged and retried once.
+At every open — session start, `DatasetStore` scan, `Runtime.start()` —
+`sweep_incomplete_episodes(datasets_root)` removes stale `.tmp-*` directories
+(those not owned by the running session) and logs them. There is no
+`recorder_state.json` and no `resume() + finalize()` repair any more: a
+parquet is only ever written whole. Invalid transitions (`episode_save`
+while `saving`, `episode_new` while `recording` or `returning`, an empty
+episode) → Ack `ok=false`; the UI follows telemetry `EpisodeStatus.state ∈
+idle|recording|saving|returning` (`returning` only with `return_to_start`,
+§10.5).
+
+### 10.5 Dataset naming & resume, return-to-start, audio (2026-09-07)
+
+- **Naming.** `SessionSpec.dataset` names the repo (`DATASET_RE`; a bare
+  name is prefixed `apollo/`; the UI slugs the operator's text); `None` keeps
+  the phase-07 task-derived grammar. `dataset_resume: false` ⇒ the dataset
+  must NOT exist yet (409 `"dataset 'apollo/x' already exists - choose
+  'Continue existing' to append to it, or another name"`); `true` ⇒ it must
+  exist (409 `"unknown dataset 'apollo/x' - it has no recorded episode yet;
+  start it as a new dataset instead"`) and `dataset_incompatibility(manifest,
+  features, fps, robot_type)` must be `None` (409 `"dataset 'apollo/x' cannot
+  be continued by this session: <why> - record into a new dataset"`, where
+  `<why>` names the fps, `robot_type` (sim vs hardware, arm count), feature
+  set, or the first differing feature signature / info block). A legacy
+  phase-07 v3 tree (`meta/info.json`, no `manifest.json`) is 409 `"dataset
+  'apollo/x' is a legacy LeRobot v3 dataset (read-only; already trainable
+  as-is) - record into a new dataset"`. All of this runs in `SessionManager.create`
+  **before any box or camera is touched**; a repo an export job is rewriting
+  is 409 `"dataset … is being exported - retry in a moment"`.
+- **Hardware collect.** `_validate_hardware` admits `mode ∈ {teleop,
+  collect}`; the recorder is built inside `_bringup_hardware` after the rig
+  connects and `start_from` is planned, reading the **adopted** preview
+  cameras (no second UVC open; none live → 409 `"data collection needs at
+  least one live hardware camera - none is open (see the Hardware tab camera
+  tiles)"`), and started after the loop; bring-up progress shows a `recorder`
+  row per arm (`pending` → `ok "recording into <repo_id>"`). A dataset refusal
+  during bring-up tears the rig down (409) and leaves no directory behind.
+- **Return-to-start (DEFAULT ON, operator decision 2026-09-07; per-session
+  opt-out).** `SessionSpec.return_to_start: bool = True` (Collect LaunchSheet
+  checkbox "Return to start after save / discard", checked by default) makes
+  every save and discard end with a motion back to the **return profile** —
+  the `start_from` profile if one was chosen, else the kind's designated
+  initial-condition profile; with neither and the flag on, the POST is 409
+  `"return_to_start needs a start_from profile or an initial-condition profile
+  - set an initial condition or untick 'Return to start'"` (the LaunchSheet
+  disables Start with the same reason first). The motion is
+  the `start_from` machinery: `twin.plan(PlanRequest(q_start=measured,
+  q_goal=profile))` on the session's twin (gate twin on hardware), executed as
+  an `execute_plan` command at the session's speed scale; while it runs
+  `EpisodeStatus.state == "returning"` with `detail` (`"returning to profile
+  'ready'"`), `episode_new` is nacked `"returning to the initial
+  configuration"`, and ANY operator input — a held key, a clutch engage, a
+  jog, an arm switch, a device edge — cancels it (`detail "return cancelled:
+  movement key"` / `"… : jog"` / `"… : arm switch"`, arm holds where it is).
+  Cancellation keys on the PRESENCE of a movement code from either source,
+  never on the WS watchdog scale (a key held under a latched deadman must still
+  stop the return); a browser disconnect cancels too, and a return is not even
+  started while the deadman is tripped / latched (`detail "return skipped:
+  browser input latched - release every key"`). The plan runs as an
+  interruptible `execute_plan`; the profile's gripper target is applied on
+  ARRIVAL, never at plan load, so a cancelled return leaves the gripper
+  untouched. The worker's deadline is derived from the plan (`plan_duration_s`
+  over the waypoints incl. the rail slot, × 3 + a gate-hold allowance, ≥ 30 s);
+  on expiry or on any non-RUNNING exit it cancels the plan through the loop
+  (`cancel_plan` op) and only then reports (`"return timed out - held by the
+  gate; arm stopped"`, `"return cancelled: driver fault"`, `"return skipped:
+  session <state>"`, and since 2026-09-08 evening `"return stopped - held by the
+  safety gate: <body a> / <body b> at <mm> mm"` from the loop's gate-held abort
+  below); `returning` stays true until the plan is really gone. The budget and
+  the wait are PER ARM (see "Sequential execution" below): a two-arm return
+  reports `"return cancelled: movement key - Perception Arm; Manipulation Arm
+  not moved"` — which arm was interrupted and which never started.
+  Teardown cancels an in-flight return before stopping the recorder, so the
+  arm is braked at rest, not mid-move. A planning failure produces no motion
+  (`detail` carries the planner's reason, state back to `idle`). This is not the "blind
+  return to initial" the overview forbids for inference (overview §4 item 4 /
+  §12): it exists only in collect, is twin-planned, gated and cancellable, can
+  be unticked per session, and inference never has it.
+  `return_profile_id` is recorded in `episode.json`.
+- **Return to the initial condition on demand and on the way out (operator
+  request, 2026-09-08).** The same planned motion as above, aimed at the
+  workcell kind's **designated initial-condition profile**, reachable two ways:
+  - the `reset_to_initial` key (`R`, 01-core §13) over /ws/control —
+    fire-and-forget: `ControlLoop._op_reset_to_initial` validates inline (fast)
+    and hands the motion to `SessionManager.request_reset_to_initial`, whose
+    ack only says it started (`"returning to '<profile>'"`). A no-op **with a
+    reason** when there is nothing to return to (no profile store, or no
+    initial condition designated for this kind) — `ack.ok=false`, nothing
+    moves, the UI toasts the reason. Also refused while an episode records
+    (`"recording - save or discard first"`) or another plan runs.
+  - `POST /api/session/return_home` → `ReturnHomeResult{ok, status ∈
+    done|skipped|failed|cancelled|timeout|refused, detail, arms, profile_id}`
+    — **synchronous**, which is what the Cockpit's "End session" /
+    "Terminate session" runs *before* the DELETE (05-ui §8.2). Operational
+    refusals are a 200 with `ok=false`, never an HTTP error: the UI branches on
+    `ok` and shows `detail`. `skipped` is a SUCCESS (no initial condition
+    designated, the profile covers no session arm, or the arms are already
+    there), so a workcell without one behaves exactly as before.
+
+  The motion runs as **two separately planned and gated phases** (operator
+  decision: sliding a carriage with the arm extended sweeps it through the
+  cell, folding first does not): (1) the joints to the profile's posture with
+  each carriage HELD where it is — enforced by the planner since 2026-09-09: a
+  rail slot whose start and goal coincide is pinned for the whole plan, escape
+  included (03-sim §10 item 2; before, the RRT could slide a carriage 12.6 cm
+  inside this phase); (2) the carriages to the profile's
+  `rail_pos_m` with the joints held. A phase whose start already equals its
+  goal is skipped, phase 2 never runs if phase 1 did not arrive, and a profile
+  storing no rail (`rail_pos_m: None` = keep the carriage — how
+  `profiles.seed_initial` writes the seeded default) has no phase 2 at all.
+  Both phases go through `twin.plan` → interruptible `execute_plan`, so ANY
+  movement key / clutch / jog / arm switch cancels the motion and the arms hold
+  where they are; the profile's gripper target rides the last phase that runs
+  and is applied on arrival. Preconditions (`SessionManager._reset_precheck`):
+  a running session, no open episode, no faulted / recovering arm, no plan in
+  flight. `_return_goals` / `_plan_return` / `_run_return_plan` are shared with
+  the per-episode return above, which stays SINGLE-phase and byte-identical in
+  its reporting.
+
+  **Headless proof (2026-09-09).** `tests/test_return_fuzz_mavis_v2.py` replays
+  this whole flow — `_return_goals` (imported), the phase split, `twin.plan` at
+  the session speed, `_ordered_waypoints` / `_moving_arms`, `PlanExecutor` at
+  the hardware caps, the loop's step cap, every tick through the real
+  `SafetyGate` with the gate seeded as a live session finds it, the
+  `plan_gate_hold_s` abort and the measured-arrival check — from random
+  pinched two-arm starts on the mavis_v2 twin (`MAVIS_FUZZ_N`, default 40 plus
+  10 normal; `MAVIS_FUZZ_SPEED`, `MAVIS_FUZZ_SEED`) and asserts: a plan the
+  planner accepts is never held by the gate and both arms arrive, or the
+  planner fails honestly naming a pair. It found the three planner fixes of
+  03-sim §10 items 2 / 5 (RRT margin predicate, held carriage, budget use).
+
+  **Sequential execution (2026-09-08 evening; BINDING, 11-safety §9).** Every
+  twin-planned multi-arm motion — both return phases, the per-episode return,
+  `start_from` on sim and hardware, `goto_profile` (all through
+  `SessionManager._execute_arms`) — executes **ONE ARM AT A TIME in
+  `PlanResult.arm_order`** (fallback: the waypoints dict order;
+  `_ordered_waypoints` re-keys the dict in `arm_order`). `ResetPlanner` (03-sim
+  §10) validates arm k with the arms before it AT their goals and the arms
+  after it AT their starts, so the paths are collision-free in that order and
+  in no other. *Incident, 2026-09-08 23:16:52 (`var/logs/runtime.log`):* the
+  first live `reset_to_initial` planned both arms sequentially but
+  `_run_return_plan` submitted ONE `execute_plan` carrying both arms' waypoints;
+  `PlanExecutor` moved them simultaneously through never-validated
+  combinations, the gate blocked at 5.2 mm (`grip_right_finger` /
+  `view_link3`) and the return sat gate-blocked ~30 s until the budget. Rules,
+  as implemented: one `execute_plan` per arm carrying that arm's waypoints
+  only; the next arm is submitted when `plans.active_arms` is empty again; an
+  arm the planner left in place (every waypoint within 1e-6 of the first) is
+  not submitted at all; the profile's gripper targets ride the LAST arm that
+  moves and an interruptible plan applies them on THAT arm's arrival (the
+  loop defers every gripper target of an interruptible plan, including one for
+  an arm the command does not move); any refusal / cancel / fault / timeout of
+  one arm stops the sequence — the remaining arms never start and the detail
+  names the arm (`"<reason> - <Arm>; <other arms> not moved"`; a single-arm
+  sequence reports exactly as before; a refusal of a LATER arm carries the
+  same suffix, so the notice says the earlier arms did move); the budget
+  (`_return_budget_s`) is per arm from that arm's waypoints (`start_from`:
+  `max(120 s, budget)`); `session.start_from_progress` keeps counting over ALL
+  arms' waypoints; a `start_from` that is cancelled / held / timed out
+  part-way now writes the notice `"start_from cancelled: <reason> - <Arm>;
+  <arms> not moved (Go to profile retries it)"`. **Hand-over on MEASURED
+  arrival (2026-09-08 review).** `plans.active_arms` emptying only means the
+  COMMAND reached the last waypoint; a carriage follows its latest-wins
+  targets at the track's own speed. `_execute_arms` therefore waits
+  (`_await_arrival`, 20 ms polls of the driver's cached states) until arm k's
+  measured q is within `PLAN_ARRIVAL_TOL_RAD` 1e-3 rad (every joint) and
+  `PLAN_ARRIVAL_TOL_RAIL_M` 2 mm of its last waypoint before arm k+1 is
+  submitted (and before the last arm is reported done); the wait shares the
+  arm's budget deadline with at least `PLAN_ARRIVAL_GRACE_S` 2 s after the
+  executor retired the waypoints, and reports the new status **`stalled`**
+  (`"did not arrive: joints off by <mrad>[, carriage off by <mm>] after <s>"`,
+  wire status `timeout` on the reset / exit path, `"return stopped - …"` on
+  the per-episode return, `"start_from stalled (the arm did not settle at its
+  goal): …"` notice) when it never gets there — the remaining arms never
+  start. The tolerance doubles as the parked-arm threshold (`_moving_arms`:
+  every waypoint within 1e-3 of the first ⇒ not submitted; a start that
+  differs from the goal by the SDK's ~1e-4 rad read-back noise is no longer a
+  1–2 tick micro-plan). A profile that moves no arm but sets a gripper still
+  submits ONE gripper-only `execute_plan` (`waypoints: {}`), which the loop
+  applies at once (`ack "done"`) — before, the targets were silently dropped
+  (`start_from` regression). **The hardware executor's rail slew is capped at
+  the track's positioning speed** (`ExecutorCaps.rail_m_per_tick` =
+  `rail_speed_mm_s` (already speed-scaled) / 1000 / `rate_hz`, read from every
+  connected driver's config by `executor_caps_for`, applied by
+  `apply_executor_caps` as `min(jog.rail_m_per_tick, cap)` — 0.0005 m/tick at
+  100 % against the host's 0.002), so the commanded carriage never runs ahead
+  of the track; `_return_budget_s` follows automatically. **The loop is the
+  last line too (2026-09-08 review):** `execute_plan` refuses a command
+  carrying more than one arm's waypoints (`"one arm per plan (sequential
+  execution)"`), the joint panel's `goto` is refused with `"plan executing"`
+  while ANY plan executes or is being planned (it would have loaded a second
+  arm into the executor beside a running `start_from`, planned with the
+  other arm frozen at a mid-path posture), and a `_plan_ready` result
+  arriving while a plan runs is dropped (per-arm `failed`). **A plan is
+  finished AFTER the gate:** `_plan_step` parks the executor's goal in
+  `_plan_arriving` and `_confirm_plan_arrivals` (after `supervisor.filter`)
+  reports `done` only when the gated output IS the goal; a final step the
+  gate (or the per-tick clamp) held goes back into the executor as a
+  one-waypoint plan, so `active_arms` never empties one slew step short,
+  the deferred gripper is never applied on an arm that has not arrived and
+  the gate-held watch sees the hold. `_gate_hold_pairs` no longer prints the
+  pair-less report's 1.0 m default for a hold inside the hysteresis band: it
+  asks the twin (`pair_distance(pair, None, 0.5)`) or names the pair alone.
+  `tests/test_sequential_plan_execution.py`.
+
+  **Gate-held abort (2026-09-08 evening; `hardware_session.plan_gate_hold_s`,
+  default 3.0 s, `ge=0`, honoured on sim loops too).** While a plan executes,
+  `ControlLoop._plan_gate_watch` (control thread, after the gate, O(active arms)
+  per tick, no allocation) starts a clock on the first tick where the gate
+  blocked and every executing arm's gated output equals its last command (no
+  waypoint progress), resets it on any progressing tick, and past
+  `plan_gate_hold_s` cancels the plan with `plan_cancel_reason = "held by the
+  safety gate: <body a> / <body b> at <mm> mm"` (`GATE_HOLD_PREFIX`; pairs from
+  the gate report, else the merged report, else the gate's block pairs;
+  `"stale digital twin"` on a stale-twin hold), telemetry `plan_status:
+  "cancelled"`, the arms hold where they are. The manager maps the prefix to an
+  internal status `held`: the per-episode return reports `"return stopped -
+  held by the safety gate: <pair> at <mm> mm"`, the reset / exit dialog text is
+  `"the motion was held by the safety gate[ while moving the joints] and
+  stopped (<pair> at <mm> mm - <Arm>; <arms> not moved). The arms hold where
+  they are."` with wire status `timeout` (the `ReturnHomeResult` literal for
+  "held by the gate, stopped where they are") — the real-budget `timeout`
+  branch (`"… and stopped part-way (budget 30.0 s)."`) is unchanged and remains
+  the outer bound. `0` = the first held tick cancels.
+
+  `teardown()` is unchanged: it still cancels an in-flight plan and produces no
+  motion of its own, so a SIGTERM or a client that skips `return_home` leaves
+  the arms braked at rest rather than starting a move nobody is watching.
+
+  **Outcome, serialization, refusals (2026-09-08 review).**
+  - *The outcome is never silent.* `R` and `goto_profile` ack "started"; the
+    worker's result — a phase the twin could not plan, a refusal, a gate
+    timeout, an operator cancel, a skip ("already at profile 'shelf'" under the
+    goto label, "already at the initial condition" otherwise) — is written to
+    `ActiveSession.motion_detail` as `"<Go to profile '<name>' | Return to the
+    initial condition>: <phase text>"` and published as
+    **`SessionTelemetry.fault_detail`** / `SessionInfo.fault_detail` (§13.3),
+    which the Cockpit's FaultBanner shows as an amber `SESSION — …` row. The
+    same field carries a refused / unplannable `start_from`
+    (`"start_from refused: Manipulation Arm faulted (controller state 4, code
+    C24) - use Clear errors & resume, then Go to profile"`; a RECOVERING arm
+    reads `"… is recovering - release every input (clutch / keys), then Go to
+    profile"` because RECOVERING is lifted by releasing the inputs, not by
+    clearing errors). `motion_detail` is separate from `fault_detail` (the
+    arms' fault text the callback wipes on RUNNING) so the hint survives the
+    fault cycle; it is replaced when the next profile motion starts and cleared
+    when one arrives (incl. the per-episode return). On the wire the notice wins;
+    the fault text is only sent while no arm row carries a fault.
+  - *One profile motion at a time.* The manager-side blockers run BEFORE a worker
+    plans (`twin.plan` takes tens to hundreds of ms), so the per-episode return,
+    `R`, Go to profile and the exit return are serialized behind one token
+    claim (`_claim_profile_motion`; refusal `"a planned motion is already
+    running"`, the per-episode return reports `"return skipped: a planned motion
+    is already running"`), and the loop's `_op_execute_plan` nacks
+    `"plan executing"` while any plan is active or planning — `PlanExecutor.load`
+    would otherwise replace the running waypoints. `_reset_blockers` also says
+    `"an episode is still saving - wait for it to finish"` while the recorder is
+    saving (the episode directory is still open) instead of asking to save it.
+  - *Policy modes.* In a DAgger / inference session `GatedPolicyExecutor` nacks
+    `reset_to_initial` / `goto_profile` with `"policy driving - take over (Space)
+    first"` while the policy is active and no arm is engaged: the plan would
+    pre-empt the rollout arm by arm with the runner still producing ignored
+    actions, and the overview's rule that inference never "returns to initial"
+    on its own stands. After a takeover the human is the driver, the policy's
+    arms hold, and the motion is allowed exactly as in teleop; a hand-back
+    re-queries the policy from the new posture (no jump — the anchor is measured
+    ⊕ Δ). Between DAgger episodes (recorder idle) nothing is refused here.
+  - *`start_from` fault grace (2026-09-08 late evening, as implemented).* Right
+    after enabling, the real controller reports state 4 for ONE tick and the
+    loop marks the arm RECOVERING (Reseed / Recovered); on 2026-09-08 (03:25
+    `grip`, 18:44 `view`) the pre-planned `execute_plan` was drained in exactly
+    that tick, `_op_execute_plan` refused it (`"arm 'view' is faulted"`) and
+    the plan was dropped silently. `_start_from_worker` now polls every 50 ms
+    (`START_FROM_FAULT_POLL_S`) until `loop.faulted_arms | loop.recovering_arms`
+    is empty and the session is not FAULT / RECOVERING, bounded by ONE deadline
+    `HardwareSessionConfig.start_from_fault_grace_s` (default **3.0 s**, `ge=0`,
+    `0` = submit at once; a pydantic default in `config.py` — neither
+    `configs/mavis_v2.yaml` nor the lab render carries the key, so a rendered
+    config inherits 3.0 unless the operator adds it under `hardware_session:`);
+    a refused ack is retried ONCE with the same waypoints if the arms clear
+    within the remaining grace; a persistent fault is left to the loop (never
+    move a faulted arm) and reported as the refusal text above. The 3.0 s
+    default is generous against the ~10 ms transient — lowering it once seen
+    live is the operator's call (`tests/test_return_manager_units.py`).
+  - *`start_from` bookkeeping.* The worker follows the EXECUTOR (`plans.active_arms`,
+    TEARDOWN) once the loop accepted the plan, not `session.state`: a transient
+    fault mid-plan walks the session START_FROM → FAULT → RECOVERING → RUNNING
+    through the callback while the other arm's waypoints keep executing, and
+    `start_from_progress` / the bring-up rows (`_bringup`) are cleared when the
+    motion is over on every exit path (plan failure, refusal, arrival, crash).
+
+  **Seeding the default posture.** `python -m
+  apollo_mavis_v2_runtime.profiles.seed_initial [--kind hardware|sim]
+  [--dry-run]` writes the operator's 2026-09-08 default posture — Manipulation
+  Arm `[-180, -12, -20, 30, -5, 35, -8.9]°`, Perception Arm
+  `[0, 0.8, 0, 28.9, 0, 28.2, 0]°`, carriages unset — as one initial-condition
+  profile per kind (idempotent: matched by name within the kind). Verified
+  against the twin at both carriage ends, microphone on and off: collision-free
+  with 107 mm to the nearest monitored pair, and plannable from the cell's
+  keyframe (`tests/test_reset_to_initial.py`). Never run automatically —
+  designating an initial condition changes what every return aims at.
+- **GIL stall of the video encoder (measured 2026-09-07).** lerobot's
+  `StreamingVideoEncoder` holds the GIL while PyAV opens (`start_episode`,
+  160–330 ms) and closes (`finish_episode`, 118–324 ms with `h264_nvenc`, ≈ 15
+  ms with `libsvtav1`) the per-camera encoders; every thread freezes — the
+  100 Hz loop, the WS reader, the tracker reader, the servo streamer. On
+  hardware nothing jumps (the streamer re-anchors after a late tick under the
+  velocity / acceleration caps; the box holds the last servo target;
+  `ArmReportWatchdog` fails the gate closed for the first tick after the
+  stall), but the WS deadman trips on every save and a key held across the
+  stall latches `AWAIT_EMPTY`. Mitigations in phase-13: the loop detects a
+  process-wide stall (`now − last_tick > watchdog.timeout_s`), holds every arm
+  for that tick and credits the stall once to the `InputWatchdog`
+  (`on_process_stall`) so a frozen process is not read as a silent browser;
+  the encoder is opened right after `episode_new` on the recorder thread (§10.1)
+  rather than at the first frame of motion; the return-to-start cancel rule
+  ignores the watchdog scale (above). The real fix — running the encoder in a
+  child process — is a follow-up; `recorder.vcodec: libsvtav1` removes the
+  finish stall at the cost of CPU (operator's choice, not changed here).
+- **Idle-frame filter (2026-09-07, operator; default ON).**
+  `SessionSpec.action_filter: ActionFilterConfig{enabled: true, pos_eps_m:
+  0.001, rot_eps_rad: 0.001, gripper_eps_frac: 0.01, rail_eps_m: 0.001,
+  gripper_context_s: 1.6}` (core §12) ports the hesitation filter of the
+  operator's pro-dagger project (`_land_chunk` / `_anzu_chunk_first_idle`:
+  1 mm / 1e-3 / 1 mm per step, gripper-toggle chunks exempt, measured SR 0.16 →
+  0.58) to the frame stream: `RecorderThread` compares each candidate frame's
+  commanded TCP (Chebyshev over xyz, geodesic angle), gripper fraction and
+  rail slot with the LAST KEPT frame's; below every epsilon AND no gripper
+  change within ±`gripper_context_s` ⇒ the frame is skipped (not appended, not
+  fed to the encoder, no audio alignment point). The look-ahead is a delay
+  buffer of `round(gripper_context_s · fps)` frames (≈ 74 MB for two cameras
+  at 25 fps) flushed at save / discard. DAgger filters only human-controlled
+  frames (`action_source ∈ {teleop, takeover}`). The first frame is always
+  kept; `EpisodeStatus.frames_skipped` (additive) shows the running count;
+  `episode.json.filter` records params, counts and every gap (10-frames §9).
+  pro-dagger's `chunk_stride` de-duplication concerns overlapping action
+  chunks and has no counterpart in a sequential dataset — not ported.
+- **Audio.** When the runtime's `MicrophoneReader` is live and
+  `recorder.audio` is true (hardware default; sim only with a fake reader),
+  `EpisodeAudioSink` buffers the Perception Arm microphone between
+  `episode_new` and save and writes `episodes/<id>/audio.wav` (mono PCM
+  s16le at the reader's rate) with the alignment block in `episode.json`
+  (10-frames §11.4). `Runtime.__init__` MUST set `self.manager.microphone =
+  self.microphone` right after constructing the `SessionManager` (missing as
+  of 2026-09-07 — the sink is never built otherwise); audio failures never
+  block recording.
+
+### 10.6 DatasetStore: listing, deletion, export (2026-09-07)
+
+`recorder/datasets.py::DatasetStore(datasets_root)` reads **only**
+`manifest.json` and `episode.json` files (plus `meta/info.json` to recognise a
+legacy v3 tree) — no lerobot, no torch, no parquet scan on the REST path:
+
+- `list() -> list[DatasetInfo]` (newest first; `layout: episode_dirs |
+  lerobot_v3`, `in_use` = the running session records into it, `export`
+  status), `describe(repo_id)`, `episodes(repo_id) -> list[EpisodeInfo]`
+  (`episode_id`, capture-order `index`, `frames`, `duration_s`, `task`,
+  `session_id`, `recorded_at`, `frames_dropped`, `audio`, `export_ok`,
+  `export_note`, `open` = currently recording).
+- `delete_episode(repo_id, episode_id)`: `rmtree(episodes/<id>)` (+ its
+  `trainer_spool` row), refresh the manifest, mark the export stale — nothing
+  else is read. Allowed during a session recording into that dataset except
+  for the open episode (409); 404 for an unknown dataset / id.
+  `delete_dataset(repo_id)`: the whole tree (409 while a session records into
+  it or an export runs).
+- `export(repo_id, format="lerobot_v3", out=None)`: the batch job of
+  10-frames §11.8 on a `dataset-export` thread (one at a time; 409 while a
+  session records into that dataset — the export needs a consistent episode
+  set). Progress rides telemetry `datasets.export {repo_id, phase:
+  scanning|videos|data|meta|validating|done|failed, done, total, detail}`;
+  the result (`path`, `episodes`, `at`) is written to `manifest.last_export`;
+  a failed job writes `last_export.error` (state `failed` until the next
+  success), `running` is process-local.
+  The job MAY import `lerobot.datasets` for the final validation
+  (`LeRobotDataset(repo_id, root=<export>)`), which is why it is a job and
+  not a request handler. The same code is the CLI
+  `python -m apollo_mavis_v2_runtime.tools.export_lerobot <repo_id> [--out DIR]`.
+- Legacy v3 trees are listed read-only (`total_episodes` / `fps` /
+  `robot_type` from `meta/info.json`); none of the mutating ops accept them
+  (409 `"legacy LeRobot v3 dataset - read-only"`).
+
+Telemetry: `EpisodeStatus` carries `repo_id`, `total_episodes`,
+`total_frames`, `detail` and the `returning` state; the interim
+`pending_delete` field is gone (deletion is immediate, §10.6).
+
+**Per-namespace roots (2026-09-08; 15-online-dagger §7 / D5, operator decision;
+the morning's citation 15-pro-dagger §6 D4 is superseded, the rule unchanged).**
+`DatasetStore(root, *, default_namespace, namespaces)` — `root` is still
+`datasets_root` (the GENERIC `<root>/<ns>/<name>`), `default_namespace` comes
+from `RuntimeConfig.datasets.default_namespace` (`bc_demo`; the constructor
+default stays `apollo` for tests), `namespaces` maps a namespace to
+`{root, subdir}`: `bc_demo/<name>` → `~/data/bc_demo/<name>`,
+`online_dagger/<s>` → `~/data/online_dagger/<s>/rollouts` (2026-09-08 evening:
+the `pro_dagger` namespace never shipped), everything else stays
+under the generic root (the phase-07..13 `var/datasets/apollo/…` data is
+listed, addressed and deleted as before). `resolve()` prefixes a bare name with
+the default namespace; `root_of(repo_id)` consults the map; `list()` walks the
+generic root AND every mapped root (a generic-root directory of a MAPPED
+namespace is skipped — `root_of` could never address it); `delete_dataset`
+never removes a mapped root or an Online DAgger session directory;
+`episode_delete_refusal` (a manager hook, review fix 2026-09-08) makes the DELETE
+of a SAVED rollout of the RUNNING Online DAgger session 409 (`"dataset
+'online_dagger/<s>' is in use by the running Online DAgger session - end the
+session first (the trainer is told about discards, not deletions)"`); `sweep()` (run
+at `Runtime.start()`) covers every root; `layout()` → `DatasetLayoutInfo`
+(`GET /api/datasets/layout`, §13.1); `DatasetInfo` rows carry `namespace` +
+`path`. The export CLI gained `--namespace` (default: the loaded config's
+`datasets.default_namespace`).
+
+### 10.7 Online DAgger sessions (phase-14, 2026-09-08 evening)
+
+Contract: `15-online-dagger.md` (§3 coordinator, §4 recording, §5 models, §6 wire, §7
+config / paths / REST, §12 implementation record). History: the morning's v1.0 text
+"PRO-DAgger sessions" (iteration machine `preparing → rollout → training → swapping`,
+`ProDaggerCoordinator`, `ref_grad/`, `iteration_complete`, `pro_dagger_train_now`,
+`/api/pro_dagger/*`) is superseded (2026-09-08 evening, operator decision: the runtime
+is an algorithm-agnostic shell) and kept in `15-pro-dagger.md` §15 only — none of it
+shipped. Runtime side, as shipped:
+
+- **What it is.** `SessionSpec{mode: dagger, policy_source: external,
+  online_dagger: OnlineDaggerConfig{session_name, resume, pause_while_training,
+  wait_for_trainer_ready}}` (core §12). The takeover gate, the `GatedPolicyExecutor`,
+  the `DaggerRecorderThread` and the external policy stack of §11 / §17 are
+  unchanged; the addition is a session-scoped **`OnlineDaggerCoordinator`**
+  (`dagger/online_dagger.py`) owned by the executor: rollout-level state only —
+  `phase ∈ waiting_trainer | rollout | training | error` (a PURE function of the
+  latest trainer status echoing THIS `session_id` + the `trainer_seen_ready` latch),
+  `rollouts_saved`, the session's `expert_frames_session` / `novice_frames_session`,
+  the last `TrainerStatusAnnounce` + receive time, `policy_version_acting` — pure
+  state + publishing, no motion, NO iteration counting, no hyper-parameter, no
+  training artefact. Its two side effects — `events.*` on the dora bus and
+  `session.json` — leave through one `SerialWorker` thread (never the tick, never the
+  recorder thread); the executor rebuilds `DaggerStatus.online_dagger` every
+  `OD_STATUS_EVERY_N = 4` ticks (25 Hz) and `SessionTelemetry.trainer_alive` mirrors
+  the trainer's freshness (`dora.policy.spec_stale_s`).
+- **Session directory** (`SessionManager._build_online_dagger`, inside the sim
+  bring-up, after every 409 check): `<online_dagger root>/<session_name>/` with
+  `rollouts/` (the episode-directory dataset `online_dagger/<session_name>`, recorded
+  by the normal DAgger recorder — resumed via the manifest path when
+  `online_dagger.resume`) and `session.json` (runtime-owned, `json.dumps(indent=2,
+  sort_keys=True)` via tmp + `os.replace`, rewritten on every transition, ≤
+  `online_dagger.session_file_hz` otherwise; the resume record:
+  `{session_name, created_at, session_id, task, spec, paths{session_dir, rollouts},
+  rollouts[{episode_id, saved_at, actor_counts, policy_version, spool_path}],
+  trainer_log[{at, state, policy_version, detail}] (newest 200), current{phase,
+  rollouts_saved, expert_frames_session, novice_frames_session}, last_used_at}`).
+  NOTHING else is created — the trainer keeps its own artefacts wherever it likes
+  (the skill suggests `<session_dir>/trainer/`; the runtime never reads them). The
+  rollouts dataset is `DatasetStore.root_of("online_dagger/<s>")`; the session
+  directory is its parent when the namespace maps a `subdir` (the shipped
+  `~/data/online_dagger/<s>/rollouts`), the dataset directory itself when
+  `online_dagger` is not mapped. A FRESH directory gets its first `session.json`
+  during bring-up and is removed again (`_OnlineDagger.abandon()`) if any later
+  bring-up step fails (recorder, executor, a `start()`), so the name stays usable; a
+  RESUMED record is neither removed nor rewritten before the session is RUNNING
+  (`on_session_start()`), so a resume that 409s later leaves it byte-identical.
+  `GET /api/online_dagger/sessions` scans `<root>/*/session.json`.
+- **`actor` column** (12-dagger §4; 10-frames §7.4): every DAgger frame, the spool
+  and the export; `EpisodeSummary.n_expert_frames` / `.n_novice_frames`;
+  `episode.json["online_dagger"] = {session_name, rollouts_saved, policy_version,
+  actor_counts}` (`rollouts_saved` includes this rollout). `events.episode_saved`
+  gains the same block (+ `episode_id`, `spool_path` — `null` when the trainer spool
+  could not be written; the rollout still counts and the event still fires);
+  `events.episode_discarded {episode_index, episode_id, reason}` on every discard —
+  the operator's (`""`), `"empty episode discarded"`, a rollout still open at teardown
+  (`"session teardown"`), the degraded-save path (`"save failed twice - recording
+  degraded (buffer kept)"`); `events.train_now {rollouts_saved, requested_by:
+  "operator"}` on **Train now** (`ActionMsg train_now`, no key); `events.gate {arm_id,
+  mode, seq, source: keyboard | action | auto_advance | episode_reset, episode_id}` on
+  every `TakeoverGate` transition (the boundary's `episode_reset` names the episode that
+  CLOSED); the executor spells `policy_reset(reason="episode_boundary")` at boundaries
+  (a handback keeps `"handback"`). The coordinator's saved hook runs BEFORE the
+  executor's boundary callback so `episode_saved` precedes the boundary's gate events.
+  Every coordinator event carries the session id pinned at submit time.
+- **Take over / Hand back / Train now** (`GatedPolicyExecutor._op_takeover` /
+  `_op_handback` / `_op_train_now`; 15-online-dagger D3): `takeover` = the transition
+  Space makes from POLICY on the active arm (ack detail `"takeover_transition"`;
+  idempotent `"already taken over"` in HUMAN / TRANSITION; nack `"takeover active"`
+  when another arm is engaged, `"no active arm"`); `handback` hands the ENGAGED arm back
+  (ack `"policy"`; idempotent `"policy already driving"`); both accepted at any time
+  — like Space — and both emit `GateEvent.source: "action"`. `train_now` → the
+  coordinator (`"asked the trainer to train (<n> rollout(s) saved)"`; nack `"save or
+  discard the episode first"` — the recorder is read directly — or `"no Online DAgger
+  trainer attached"`). The base `ControlLoop` nacks `takeover` / `handback` `"takeover
+  not available in teleop"` and `train_now` `"not an Online DAgger session"`. Under
+  POLICY with no arm engaged, `reset_to_initial` (`R`) / `goto_profile` are nacked
+  `"policy driving - take over (Space) first"` (§10.5).
+- **Return-to-start for dagger (D6).** `SessionSpec.return_to_start` (DEFAULT
+  ON) is a collect **or dagger** field since 2026-09-08 (core §12); the same
+  `_on_episode_done → _return_home_worker → _run_return_plan(interruptible=True)`
+  path as collect runs after every kept / discarded rollout (the episode state
+  walks `returning`; `episode_new` is refused meanwhile); the executor's boundary
+  (`_settle_boundary`) fires on the episode LEAVING `recording` / `saving` whatever
+  follows (`idle` or `returning`) AND is re-run from `_op_episode_new` before the next
+  episode opens (commands drain before the tick's own check; with return-to-start off
+  an `N` in the next tick otherwise hid the discard boundary — review fix 2026-09-08),
+  so the gate reset / runner resume / boundary reset always happen.
+  `_check_return_to_start` (409 without a return profile) applies to dagger too; the
+  DAgger e2es therefore pin `return_to_start: False`.
+- **Refusals** (`_check_online_dagger`, evaluated at `create()` after
+  `_check_dataset_spec` and the hardware refusal matrix — hardware + dagger keeps the
+  D7 line, §5 — and BEFORE `_check_return_to_start`, before any side effect; order
+  session directory → exporting / legacy → trainer): 409 `"Online DAgger session '<s>'
+  already exists - resume it or pick another name"` (`resume: false` on an existing
+  directory) / `"Online DAgger session '<s>' not found"` (`resume: true` on a missing
+  one) / `"Online DAgger session '<s>': session.json is unreadable - fix or remove it"`
+  (never overwritten); `"dataset 'online_dagger/<s>' is being exported - retry in a
+  moment"` / the legacy-tree 409; the shared `"no external policy attached (dora bridge
+  is not attached)"` / `"… (no policy_spec heartbeat within 3 s)"`; `"no Online DAgger
+  trainer attached (the policy node does not report the online_dagger capability)"`.
+  There is NO offline-dataset check (the trainer configures its own anchor). 422s are
+  core's (`"online_dagger requires mode dagger"`, `"… requires policy_source
+  'external'"`, `"online_dagger derives the rollouts dataset - leave dataset unset"`,
+  unknown keys, `session_name` > 64 chars / off `SLUG_RE`). WS nacks while running:
+  `episode_new` → `"no Online DAgger trainer attached"` (no fresh status; checked
+  FIRST), `"waiting for the trainer to report ready (<detail>)"`, `"training in
+  progress (<detail>)"`, `"trainer error: <detail>"` (`<detail>` = the trainer's, else
+  `no trainer status yet` / `the trainer has not picked up this session yet` /
+  `<progress>%` / `trainer <state>`). Only a trainer status whose `session_id` echoes
+  this session drives a transition (`null` = alive only; another id is ignored; an
+  older-than-seen status is dropped).
+- **Config**: `RuntimeConfig.online_dagger {skill_dir: null, session_file_hz: 1.0}`
+  (`OnlineDaggerRuntimeConfig`) and `RuntimeConfig.datasets` (§14). **Skill**: package
+  data `online_dagger/skill/{SKILL.md, references/contract.md,
+  references/pro-dagger-example.md}` (`SKILL_NAME = "mavis-online-dagger-trainer"`)
+  served by `GET /api/online_dagger/skill[.tgz]` (§13.1), byte-identical to the
+  policy-node mirror `skills/mavis-online-dagger-trainer/`
+  (`tests/test_online_dagger_package.py`).
+- **Not on hardware** (D7). Not exercised on the real cell / the lab dora plane;
+  sim + the runtime's fake trainer node (`dora_bridge/nodes/fake_policy.py`,
+  `FAKE_TRAINER=1`: capability `online_dagger`, `preparing` → `ready`, trains after
+  `FAKE_TRAINER_EVERY` 2 kept rollouts or on `train_now`, bumps the version, knobs
+  `FAKE_TRAINER_PREPARE_S` 0.5 / `FAKE_TRAINER_TRAIN_S` 1.0 / `FAKE_TRAINER_FAIL_AT`)
+  only. Numbers, deviations and open items: 15-online-dagger §12.
 
 ## 11. DAgger orchestration
 
@@ -987,7 +1868,7 @@ same `PolicyRunner`, same gate machinery, same hardware safety invariant.
 - **Space still toggles takeover** (same `TakeoverGate`) as the safety
   escape: the human's twist drives the active arm through the identical gated
   pipeline; steer to a safe configuration, then toggle back or end the
-  session — never a blind "return to initial" (overview §4.4).
+  session — never a blind "return to initial" (overview §4 item 4).
 - **Never recorded**: no dataset exists; takeover frames are never fed to
   DAgger aggregation. Optional `inference.eval_log` writes JSONL of `{tick,
   wallclock_ns, control_mode, gate_severity, policy_version}` — scalars only.
@@ -1015,13 +1896,25 @@ generated from them — 05-ui §2). Errors: `{"detail": str}` with 4xx/5xx.
 | `DELETE /api/profiles/{id}` | → 204 | 409 if it is the designated initial condition |
 | `GET /api/policies` | → `PolicyInfo[]{policy_id, path, action_space, action_frame, policy_version, promoted}` | checkpoint registry for dagger/inference (core §12 model) |
 | `GET /api/session` | → `SessionInfo` \| 404 | reconnect resync |
-| `POST /api/session` | `SessionSpec{…, speed_scale}` → `SessionInfo{session_id, epoch, mode, arms, streams, state, kind, speed_scale}` | 409 if a session exists, a tracker calibration is in progress (`"tracker calibration in progress"`, phase-10), requested `kind` unavailable, scene/arm mismatch, dagger without a policy, or inference with no promoted deploy checkpoint (`policy=None` resolves to latest for dagger, promoted deploy for inference — 12-dagger §9). Returns after BRINGUP; START_FROM progress via telemetry. `streams` = camera ids + `"sim"` and/or `"twin"` (sim); `[]` for a hardware session (the preview cameras are ADOPTED, not re-added — §13.4). **Hardware refusal matrix (phase-09c/09d, `SessionManager._validate_hardware`, all before anything is touched; `detail` substrings):** `mode != teleop` → `"hardware sessions support teleop only (phase-09c)"`; empty arms → `"session needs at least one arm"`; an arm outside `workcells.hardware.arms` / outside the twin scene → `"arms [...] not in the hardware workcell"` / `"… not in scene"`; **not EVERY configured arm (phase-09d)** → `"hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing ['view'] (phase-09d: both arms are always part of the session)"`; no / unknown `digital_twin_scene` (or the `[sim]` extra missing); no read-only monitor configured → `"no read-only hardware monitor - the digital twin cannot be posed for the gate"`; a rail homing in flight on ANY arm (`maintenance_busy`: the monitor op OR a phase-09d `RailHomingJob`) → `"rail homing in progress on the Perception Arm - wait for it to finish"`; per selected arm (user-facing name first): the read-only monitor not `running`/`stale` or without a sample → `"Manipulation Arm: no monitor sample (monitor error: …) - the read-only monitor must be connected before a hardware session (the digital twin cannot be posed)"`; probe `refused`/`unreachable` → `"…: control box 192.168.1.201 is unreachable - power it on / check the network first"`; `error_code != 0` → `"…: controller error 31 is latched - clear errors first"`; the twin expects a rail the monitor did not find → `"…: the digital twin 'mavis_v2' expects a linear track but the monitor found none"`; `rail_present and not (rail_homed and rail_enabled)` → **`"Manipulation Arm: rail not homed - home it from the Hardware tab (Home rail) before starting a session (carriage position unknown)"`**; `start_from` profile not covering the arms. Post-connect: a monitor poll thread still inside the SDK after 15 s, a per-arm bring-up error (`"hardware bring-up failed: Manipulation Arm: rail - [rail] …"`), a connected arm whose track is not `ready` (`"… rail - linear track error after connect (carriage position unknown …)"`), a dof mismatch with the twin, a stale first state, or — phase-09d — a `start_from` profile motion the gate twin cannot plan (`"profile motion not collision-free: goal_in_collision (grip_right_inner_knuckle / table) - the digital twin found no safe path from the measured posture to profile '…'"`) → teardown + 409. `hardware_session_active` (the monitor hand-over predicate) turns true only AFTER this matrix passed, right before `_bringup_hardware` pauses the monitor: a refused request never flips it (a supervisor round inside the validation window would otherwise disconnect the monitors and 409 with "monitor paused"). `speed_scale` outside (0, 1] is pydantic's 422. `GET /api/session` answers `state: bringup` while the hardware bring-up runs (D5) |
-| `DELETE /api/session` | → 204 | TEARDOWN (idempotent) |
-| `GET /api/episodes` | → `{repo_id, total_episodes, total_frames}` | current dataset counters (collect/dagger) |
+| `POST /api/session` | `SessionSpec{…, speed_scale}` → `SessionInfo{session_id, epoch, mode, arms, streams, state, kind, speed_scale}` | 409 if a session exists, a tracker calibration is in progress (`"tracker calibration in progress"`, phase-10), requested `kind` unavailable, scene/arm mismatch, dagger without a policy, or inference with no promoted deploy checkpoint (`policy=None` resolves to latest for dagger, promoted deploy for inference — 12-dagger §9). Returns after BRINGUP; START_FROM progress via telemetry. `streams` = camera ids + `"sim"` and/or `"twin"` (sim); `[]` for a hardware session (the preview cameras are ADOPTED, not re-added — §13.4). **Hardware refusal matrix (phase-09c/09d, `SessionManager._validate_hardware`, all before anything is touched; `detail` substrings):** `mode ∉ {teleop, collect}` → `"hardware sessions support teleop and data collection only (<mode> on hardware: not yet)"` (collect admitted 2026-09-07, §10.5; a collect body is additionally checked by `_check_dataset_spec` BEFORE this matrix — 409 `"dataset … already exists …"` / `"unknown dataset … start it as a new dataset instead"` / `"… is being exported - retry in a moment"` / `"… is a legacy LeRobot v3 dataset (read-only) …"`, and after connect by `dataset_incompatibility` → 409 `"dataset … cannot be continued by this session: <why> …"`; `return_to_start` without a return profile → 409; no live hardware camera → 409 `"data collection needs at least one live hardware camera …"`); empty arms → `"session needs at least one arm"`; an arm outside `workcells.hardware.arms` / outside the twin scene → `"arms [...] not in the hardware workcell"` / `"… not in scene"`; **not EVERY configured arm (phase-09d)** → `"hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing ['view'] (phase-09d: both arms are always part of the session)"`; no / unknown `digital_twin_scene` (or the `[sim]` extra missing); no read-only monitor configured → `"no read-only hardware monitor - the digital twin cannot be posed for the gate"`; a rail homing in flight on ANY arm (`maintenance_busy`: the monitor op OR a phase-09d `RailHomingJob`) → `"rail homing in progress on the Perception Arm - wait for it to finish"`; per selected arm (user-facing name first): the read-only monitor not `running`/`stale` or without a sample → `"Manipulation Arm: no monitor sample (monitor error: …) - the read-only monitor must be connected before a hardware session (the digital twin cannot be posed)"`; probe `refused`/`unreachable` → `"…: control box 192.168.1.201 is unreachable - power it on / check the network first"`; `error_code != 0` → `"…: controller error 31 is latched - clear errors first"`; the twin expects a rail the monitor did not find → `"…: the digital twin 'mavis_v2' expects a linear track but the monitor found none"`; `rail_present and not (rail_homed and rail_enabled)` → **`"Manipulation Arm: rail not homed - home it from the Hardware tab (Home rail) before starting a session (carriage position unknown)"`**; `start_from` profile not covering the arms. Post-connect: a monitor poll thread still inside the SDK after 15 s, a per-arm bring-up error (`"hardware bring-up failed: Manipulation Arm: rail - [rail] …"`), a connected arm whose track is not `ready` (`"… rail - linear track error after connect (carriage position unknown …)"`), a dof mismatch with the twin, a stale first state, or — phase-09d — a `start_from` profile motion the gate twin cannot plan (`"profile motion not collision-free: goal_in_collision (grip_right_inner_knuckle / table) - the digital twin found no safe path from the measured posture to profile '…'"`) → teardown + 409. `hardware_session_active` (the monitor hand-over predicate) turns true only AFTER this matrix passed, right before `_bringup_hardware` pauses the monitor: a refused request never flips it (a supervisor round inside the validation window would otherwise disconnect the monitors and 409 with "monitor paused"). `speed_scale` outside (0, 1] is pydantic's 422. `GET /api/session` answers `state: bringup` while the hardware bring-up runs (D5). **Online DAgger (2026-09-08 evening, §10.7; 15-online-dagger §3 / §7 / §12; the morning's "PRO-DAgger" text with its `offline dataset …` 409s is superseded):** a body with `online_dagger` set (`mode: dagger`, `policy_source: external`) is additionally checked by `_check_online_dagger` AFTER `_check_dataset_spec` + the hardware matrix and BEFORE `_check_return_to_start` — 409 `"Online DAgger session '<s>' already exists - resume it or pick another name"`, `"Online DAgger session '<s>' not found"`, `"Online DAgger session '<s>': session.json is unreadable - fix or remove it"`, `"dataset 'online_dagger/<s>' is being exported - retry in a moment"` (or the legacy-tree text), `"no external policy attached (dora bridge is not attached)"` / `"no external policy attached (no policy_spec heartbeat within 3 s)"`, `"no Online DAgger trainer attached (the policy node does not report the online_dagger capability)"`; `return_to_start` without a return profile is 409 for dagger too (D6). 422: `"online_dagger requires mode dagger"`, `"online_dagger requires policy_source 'external'"`, `"online_dagger derives the rollouts dataset - leave dataset unset"`, `"return_to_start is a collect / dagger-mode field"`, unknown `online_dagger` keys (`extra="forbid"`), `session_name` > 64 chars / off `SLUG_RE`. `SessionInfo` echoes `online_dagger` (and `policy_source`, `fault_detail`; not `dataset` / `return_to_start`) |
+| `POST /api/session/return_home` | → `ReturnHomeResult{ok, status: done\|skipped\|failed\|cancelled\|timeout\|refused, detail, arms, profile_id}` | 2026-09-08 (§10.5). Walk the workcell back to its designated initial-condition profile — joints first with the carriages held, then the carriages, each phase twin-planned + gated + interruptible — and report where the arms ended up. **SYNCHRONOUS**: the Cockpit's "End session" awaits it before the DELETE (05-ui §8.2), which is why the client deadline is 240 s while the runtime bounds each phase by the plan's own budget. Operational refusals are a **200 with `ok: false`**, never an HTTP error: no session (`refused`, `"no active session"`), an open episode (`refused`), a non-running or faulted session (`failed`), an unplannable path (`failed`, the twin's reason + failing pair), operator input (`cancelled`), a gate hold past budget (`timeout`). `skipped` is a SUCCESS — no initial condition designated for this kind, the profile covers no session arm, or the arms are already there. The `reset_to_initial` key (`R`) fires the same motion over /ws/control, fire-and-forget |
+| `DELETE /api/session` | → 204 | TEARDOWN (idempotent). Cancels an in-flight plan and produces **no motion of its own** — the return above is a separate, explicit call |
+| `GET /api/datasets` | → `DatasetInfo[]` | 2026-09-07 (§10.6; core §12): every dataset under `datasets_root`, newest first — `repo_id`, `root`, `layout: episode_dirs \| lerobot_v3`, `total_episodes`, `total_frames`, `fps`, `robot_type`, `kind`, `task`, `cameras`, `arms`, `modified_at`, `in_use`, `export {state: none\|stale\|fresh\|running\|failed, path, at, episodes}`. Reads `manifest.json` / `episode.json` only (no lerobot import). 2026-09-08: also every dataset under the mapped namespace roots (§10.6 "Per-namespace roots"); rows carry `namespace` + `path` (additive) |
+| `GET /api/datasets/layout` | → `DatasetLayoutInfo{default_namespace, generic_root, namespaces: {ns: {root, subdir}}}` | 2026-09-08 (15-online-dagger §7; core §12): where datasets live, so the UI shows the REAL folder in its previews and never hard-codes a namespace. Declared BEFORE `/datasets/{ns}/{name}` — the literal segment is never read as a namespace (`/api/datasets/layout/x` → 404). Always 200 |
+| `GET /api/datasets/{ns}/{name}` | → `DatasetInfo` \| 404 | one dataset |
+| `GET /api/datasets/{ns}/{name}/episodes` | → `EpisodeInfo[]` \| 404 | capture order; `episode_id`, `index` (position), `frames`, `duration_s`, `task`, `session_id`, `recorded_at`, `frames_dropped`, `audio`, `export_ok`, `export_note`, `open` |
+| `DELETE /api/datasets/{ns}/{name}/episodes/{episode_id}` | → 204 | removes ONE episode directory (10-frames §11.7); 404 unknown; 409 `"episode is being recorded"` for the open episode, 409 `"legacy LeRobot v3 dataset - read-only"`; allowed while a session records into the dataset — EXCEPT (2026-09-08 evening, §10.7) a saved rollout of the RUNNING Online DAgger session: 409 `"dataset 'online_dagger/<s>' is in use by the running Online DAgger session - end the session first (the trainer is told about discards, not deletions)"` |
+| `DELETE /api/datasets/{ns}/{name}` | → 204 | the whole tree; 409 while a session records into it or an export runs; 404 unknown |
+| `POST /api/datasets/{ns}/{name}/export` | `{format: "lerobot_v3", out?: str}` → **202** `{repo_id, format, started_at}` | starts the export job (§10.6, 10-frames §11.8); progress on `telemetry.datasets.export`; 409 while a session records into that dataset, while another export runs, or for a legacy tree; 404 unknown |
+| `GET /api/episodes` | → `{repo_id, total_episodes, total_frames}` | DEPRECATED (2026-09-07): the running session's counters now ride `telemetry.episode`; kept one release as an alias, `repo_id: null` without a collect/dagger session |
 | `GET /api/tracker/calibration` | → `TrackerCalibrationStatus` | phase-10 (13-tracker §3 item 8); idle snapshot (`kind: none, phase: idle` + persisted `yaw_valid` / dates) when nothing runs; the same object rides `telemetry.tracker.calibration` |
 | `POST /api/tracker/calibration` | `TrackerCalibrationCommand{kind: base_station\|yaw, op: start\|capture\|validate\|install\|apply\|abort, point?}` → `TrackerCalibrationStatus` | 409 `{detail}` on an illegal transition (`CalibrationError`): `"stop the session first"`, `"backend is not libsurvive"`, too few scenes for `validate`, `install` without `validation.passed`, `apply` with non-empty `fit_checks`, `capture` after all seven points, a second `start` while one runs. Returns the post-command snapshot; progress via telemetry (§6 "Tracker calibration modes") |
-| `POST /api/hardware/arms/{arm_id}/maintenance` | `ArmMaintenanceRequest{op: clear_errors\|apply_backstops\|recover\|home_rail, dry_run}` → `ArmMaintenanceResult{arm_id, op, path: monitor\|session, ok, detail, sdk_codes, warnings, before?, after?, rail_sweep?, status: done\|accepted\|refused, job_id?}` (200; **202** when `status == accepted`) | phase-09b (core §12 `protocol/maintenance.py`; `docs/prompts/phase-09b-error-recovery.md`). **Three of the four ops produce no motion; `home_rail` (phase-09c, below) is THE ONE op that moves a mechanical part.** Routing (`Runtime.arm_maintenance`): 404 = `arm_id` not in `workcells.hardware`; **a hardware session owns the boxes** → the *session path* (`SessionManager.session_recovery`): `clear_errors` and `recover` both run the driver's user-initiated recovery on ITS monitor thread (`HardwareWorkcell.request_recovery(arm_id)`: `clean_error → clean_warn → motion_enable(True) → set_mode(1) → set_state(0)` → re-seed from the MEASURED position; the handler waits ≤ 10 s for a `recovery_result()` with a higher `seq` AND `user_initiated` — the driver bumps `seq` for its own auto recoveries too, and an auto sequence already running when the operator clicked completes first and must not be reported as the operator's outcome — and reports `ok` / the latch reason, e.g. `controller error 1: … - motion_enable failed (release the physical e-stop?)`), `apply_backstops` → 409 (the driver applied the volatile settings at connect), an arm outside `SessionSpec.arms` → 409; **no hardware session** → the *monitor path* (`HardwareStateMonitor.maintenance`): `clear_errors` = `clean_error` + `clean_warn` and NEVER `motion_enable`, `apply_backstops` = `backstops.apply_backstops(api, XArmDriverConfig)` with the arm's `ArmConfig` mapped through the hardware package's own `workcell._driver_cfg` (identical values to the connect-time call; §14), both queued to the arm monitor's poll thread (one `XArmAPI`, one thread; the REST threadpool thread only waits ≤ 10 s), `recover` → 409 `"no hardware session - use clear_errors"`, monitor off / paused / connecting / error → 409 (`"… needs the read-only monitor connected to 'view' (monitor error: …)"`), a second op on the same arm while one runs → 409 (`"a maintenance op is already running on 'view'"`; per-arm lock + the monitor's `maintenance_busy`). 200 whether or not `ok` (a failed `clean_error` code, a re-latched error, a timed-out poll thread all come back as `ok: false` + `detail`). `before` / `after` (monitor path only) are `ArmMonitorTelemetry` rows sampled right before / after the op with `backstops_match` computed against the config, so the UI can show `error_code` → 0 and `collision_sensitivity` / `tcp_load_kg` landing. `sdk_codes` preserves call order (`{clean_error, clean_warn}`; the `backstops.py` sequence). One INFO audit line per call: `maintenance <op> on arm <id> from <client host> via <path>: ok|FAILED - <detail>` (refusals: `refused - <detail>`). **`home_rail` (phase-09c; `docs/prompts/phase-09c-hardware-session.md`, user rule 1 "no implicit motion"):** `set_linear_track_back_origin` drives the carriage to the track's zero end (the operator's LEFT, +X) at the track's OWN homing speed (no SDK setter, duration unmeasured; the positioning cap `rail_speed_mm_s` 50 is written AFTER homing for later moves — 02-hardware §8.6), so it is operator-triggered from the arm card only, **session-less only** (a hardware session exists → 409 `"home_rail is not available while a hardware session owns the arms - end the session first"`; a session is refused while the rail is unhomed, so homing is never needed inside one) and **twin-gated**: `HardwareStateMonitor.maintenance(…, dry_run)` first runs `devices/rail_sweep.py::RailSweepChecker.check` — a dedicated `DigitalTwin` (never the overlay's or a session's; `SceneOverrides(microphones, base_pose)`, `hardware_session.home_rail_inflation_m` 0.025 m = the guardrail's debug margin for a blind sweep from an unknown start, D4) posed with the target arm at its CURRENT 7 joints and the other arm at ITS last sample (rail → `rail_fallback_m` + an `assumptions` entry when unknown, `rail_flip` applied), sweeping the target's rail slot `linspace(0, 0.65, 131)` (`home_rail_step_m` 5 mm) with `check_config_violations` (blocked / clear) and `mj_geomDistance` over the monitored pairs (`min_clearance_*`) → `RailSweepVerdict{scene_id, inflation_m, step_m, travel_m, clear, first_blocked_m/pair, min_clearance_m/at_m/pair, q_checked[7], other_arms, assumptions, sample_seq}` in `rail_sweep`. `dry_run: true` → 200 with the verdict alone, `ok = clear`, `sdk_codes {}` (the HomeRailSheet shows it before the operator confirms); a blocked sweep → 200 `ok: false`, `detail "home_rail refused: rail sweep blocked at 0.000 m (grip_right_inner_knuckle / table) - fold the arm into a tighter posture (xArm Studio) and retry; nothing was written"`, zero writes; a clear sweep → the hardware monitor's `home_rail` op with `expected_q = q_checked` (its poll thread re-samples and refuses, zero writes, if any joint moved > 0.02 rad or an error is latched), writing exactly `set_linear_track_back_origin(wait=True, timeout=30, auto_enable=False)` → `set_linear_track_enable(True)` → `set_linear_track_speed(50)` and judging `ok` from the after-sample registers only (`on_zero == 1 and is_enabled == 1 and error == 0`; the SDK's return code is untrustworthy with `auto_enable`) — `detail "rail homed: carriage at 0.000 m (register 0 mm), track enabled, positioning speed 50 mm/s"`. The REST handler blocks up to **45 s** for this op (D3; `HOME_RAIL_TIMEOUT_S`, 10 s for the others); while it runs the arm reads `stale` with `maintenance_busy: true` and `POST /api/session` is 409 `"rail homing in progress on the …"`. 409s before any write: monitor not connected, a sample missing, `rail_present` false (`"no linear track detected"`), `error_code != 0` (`"clear errors first"`), no twin (`"home_rail needs the digital twin to gate the sweep"`), another op running, **a homing in flight on the OTHER arm** (`"home_rail refused: rail homing in progress on the Perception Arm - wait for it to finish"` — its monitor publishes nothing while the carriage travels, so its sample would pose it pre-homing), **the target's monitor `stale`** (`"… sample of 'grip' is stale … retry when it reads running"` — the sweep needs the CURRENT posture; the hardware monitor re-samples before the write and refuses too when that read fails). Another arm whose monitor is not `running` is still posed from its last sample, with the `assumptions` entry `"view: monitor stale - posed from its last sample, which may not be its current posture"`. **Phase-09d (`docs/prompts/phase-09d-rail-homing-planning.md`; `devices/rail_homing.py::RailHomingService.request`):** a blocked sweep is no longer a flat refusal. The service runs `HardwareStateMonitor.home_rail_preflight` (the refusals + sweep above, zero writes) and then `PrePositionPlanner.evaluate`: candidate postures in order — the scene keyframe's 7 joints for the arm (`source: keyframe`, the folded factory zero), then the `<arm>_home` key (`home`) — each must be sweep-clear itself, reachable by the sweep twin's RRT-Connect from the current posture with the rail slot LOCKED at `rail_fallback_m` (`RailSweepChecker.plan_path`: the carriage is unknown, the job never moves it) AND pass the position-agnostic `RailSweepChecker.check_path`: the path densified to 0.05 rad, EVERY configuration checked at EVERY one of the 131 rail positions at the 0.025 m sweep margin under the planner's start-posture hysteresis (a pair the current posture already violates at a position may only open up; any new violation blocks) — this check is the ONLY safety basis of the motion. The verdict rides `rail_sweep.pre_position: PrePositionPlan{needed, source, target_q[7], waypoints, duration_s (at 10 %), checked_rail_positions (131), clear, detail}` and decides the response: `pre_position.needed == false` (sweep clear) → the synchronous monitor-path homing above (200, `status: done`); `dry_run` → 200 with the verdict + plan only (`ok` = the op can proceed, zero writes); `needed and clear` → a `RailHomingJob` starts (§5 "Rail-homing maintenance motion") and the reply is **202** `status: accepted`, `ok: true`, `job_id`, `sdk_codes {}`, `path: session` (the job connects this arm's driver) — progress on `telemetry.hardware_monitor.arms[].maintenance` (§13.3), the final `ArmMaintenanceResult` (`status: done`, same `job_id`, `ok` true/false, the driver's `sdk_codes`, `after` = the first monitor sample after the resume) at `GET …/maintenance/last`; `needed and not clear` → 200 `status: refused`, `ok: false`, `detail "home_rail refused: … no rail-safe pre-positioning path: keyframe: …; home: … - fold the arm toward the factory zero posture in xArm Studio (joints 2-7 near 0) and retry"`, zero writes. While a job runs on ANY arm every maintenance op is 409 `"<op> refused: rail homing in progress on the Manipulation Arm - wait for it to finish"` and `POST /api/session` is 409 (`maintenance_busy` covers the job's whole life) |
+| `POST /api/hardware/arms/{arm_id}/maintenance` | `ArmMaintenanceRequest{op: clear_errors\|apply_backstops\|recover\|home_rail, dry_run}` → `ArmMaintenanceResult{arm_id, op, path: monitor\|session, ok, detail, sdk_codes, warnings, before?, after?, rail_sweep?, status: done\|accepted\|refused, job_id?}` (200; **202** when `status == accepted`) | phase-09b (core §12 `protocol/maintenance.py`; `docs/prompts/phase-09b-error-recovery.md`). **Three of the four ops produce no motion; `home_rail` (phase-09c, below) is THE ONE op that moves a mechanical part.** Routing (`Runtime.arm_maintenance`): 404 = `arm_id` not in `workcells.hardware`; **a hardware session owns the boxes** → the *session path* (`SessionManager.session_recovery`): `clear_errors` and `recover` both run the driver's user-initiated recovery on ITS monitor thread (`HardwareWorkcell.request_recovery(arm_id)`: `clean_error → clean_warn → motion_enable(True) → set_mode(1) → set_state(0)` → re-seed from the MEASURED position; the handler waits ≤ 10 s for a `recovery_result()` with a higher `seq` AND `user_initiated` — the driver bumps `seq` for its own auto recoveries too, and an auto sequence already running when the operator clicked completes first and must not be reported as the operator's outcome — and reports `ok` / the latch reason, e.g. `controller error 1: … - motion_enable failed (release the physical e-stop?)`), `apply_backstops` → 409 (the driver applied the volatile settings at connect), an arm outside `SessionSpec.arms` → 409; **no hardware session** → the *monitor path* (`HardwareStateMonitor.maintenance`): `clear_errors` = `clean_error` + `clean_warn` and NEVER `motion_enable`, `apply_backstops` = `backstops.apply_backstops(api, XArmDriverConfig)` with the arm's `ArmConfig` mapped through the hardware package's own `workcell._driver_cfg` (identical values to the connect-time call; §14), both queued to the arm monitor's poll thread (one `XArmAPI`, one thread; the REST threadpool thread only waits ≤ 10 s), `recover` → 409 `"no hardware session - use clear_errors"`, monitor off / paused / connecting / error → 409 (`"… needs the read-only monitor connected to 'view' (monitor error: …)"`), a second op on the same arm while one runs → 409 (`"a maintenance op is already running on 'view'"`; per-arm lock + the monitor's `maintenance_busy`). 200 whether or not `ok` (a failed `clean_error` code, a re-latched error, a timed-out poll thread all come back as `ok: false` + `detail`). `before` / `after` (monitor path only) are `ArmMonitorTelemetry` rows sampled right before / after the op with `backstops_match` computed against the config, so the UI can show `error_code` → 0 and `collision_sensitivity` / `tcp_load_kg` landing. `sdk_codes` preserves call order (`{clean_error, clean_warn}`; the `backstops.py` sequence). One INFO audit line per call: `maintenance <op> on arm <id> from <client host> via <path>: ok\|FAILED - <detail>` (refusals: `refused - <detail>`). **`home_rail` (phase-09c; `docs/prompts/phase-09c-hardware-session.md`, user rule 1 "no implicit motion"):** `set_linear_track_back_origin` drives the carriage to the track's zero end (the operator's LEFT, +X) at the track's OWN homing speed (no SDK setter, duration unmeasured; the positioning cap `rail_speed_mm_s` 50 is written AFTER homing for later moves — 02-hardware §8.6), so it is operator-triggered from the arm card only, **session-less only** (a hardware session exists → 409 `"home_rail is not available while a hardware session owns the arms - end the session first"`; a session is refused while the rail is unhomed, so homing is never needed inside one) and **twin-gated**: `HardwareStateMonitor.maintenance(…, dry_run)` first runs `devices/rail_sweep.py::RailSweepChecker.check` — a dedicated `DigitalTwin` (never the overlay's or a session's; `SceneOverrides(microphones, base_pose)`, `hardware_session.home_rail_inflation_m` 0.025 m = the guardrail's debug margin for a blind sweep from an unknown start, D4) posed with the target arm at its CURRENT 7 joints and the other arm at ITS last sample (rail → `rail_fallback_m` + an `assumptions` entry when unknown, `rail_flip` applied), sweeping the target's rail slot `linspace(0, 0.65, 131)` (`home_rail_step_m` 5 mm) with `check_config_violations` (blocked / clear) and `mj_geomDistance` over the monitored pairs (`min_clearance_*`) → `RailSweepVerdict{scene_id, inflation_m, step_m, travel_m, clear, first_blocked_m/pair, min_clearance_m/at_m/pair, q_checked[7], other_arms, assumptions, sample_seq}` in `rail_sweep`. `dry_run: true` → 200 with the verdict alone, `ok = clear`, `sdk_codes {}` (the HomeRailSheet shows it before the operator confirms); a blocked sweep → 200 `ok: false`, `detail "home_rail refused: rail sweep blocked at 0.000 m (grip_right_inner_knuckle / table) - fold the arm into a tighter posture (xArm Studio) and retry; nothing was written"`, zero writes; a clear sweep → the hardware monitor's `home_rail` op with `expected_q = q_checked` (its poll thread re-samples and refuses, zero writes, if any joint moved > 0.02 rad or an error is latched), writing exactly `set_linear_track_back_origin(wait=True, timeout=30, auto_enable=False)` → `set_linear_track_enable(True)` → `set_linear_track_speed(50)` and judging `ok` from the after-sample registers only (`on_zero == 1 and is_enabled == 1 and error == 0`; the SDK's return code is untrustworthy with `auto_enable`) — `detail "rail homed: carriage at 0.000 m (register 0 mm), track enabled, positioning speed 50 mm/s"`. The REST handler blocks up to **45 s** for this op (D3; `HOME_RAIL_TIMEOUT_S`, 10 s for the others); while it runs the arm reads `stale` with `maintenance_busy: true` and `POST /api/session` is 409 `"rail homing in progress on the …"`. 409s before any write: monitor not connected, a sample missing, `rail_present` false (`"no linear track detected"`), `error_code != 0` (`"clear errors first"`), no twin (`"home_rail needs the digital twin to gate the sweep"`), another op running, **a homing in flight on the OTHER arm** (`"home_rail refused: rail homing in progress on the Perception Arm - wait for it to finish"` — its monitor publishes nothing while the carriage travels, so its sample would pose it pre-homing), **the target's monitor `stale`** (`"… sample of 'grip' is stale … retry when it reads running"` — the sweep needs the CURRENT posture; the hardware monitor re-samples before the write and refuses too when that read fails). Another arm whose monitor is not `running` is still posed from its last sample, with the `assumptions` entry `"view: monitor stale - posed from its last sample, which may not be its current posture"`. **Phase-09d (`docs/prompts/phase-09d-rail-homing-planning.md`; `devices/rail_homing.py::RailHomingService.request`):** a blocked sweep is no longer a flat refusal. The service runs `HardwareStateMonitor.home_rail_preflight` (the refusals + sweep above, zero writes) and then `PrePositionPlanner.evaluate`: candidate postures in order — the scene keyframe's 7 joints for the arm (`source: keyframe`, the folded factory zero), then the `<arm>_home` key (`home`) — each must be sweep-clear itself, reachable by the sweep twin's RRT-Connect from the current posture with the rail slot LOCKED at `rail_fallback_m` (`RailSweepChecker.plan_path`: the carriage is unknown, the job never moves it) AND pass the position-agnostic `RailSweepChecker.check_path`: the path densified to 0.05 rad, EVERY configuration checked at EVERY one of the 131 rail positions at the 0.025 m sweep margin under the planner's start-posture hysteresis (a pair the current posture already violates at a position may only open up; any new violation blocks) — this check is the ONLY safety basis of the motion. The verdict rides `rail_sweep.pre_position: PrePositionPlan{needed, source, target_q[7], waypoints, duration_s (at 10 %), checked_rail_positions (131), clear, detail}` and decides the response: `pre_position.needed == false` (sweep clear) → the synchronous monitor-path homing above (200, `status: done`); `dry_run` → 200 with the verdict + plan only (`ok` = the op can proceed, zero writes); `needed and clear` → a `RailHomingJob` starts (§5 "Rail-homing maintenance motion") and the reply is **202** `status: accepted`, `ok: true`, `job_id`, `sdk_codes {}`, `path: session` (the job connects this arm's driver) — progress on `telemetry.hardware_monitor.arms[].maintenance` (§13.3), the final `ArmMaintenanceResult` (`status: done`, same `job_id`, `ok` true/false, the driver's `sdk_codes`, `after` = the first monitor sample after the resume) at `GET …/maintenance/last`; `needed and not clear` → 200 `status: refused`, `ok: false`, `detail "home_rail refused: … no rail-safe pre-positioning path: keyframe: …; home: … - fold the arm toward the factory zero posture in xArm Studio (joints 2-7 near 0) and retry"`, zero writes. While a job runs on ANY arm every maintenance op is 409 `"<op> refused: rail homing in progress on the Manipulation Arm - wait for it to finish"` and `POST /api/session` is 409 (`maintenance_busy` covers the job's whole life) |
 | `GET /api/hardware/arms/{arm_id}/maintenance/last` | → `ArmMaintenanceResult` \| 404 | phase-09d: the last result of the last `home_rail` on this arm — while a `RailHomingJob` runs the 202's `accepted` result (same `job_id`), afterwards its final result, else a synchronous homing's or a refused real op's; 404 until one exists (also for an unknown arm). The HomeRailSheet fetches it when the job's phase reaches `done` / `failed` (polling past `accepted`), and polls it itself when telemetry never shows the job; it only settles on a result carrying ITS `job_id` |
+| `GET /api/online_dagger/skill` | → `text/markdown; charset=utf-8` (the `SKILL.md`) \| 404 | 2026-09-08 evening (§10.7; 15-online-dagger §7 / §9, D8). Session-less. The skill is package data (`online_dagger/skill/`); `RuntimeConfig.online_dagger.skill_dir` overrides the directory; 404 `"Online DAgger skill not found: <OSError>"` when it has no `SKILL.md`. Superseded (2026-09-08 evening): the morning's `/api/pro_dagger/{skill,skill.tgz,sessions}` rows — those routes never shipped and answer 404 (pinned by `tests/test_server_contract.py`) |
+| `GET /api/online_dagger/skill.tgz` | → `application/gzip`, `Content-Disposition: attachment; filename="mavis-online-dagger-trainer.tgz"` \| 404 | the whole skill directory as a gzip tarball rooted at `mavis-online-dagger-trainer/` (deterministic member order) — `curl -s http://<host>:<port>/api/online_dagger/skill.tgz \| tar xz -C ~/.claude/skills/`; never an empty tarball (404 instead) |
+| `GET /api/online_dagger/sessions` | → `OnlineDaggerSessionInfo[]{session_name, path, created_at, task, rollouts, last_used_at}` | session-less; every `<online_dagger root>/*/session.json` (the mapped `online_dagger` namespace root, else `<datasets_root>/online_dagger`), newest `last_used_at` first; `rollouts` = `current.rollouts_saved`; an unreadable file is skipped with a warning; `[]` when the root does not exist. The launch sheet's resume picker |
+| `GET /api/dora` | → `DoraInfo` | phase-12 (14-dora §2.6, §16): the connection facts foreign clients need (bind host, coordinator / daemon / zenoh ports, `zenoh_connect`, dataflow, placeholders, machines) — never the auth token. `POST /api/dora/machines/{id}/join` → 202 `DoraInfo` \| 404 `"machine '<id>' is not in dora.machines"` (§17) |
 
 **Not REST** (binding decision, 05-ui §4): episode new/save/discard, profile
 save / set-as-initial, joint targets, switch_arm, takeover — all ride
@@ -1086,8 +1979,16 @@ the `snapshot` slot, builds `TelemetryMsg` (shape exactly as 05-ui §2:
 collision: CollisionReport, clearances, episode, dagger, inference`), and fans out with
 per-client latest-wins: a slow consumer gets frames dropped, never
 back-pressures control. Runtime-side additions inside the same message:
-`session: {state, start_from_progress?, plan_status?, trainer_alive?, bringup?}` —
-additive, UI ignores unknown fields. **`session.bringup:
+`session: {state, start_from_progress?, plan_status?, trainer_alive?, bringup?,
+translate_frame?, fault_detail?}` — additive, UI ignores unknown fields.
+**`session.fault_detail: str`** (additive, 2026-09-08; core §11): the
+manager's session-level notice the per-arm rows do NOT already carry —
+`ActiveSession.notice()`: the last profile motion's outcome / a refused or
+unplannable `start_from` (`ActiveSession.motion_detail`, §10.5) first, else the
+arms' fault text but only while no `arms[*].fault_detail` is non-empty (a fault
+before the first snapshot); `""` = nothing to say. `SessionInfo.fault_detail`
+(REST) carries the same text. The Cockpit's FaultBanner shows it verbatim as an
+amber `SESSION — …` row (05-ui §8.2). **`session.bringup:
 ArmBringupTelemetry[] | null`** (phase-09c, D5; core §11): one row per
 `(arm_id, step, status: pending|ok|warning|error, detail)` while a HARDWARE
 bring-up is in flight and until the session is `running` — the `monitor`
@@ -1130,9 +2031,16 @@ block is ≈0.5 kB (≈13 kB/s per client at 25 Hz). Raw PCM is never streamed o
 telemetry; a future listen/record feature would get its own `/ws/audio/<id>`
 binary channel with the §13.4 framing.
 
+**`datasets: DatasetsTelemetry | null`** (additive, 2026-09-07; core §11):
+`export` = the running / last `DatasetExportTelemetry` of the `dataset-export`
+job (§10.6: `repo_id`, `format`, `phase: scanning | videos | data | meta |
+validating | done | failed`, `done`, `total`, `detail`), built by
+`ws_telemetry` from the export job's progress object the same way
+`build_hardware_monitor_telemetry(runtime)` builds its block; `null` when no
+export has run in this process. Session-less like `microphone`.
+
 **`hardware_monitor: HardwareMonitorTelemetry`** (additive, phase-09a; core §11
-`protocol/hardware_monitor.py`; the LAST field of `TelemetryMsg`, after
-`microphone`). Always present: `{enabled: false, paused: false, arms: [],
+`protocol/hardware_monitor.py`; after `microphone`, before `datasets`). Always present: `{enabled: false, paused: false, arms: [],
 overlays: []}` is the valid block when no `hardware` workcell is configured or
 the `[hardware]` extra is missing. Built by
 `ws_telemetry.build_hardware_monitor_telemetry(runtime)` from two
@@ -1391,7 +2299,8 @@ workcells:                   # POST /api/session picks by requested kind
                                             # only; serial -> arm mapping confirmed 2026-09-04
       - {id: grip_wrist, kind: v4l2, serial: "349643062582", fourcc: YUYV,
          resolution: [640, 480], fps: 30,
-         intrinsics: {fx: 608.19, fy: 608.23, cx: 327.39, cy: 247.90}}  # D435i COLOUR
+         intrinsics: {fx: 608.19, fy: 608.23, cx: 327.39, cy: 247.90}}  # D435i COLOUR (Inverse
+                                                   # Brown-Conrady, distortion ignored)
       - {id: view_wrist, kind: v4l2, serial: "322143060792", fourcc: YUYV,   #   imager
          resolution: [640, 480], fps: 30,                                   #   (rs-enumerate-
          intrinsics: {fx: 606.36, fy: 606.38, cx: 311.90, cy: 249.45}}  #   devices -c),
@@ -1405,6 +2314,23 @@ datasets_root: ${APOLLO_HOME}/var/datasets      #   paths, below); resolved by c
 checkpoints_root: ${APOLLO_HOME}/var/checkpoints  #   ~ / other $VARS expanded, still-relative
 calibration_dir: ${APOLLO_HOME}/var/calibration   # anchored at the ws root. tracker_calibration.json
                                         #   + libsurvive temp/installed copies (phase-10, 13-tracker §4)
+datasets:                               # 2026-09-08 (operator decision; 15-online-dagger §7 D5; §10.6): per-
+  default_namespace: bc_demo            #   namespace roots. Repo ids keep the <ns>/<name> grammar; a bare
+  namespaces:                           #   `dataset: "<name>"` resolves into default_namespace. Roots expand
+    bc_demo:       {root: ~/data/bc_demo}   #   ~ / ${APOLLO_HOME} like datasets_root. -> ~/data/bc_demo/<name>
+    online_dagger: {root: ~/data/online_dagger, subdir: rollouts}   # -> ~/data/online_dagger/<s>/rollouts
+                                        #   (next to session.json; the trainer's own files live beside them);
+                                        #   subdir is ONE directory name. Every namespace NOT listed lives at
+                                        #   <datasets_root>/<ns>/<name>. Keys validated against the REST <ns>
+                                        #   grammar. Same values as the model defaults (DatasetsConfig /
+                                        #   DatasetNamespaceConfig). Superseded (2026-09-08 evening): the
+                                        #   morning's `pro_dagger: {root: ~/data/pro_dagger, …}` — never shipped
+online_dagger:                          # phase-14 (15-online-dagger §7; §10.7): the runtime's side only - it is
+  skill_dir: null                       #   the algorithm-agnostic shell, the trainer node configures itself.
+  session_file_hz: 1.0                  #   null = the skill shipped inside the package (GET /api/online_dagger/
+                                        #   skill[.tgz]); session_file_hz caps session.json rewrites outside
+                                        #   transitions. Same values as the model defaults (OnlineDaggerRuntimeConfig).
+                                        #   Superseded (2026-09-08 evening): the morning's `pro_dagger:` block
 control:
   rate_hz: 100
   teleop: {linear_mps: 0.12, angular_rps: 0.6, rail_mps: 0.10, gripper_frac_ps: 1.2}
@@ -1412,12 +2338,15 @@ control:
   target_rate: {v_mps: 1.0, w_radps: 2.0}   # tracker target approach rate (§6)
   dq_max_rad: 0.04           # per tick
   rail_in_ik: false          # rail excluded from the IK; rail inputs slide the whole arm (§6 "Rail")
-  jog: {slew_rad_per_tick: 0.02, rail_m_per_tick: 0.002, goto_threshold_rad: 0.15}
+  jog: {slew_rad_per_tick: 0.02, rail_m_per_tick: 0.002}   # any delta; constant-speed approach
   watchdog: {stale_s: 0.2, ramp_s: 0.1}   # = SafetyConfig input_deadman_s/input_ramp_s
   health_log_every_s: 1.0    # control-loop INFO health line period ("Logging" below); 0 = off
 recorder: {fps: 25, vcodec: auto, jpeg_quality: 80,
+           audio: true,                                      # per-episode WAV when the mic is live (§10.5)
+           export: {video_file_mb: 200, data_file_mb: 100},   # LeRobot v3 export shard caps (10-frames §11.8)
            extrinsics_warn: {pos_m: 0.003, rot_rad: 0.010},   # checkpoint-load
            extrinsics_max:  {pos_m: 0.010, rot_rad: 0.035}}   #   verify, 10-frames §5.3
+                             # (the 2026-09-07 interim `video_file_size_mb` never shipped — §10)
 telemetry_hz: 25
 video: {preview_fps: 15, session_fps: 30}
 dagger: {policy_hz: 15, t_blend_s: 0.3, pause_others_on_takeover: true,
@@ -1440,8 +2369,8 @@ tracker: {backend: none,            # none | fake | libsurvive (13-tracker §4)
                            arm_next: menu_click,                     #   arm_* = discrete (any
                            arm_prev: none},                          #   input but trigger_click)
           trackpad_deadzone: 0.3,             # |x|,|y| both within -> click ignored
-          filter: {enabled: true, min_cutoff_hz: 1.0, beta: 0.05,    # One Euro (live: enabled/
-                   d_cutoff_hz: 1.0, deadband_m: 0.002,              #   min_cutoff/beta via
+          filter: {enabled: true, min_cutoff_hz: 1.0, beta: 5.0,     # One Euro (live: enabled/
+                   d_cutoff_hz: 1.0, deadband_m: 0.001,              #   min_cutoff/beta via
                    deadband_rad: 0.005},                             #   tracker_settings)
           libsurvive_config_path: ${APOLLO_HOME}/var/libsurvive/config.json,  # libsurvive reads/writes
                                               #   it at teleop (tracker.py adds --configfile); the
@@ -1462,7 +2391,8 @@ microphone:                  # phase-11 (§13.3); Runtime-owned like tracker.*
   source_match: NT-USB Mini  # substring of the Pulse source name/description
                              #   (`pactl -f json list sources`; monitors ignored; `_`/`-`/space
                              #   interchangeable — pactl blanks the Ø description to "(null)")
-  sample_rate: 48000         # the NT-USB Mini is 48 kHz mono only
+  sample_rate: 48000         # the NT-USB Mini is S24_3LE mono 48 kHz only (ALSA card
+                             #   `Mini`, USB 19f7:0015, serial 750BFEE8)
   bins: 64                   # int8 min/max envelope points per frame
   stale_s: 0.5               # no frame for this long -> stalled
                              # frame rate = telemetry_hz (25 Hz -> 1920 samples/frame)
@@ -1498,8 +2428,21 @@ hardware_session:            # phase-09c/09d (§5 hardware BRINGUP, §13.1 home_
   armed: false               # ARMING SWITCH (2026-09-05): real drivers connect / rails home only
                              #   when true; repo default false -> tests, dev instances and a
                              #   forgotten render refuse hardware sessions + home_rail with 409
-                             #   "hardware not armed" (the lab render sets true, HARDWARE_ARMED)
-  default_speed_scale: 0.1   # Hardware-tab default (D2: 10 % / 30 % / 100 % segmented control)
+                             #   "hardware not armed" (the lab render sets true, HARDWARE_ARMED;
+                             #   so does the dev render via scripts/dev/local.env, §14.1). WHY:
+                             #   on 2026-09-05 a runtime test that bypassed the fake seam built a
+                             #   real HardwareWorkcell and started a RailHomingJob against the
+                             #   real Manipulation Arm box — no motion, but the arm was enabled
+                             #   and then braked again by the teardown (§16 has the guard)
+  default_speed_scale: 1.0   # Hardware-tab default (D2; segments 10 / 50 / 100 %). 1.0 since the
+                             #   evening of 2026-09-08 (operator decision after a day of live
+                             #   sessions; 0.5 was the 2026-09-07 call, 0.1 the first-run default
+                             #   with 10 / 30 / 100 %); the UI's DEFAULT_SPEED_SCALE mirrors it
+  plan_gate_hold_s: 3.0      # gate-held abort (2026-09-08 evening, §10.5): a running plan the
+                             #   gate holds this long with no waypoint progress is cancelled by
+                             #   the loop with the blocking pair in the reason ("held by the
+                             #   safety gate: <a> / <b> at <mm> mm"); arms hold; 0 = first held
+                             #   tick; honoured on sim loops too (a sim gate = safety_debug)
   rail_flip: false           # q_sim = 0.65 - q_track for the overlay AND the gate / sweep twins;
                              #   verify with the *_align overlay right after the first home_rail
   home_rail_inflation_m: 0.025  # D4: blind-sweep margin (the guardrail's debug inflation);
@@ -1521,7 +2464,9 @@ logging:                     # 2026-09-07 ("Logging" below)
 stderr, no level knob and no file: the dev launcher appended stderr to an
 unrotated `var/logs/runtime.log` (40 MB after two days, a quarter of it the
 access log of three UI poll endpoints, 42 INFO application records in total),
-so the first live teleop defects could not be read off a log. Now
+so the first live teleop defects could not be read off a log (that 40 MB file
+is larger than `max_bytes`, so the `RotatingFileHandler` rolls it to
+`runtime.log.1` on its first write — renamed, not lost). Now
 `__main__.configure_file_logging(cfg.logging)` adds a
 `RotatingFileHandler` at `logging.dir/logging.file` after the config loads and
 keeps the stderr handler (journald on the ops path; the dev launcher's
@@ -1548,6 +2493,15 @@ handlers; `access_log` follows the config. The control loop writes:
 
 `ControlLoop.ik_slips` / `.ik_diverged` and `TrackerTeleop.slip_count` /
 `.slip_pos_total_m` are the cumulative counters behind the deltas.
+`grep 'loop:' var/logs/runtime.log` is the first thing to read after a bad
+session; `var/logs/runtime.stderr.log` the second (libsurvive / MuJoCo).
+
+The `dora:` block (`RuntimeConfig.dora`: `enabled: false` in the repo config,
+`bind_host`, `machine_id`, `machines`, ports, `auth`, `publish`, `policy.spec_stale_s`
+3 s, `log`, `var_dir`) is specified in 14-dora §12 and summarised in §17; the lab
+render turns it on (`DORA_BIND_HOST`, `DORA_MACHINES`). `datasets` /
+`online_dagger` above: `render-lab-config.sh` rewrites `datasets_root` but does
+not template the namespace roots (open item, 15-online-dagger §12.3 item 4).
 
 ### 14.1 Self-contained paths (`${APOLLO_HOME}`)
 
@@ -1674,7 +2628,7 @@ Status (phase-09b, 2026-09-04): the first two rows and the Studio-conflict
 row are **implemented and fake-tested** (`tests/test_fault_recovery_loop.py`,
 `tests/test_maintenance_api.py` over `tests/fakes.EventFakeWorkcell`); the
 hardware session itself landed with phase-09c (§5; `tests/test_hardware_session.py`,
-fakes only — the first live run is the phase-09c acceptance). Mechanism: every tick the
+fakes first; the first live run was 2026-09-05 — 02-hardware §16). Mechanism: every tick the
 loop calls `workcell.drain_events()` (core `WorkcellInterface`, default `[]`;
 `HardwareWorkcell` returns every driver's events in `t_mono` order) and
 dispatches BY CLASS NAME (`control.loop.FAULT_EVENT_NAMES`; the runtime never
@@ -1696,13 +2650,27 @@ field-for-field and a test pins the names against the hardware package).
 | Twin gate HOLD persists > 2 s | supervisor counter | telemetry severity stays `blocked`; no auto-motion — operator steers away or ends session |
 | Policy output stale / NaN | PolicyRunner check | hold arms; telemetry `dagger.policy_stale`; NaN → auto-takeover suggestion, gate unchanged |
 | Trainer process dead | `proc.poll() != None` or 3 missed status replies | DAgger continues with frozen policy; `TrainerStatus.state="dead"` + UI banner; **auto-restart once with `--resume`** (trainer reloads `trainer_state.pt` of the newest version); dies again ⇒ stay degraded, never a third silent restart (12-dagger §12) |
+| Online DAgger trainer stale (phase-14, 2026-09-08 evening; §10.7; the morning's "PRO-DAgger" rows superseded) | no `policy_trainer_status` echoing this session within `dora.policy.spec_stale_s` (3 s): `dagger.online_dagger.trainer_alive: false`, `trainer_age_s` growing, `session.trainer_alive: false` | phase keeps its value; `episode_new` / `train_now` nacked `"no Online DAgger trainer attached"` (aliveness is checked before the phase); Cockpit red banner (`OnlineDaggerBanner`: TRAINER LOST); no motion — an open rollout continues under the gate, the external policy's own `policy_stale` hold is independent (12-dagger §12) |
+| Online DAgger trainer `state: "error"` | `trainer_status.state == "error"` for this session | coordinator phase `error` (no event — the shell publishes no phase event; telemetry carries it); rollouts refused `"trainer error: <detail>"`; a rollout already open finishes and its save is a kept rollout (`events.episode_saved` fires; the trainer decides); the trainer recovering moves the phase per the pure phase rule; End session clears it; no rollback exists for an external policy (14-dora §11.3) |
+| Online DAgger bring-up fails after the session directory was created | any exception in `_bringup_sim` after `_build_online_dagger` (recorder 409, executor ctor, a `start()`) | rollback in reverse order, `_OnlineDagger.abandon()` removes a FRESH directory (a resumed one is kept and its `session.json` stays byte-identical — it is not rewritten before RUNNING), 409 with the cause; the name stays usable |
+| Online DAgger `session.json` unreadable on resume | `_check_online_dagger` pre-bring-up read (non-dict / invalid JSON) | 409 `"Online DAgger session '<s>': session.json is unreadable - fix or remove it"`; the file is never overwritten (the rollouts rows and the counters a resume continues live only there) |
+| Online DAgger trainer spool write fails at save (pyarrow / disk) | `DaggerRecorderThread._write_spool` raises | logged; `on_episode_saved(index, summary, "")` still fires → `events.episode_saved` with `spool_path: null`, the rollout counts, the boundary spells `episode_boundary` (never a silent discard) — review fix 2026-09-08 |
 | Camera hung | `read_latest` max-age miss | recorder drops frame + counts; video tile goes stale client-side; capture-thread reconnect (RealSense `hardware_reset` retry) |
-| Recorder exception in `save_episode` | RecorderThread try/except | **KEEP the episode buffer** (do NOT `clear_episode_buffer`); retry once; on second failure mark the session degraded (recording off, telemetry + toastable detail), keep teleop/safety alive (12-dagger §12); control unaffected. `add_frame` exception: drop that frame + count; repeated failures degrade likewise |
+| Recorder exception in `save()` | RecorderThread try/except | **KEEP the episode buffer and the temp directory** (do NOT discard); retry once; on second failure mark the session degraded (recording off, telemetry + toastable detail), keep teleop/safety alive (12-dagger §12); control unaffected. `add_frame` exception: drop that frame + count; repeated failures degrade likewise |
 | Tick overrun (> 10 ms) | pacing check | log + skip catch-up; ≥ 10 consecutive → telemetry warning `control_degraded` |
-| Unclean prior shutdown | `recorder_state.json` finalized=false | on startup: `resume()` + `finalize()` repair before serving |
+| Unclean prior shutdown | an `episodes/.tmp-*` directory without `episode.json` | `sweep_incomplete_episodes(datasets_root)` at `Runtime.start()` / session start / `DatasetStore` scan removes it and logs (§10.4); published episodes are untouched |
 | SIGINT/SIGTERM | signal handlers | full TEARDOWN (§5.4): ramp, finalize, stop trainer, disconnect arms, `renderer.close()` (avoids EGL teardown noise) |
 
 ## 16. Test strategy
+
+**Guard (2026-09-05).** `tests/conftest.py` carries an autouse fixture
+`_never_touch_real_hardware` that makes `SessionManager._default_workcell_factory`
+raise unless `driver_api_factory` is a fake, and the fixture config sets
+`hardware_session.armed: true` so the fake paths run at all. The lab machine
+can reach both control boxes — **never run the runtime suite there without
+this guard in place** (before it existed, a test without the fake seam
+started a rail-homing job against the real Manipulation Arm box; §14
+`armed`).
 
 Hardware-free by default; pytest. Three tiers:
 
@@ -1724,8 +2692,10 @@ Hardware-free by default; pytest. Three tiers:
    latch; Studio warning lingers 5 s without stopping; event names pinned
    against `apollo_mavis_v2_hardware.events`); teleop math (held→twist per keymap,
    leash + dq clamps, rail [0, 0.65], rail keys ignored for rail-less active
-   arm, Tab cycling server-side); jog/goto (slew limit, jog>threshold
-   rejected, goto routes via `FakeTwin.plan`, held key cancels a plan); gate
+   arm, Tab cycling server-side); jog/goto (slew limit; ANY jog delta accepted
+   since 2026-09-07 — the 0.15 rad `goto_threshold_rad` nack is gone; goto
+   routes via `FakeTwin.plan`; held key cancels a plan; a watchdog latch
+   clears pending jog targets); gate
    (scripted collision ⇒ block + hold-last-safe + CollisionEvent; hysteresis;
    escape-rule accept/reject; sim gate off unless safety_debug); bus (corr
    ids, Future resolution, unknown op); profiles
@@ -1750,16 +2720,100 @@ Hardware-free by default; pytest. Three tiers:
    404 unknown arm, 422 unknown op.
 3. **Sim-backed e2e** (`[sim]` extra, CI with EGL): (a) sim session, stream
    `KeysMsg` W for 1 s ⇒ EE moved +x, telemetry ≥ 20 Hz; (b) collect: record
-   2 episodes (one saved, one discarded) to a tmpdir, `finalize`, re-open
-   with `LeRobotDataset`, assert schema §10.2 (intervention / action_source /
-   wallclock_ns), fps=25, episode count 1; (c) `safety_debug` guardrail: the
+   2 episodes (one saved, one discarded) into a tmp `datasets_root` ⇒
+   exactly one `episodes/<id>/` directory (`frames.parquet`, one mp4 per
+   camera with `frames == rows`, `episode.json`), no `.tmp-*` left, manifest
+   counters match; run the LeRobot v3 export and re-open it with
+   `LeRobotDataset`, assert schema §10.2 (intervention / action_source /
+   wallclock_ns), fps=25, episode count 1, `codebase_version v3.0`
+   (10-frames §11.8); delete the episode over REST ⇒ directory gone, export
+   marked stale, nothing re-encoded; (c) `safety_debug` guardrail: the
    `apollo-mavis-v2-sim` collision-course script through the runtime must be
    blocked *before* contact with `CollisionEvent`s (CI regression, overview
    §6); (d) DAgger smoke with scripted `Policy` + stub trainer: Space cycles
    policy→transition→human and back, hot-swap only at episode boundary;
    inference smoke: takeover works, recorder never instantiated.
 
-Recorder crash-safety: raise inside `save_episode` ⇒ buffer kept + one retry
-succeeds (fault injected once), second consecutive failure degrades recording
-while the dataset stays finalizable; skip finalize (simulated death) ⇒
-startup repair via `recorder_state.json`.
+Recorder crash-safety: raise inside `save()` ⇒ buffer + temp directory kept,
+one retry succeeds (fault injected once), second consecutive failure degrades
+recording while every published episode stays readable; kill mid-save
+(simulated death) ⇒ one `.tmp-*` directory left, swept at the next open,
+published episodes untouched (10-frames §11.6).
+
+**Phase-12 merge + phase-14 Online DAgger (2026-09-08; the morning's PRO-DAgger test
+names — `test_pro_dagger_coordinator.py` (30), `test_pro_dagger_package.py`,
+`test_pro_dagger_session.py`, `test_e2e_pro_dagger.py` — are superseded: deleted, not
+renamed).** The dora tests live in `tests/dora_bridge/` (a package — a top-level
+`tests/dora` would shadow the PyPI module; markers `dora` / `egl` / `perf`, a private
+control plane per module, 14-dora §10 / §16.4 for the two adapted tests and the known
+flakes: the 1.0 s `RUNNING` budget with ~150 ms headroom, the machine-wide `pgrep -x
+dora` leak check). Online DAgger (15-online-dagger §11 / §12): unit
+`tests/dagger/test_online_dagger_coordinator.py` (23: phases as a pure function,
+refusals verbatim, discard = event only + no files, `train_now`, gate events, resume,
+`spool_path: null`, the session-id pin, the 200-row `trainer_log` cap),
+`tests/dagger/test_executor.py` (+ `takeover` / `handback` / `train_now` ops and their
+acks, gate payloads incl. the CLOSED episode's id, `episode_boundary` vs `handback`, the
+discard boundary under return-to-start AND from `_op_episode_new`, the POLICY-driving nack
+for `R` / `goto_profile`), `tests/dagger/test_recorder_schema.py` (`actor`, teardown
+discard, the spool-failure path), `tests/test_return_manager_units.py` (D6 through the
+real loop); contract `tests/test_server_contract.py` (skill / sessions routes, the 409
+matrix incl. the capability via a fake hub, the `train_now` nack, `SessionInfo.
+online_dagger`, `/api/pro_dagger/*` → 404), `tests/test_configs.py`,
+`tests/test_dataset_layout.py` (mapped roots, `GET /api/datasets/layout`, a real collect
+session into `bc_demo/<name>`, delete / sweep rules), `tests/test_dataset_store.py` (the
+in-use delete guard), `tests/test_online_dagger_package.py` (4: package data, tarball,
+mirror identity — skipped without the policy-node checkout —, config block),
+`tests/dora_bridge/test_external_status.py` / `test_policy_source.py` (`capabilities`,
+`trainer_status` cache + replay), `tests/dora_bridge/test_fake_trainer_role.py` (3, no
+dora: every status the fake emits validates as the 10-key `TrainerStatusAnnounce`);
+integration `tests/test_online_dagger_session.py` (4: a real sim server + fake dora
+wiring + real `ExternalPolicyHub` — lifecycle incl. the 409 on deleting a saved rollout
+mid-session and the export 409 on resume, fresh-directory rollback, unreadable
+`session.json`, a `start()` failure); sim e2e `tests/dora_bridge/test_e2e_online_dagger.py`
+(3, `dora` + `egl`: the fake node in trainer mode over the real private control plane +
+an `observer` node — `test_409_matrix_before_any_trainer`, `test_online_dagger_rollouts_
+over_the_bus` (waiting → ready → two kept rollouts with take-over via the actions and via
+Space → the fake trains → `"training in progress"` refusal → ready with policy v2 → a
+discard while the expert holds the arm leaves NO directory and publishes the event →
+Train now → v3; 9 gate events, `session.json`, `actor` in `frames.parquet` and the spool,
+return-to-start walked `returning`), `test_skill_endpoints_are_session_less`; 30.9–32.3 s
+wall for the file, the big test 23.9–24.2 s alone). Full suite after the review fixes:
+713 passed / 1 failed (the pre-existing `test_return_to_start.py` WS-deadman flake, green
+on re-run) / 2 hardware-probe skips in 688.79 s with the dora + egl + perf tiers; the
+non-dora tier after the same-evening `goto_profile` work 715 passed / 2 skipped / 20
+deselected. `tests/dagger/test_e2e_dagger.py` and `tests/dora_bridge/
+test_e2e_external_policy.py` pin `return_to_start: False` (D6). Config pins in
+`make_runtime_config` / `harness.dora_runtime_config` / `test_perf.py` /
+`test_e2e_safety_debug.py`: `datasets=DatasetsConfig(default_namespace="apollo",
+namespaces={})` so no test lists or sweeps the operator's `~/data`. New this pass,
+unrelated to Online DAgger: `tests/test_video_hub_pacing.py` (the phase-locked
+`EncoderWorker` poll; two `perf`-marked).
+
+## 17. dora bridge (phase-12, 2026-09-08)
+
+Contract and measurements: `14-dora-interface.md` (v1.0; §16 is the
+implementation record). The bridge (`dora_bridge/`) owns one
+`dora.Node("mavis_runtime")` on the `dora-bus` thread: depth-1 slots per topic
+plus a FIFO for events / mic, `SnapshotPublisher` (`dora-publisher` thread) for
+`arm_state` / `obs_state` / `telemetry` / `session`, `CameraTap` on
+`EncoderWorker.taps` (re-tapped for every new worker), `MicTap`, `PoseStamper`
+(one-pass FK, `park()` at teardown), `IdleArmReader` (sim / read-only monitor /
+read-only driver) between sessions, and `ExternalPolicyHub` +
+`ExternalPolicySource` (a `PolicySource`) for `policy_source: external`.
+Control plane: `DoraControlPlane` spawns `dora coordinator --interface <ip>
+--port …` + `dora daemon` (setsid, reaped on stop), renders the dataflow YAML
+(`dataflow.py`), `dora validate --strict-types`, `dora start --detach`. dora
+1.0.1 facts that shaped it (14-dora §16): the multi-machine start barrier makes
+`Node()` block while holding the GIL until every remote placeholder has
+attached → a join handshake (`POST /api/dora/machines/{id}/join`) plus a
+subprocess `canary` node that proves the barrier is open; a dead remote daemon
+makes the coordinator answer `429` to every CLI call for ~50 s → a lost machine
+is marked `lost`, never restarted automatically; `Node()` monkey-patches
+`logging.basicConfig` → restored after attach; the first `Array.to_numpy()`
+costs ~190 ms → `codec.warm_up()` before "attached". Measured: bridge threads
+≈ 7 % of one core at 4 rgb × 15 Hz + depth + mic + telemetry; the control-loop
+median is unchanged, the tick p99 goes 3.0 → 5.4–7.9 ms with the bridge on
+(open problem, 14-dora §16.2). Config `RuntimeConfig.dora` (`enabled: false`
+in the repo; the lab render turns it on with `DORA_BIND_HOST=wlp38s0`,
+`DORA_MACHINES`); `${var_dir}/node-stdout.log` holds dora's own diagnostics;
+`GET /api/dora` publishes the connection facts (never the auth token).

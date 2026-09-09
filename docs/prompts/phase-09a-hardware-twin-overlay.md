@@ -24,7 +24,7 @@
   `<arm>_link7` 相对 `<arm>_link_base` 的位姿与控制器 `get_position()`（tcp_offset 为零 = 法兰）一致到
   0.0 mm / 0.00°（两臂）。**不加 π 偏移**（q1+π 会差 180°）。`mavis_v2` keyframe 的 joint1 = π 表示初始
   状态时真机 joint1 本身就转到 180°（用户决定），不是坐标偏移。link7 原点 = 控制器法兰 TCP；
-  `<arm>_link_tcp` site 在法兰下方 168.6 mm（夹爪指尖）。
+  `<arm>_link_tcp` site 在法兰下方 172 mm（模型值 `link_tcp` pos 0 0 .172，03-sim §3；2026-09-07 更正，此前误写 168.6）（夹爪指尖）。
 - **导轨（linear track）目前未归零、未使能**：`get_linear_track_registers` →
   `{pos: 0, status: 2, error: 0, is_enabled: 0, on_zero: 0}`（两臂相同）。此时 `pos` 无意义。归零
   （`set_linear_track_back_origin`）是运动指令，属 phase-09。SDK 1.18.5 的 `XArmAPI` 实例**没有**

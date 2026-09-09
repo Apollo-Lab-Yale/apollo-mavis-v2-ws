@@ -81,7 +81,7 @@
   （`GuardrailScenario.overrides`），更新 `tests/test_guardrail.py` 的场景集合与 PASS 计数。
 - 测试：hidden 过滤与 title；麦克风 flag 加 body/几何/焊接/nq·nu 不变/xml 往返；非相机臂拒绝；
   同一场景 override 开关；间隙复核。`docs/renders/mavis_v2/render_mavis_v2.py` 加 `--microphone`。
-- 03-sim.md §3/§4.1/§4.3/§8/§14 同步，并注明 view 腕部相机画面底部约 7–8% 会被麦克风遮挡属正常。
+- 03-sim.md §3/§4.1/§4.3/§8/§14 同步，并注明 view 腕部相机画面底部约 12% 会被麦克风遮挡属正常（早先估算 7–8%，03-sim §4.3 实测 12%）。
 
 ### 3. runtime
 

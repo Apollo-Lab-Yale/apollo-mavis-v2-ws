@@ -3,464 +3,400 @@
 ## What this is
 
 Development workspace for **MAVIS v2** (Manipulation And Viewpoint Selection v2),
-the Apollo Lab (Yale) dual-arm cell: two UFACTORY xArm7 arms on linear tracks over
-one table — the **Manipulation Arm** (id `grip`: xArm Gripper G2 + wrist camera) and
-the **Perception Arm** (id `view`: wrist RealSense D435 + RØDE NT-USB Mini
-microphone, no gripper). Use those user-facing names everywhere a person reads
+the Apollo Lab (Yale) dual-arm cell: two UFACTORY xArm7 arms on 0.65 m linear
+tracks over one table — the **Manipulation Arm** (id `grip`: xArm Gripper G2 +
+wrist camera) and the **Perception Arm** (id `view`: wrist RealSense D435i + RØDE
+NT-USB Mini microphone, no gripper). Use those names everywhere a person reads
 them; the ids stay internal. The stack targets exactly this cell, real or as its
-MuJoCo digital twin (scene `mavis_v2`), not xArm7 in general. Five repos: `apollo-mavis-v2-core` (interfaces/schemas/protocols) ←
-`apollo-mavis-v2-hardware` (real xArm7 + linear-track drivers) and
-`apollo-mavis-v2-sim` (MuJoCo) ← `apollo-mavis-v2-runtime` (teleop / data
-collection / DAgger / inference) ← `apollo-mavis-v2-ui` (web UI). Renamed from
-`apollo-xarm7-*` on 2026-09-03 (GitHub keeps redirects from the old names).
+MuJoCo digital twin (scene `mavis_v2`, the only scene the UI exposes), not xArm7 in
+general. Five repos: `apollo-mavis-v2-core` (interfaces/schemas/protocols) ←
+`apollo-mavis-v2-hardware` (real xArm7 + track drivers) and `apollo-mavis-v2-sim`
+(MuJoCo) ← `apollo-mavis-v2-runtime` (teleop / collect / DAgger / inference +
+server) ← `apollo-mavis-v2-ui` (React + Vite + TS).
 
-The five sub-repos are **git submodules** of this workspace (since 2026-09-03),
-each tracking its own `main`. A ws commit therefore pins a known-good
-combination of the five. Rules: work inside a sub-repo on `main` (never on a
-detached HEAD — run `git -C <sub> switch main` if `git submodule status` shows
-one), commit + push there first, then bump the pointer in the ws
-(`git add <sub> && git commit`); `git submodule update --remote --merge`
-advances every pointer to the latest pushed `main`. Fresh checkout:
+The five sub-repos are **git submodules** of this workspace, each tracking its own
+`main`; a ws commit pins a known-good combination. Work inside a sub-repo on `main`
+(never a detached HEAD — `git -C <sub> switch main` if `git submodule status` shows
+one), commit + push there first, then bump the pointer here. Fresh checkout:
 `git clone --recurse-submodules <ws-url>`.
 
 ## Where truth lives
 
-- `docs/design/00-overview.md` — system contract and architecture decisions.
-  Read it before touching any sub-repo.
-- `docs/design/` — per-repo designs and cross-cutting protocols (frames,
-  profiles, safety/collision, DAgger, networking).
-- `docs/prompts/phase-XX-*.md` — the phased implementation plan. Each phase is
-  one session's worth of work; do them in order unless told otherwise.
-- `docs/research/` — background research notes (reference only).
+- `docs/design/00-overview.md` — the spine: system contract and architecture
+  decisions. Read it before touching any sub-repo.
+- `docs/design/` — per-repo designs and cross-cutting protocols. **Measurement
+  histories and root-cause write-ups live there, not here.** Pointers: cell
+  geometry + wrist-camera extrinsics → 03-sim §4.3 and the header of
+  `apollo-mavis-v2-sim/src/apollo_mavis_v2_sim/assets/scenes/mavis_v2.yaml`;
+  cameras → 02-hardware §8, 04-runtime §14; microphone → 04-runtime §14/§14.1,
+  05-ui §8.1, `docs/deploy/DEPLOYMENT.md`; control boxes, SDK quirks, the first
+  live session → 02-hardware §12–§16; hardware session
+  bring-up / rail homing → 04-runtime §5, §13.1; teleop pipeline, servo caps,
+  pose filter → 04-runtime §6, 13-tracker §4; joint panel + WS deadman →
+  04-runtime §7, 05-ui §5.2/§8.3, 11-safety §10.1; logging → 04-runtime §14;
+  libsurvive / controller link → 13-tracker §3 item 7b, §6, §7; datasets → 10-frames
+  §7–§11, 04-runtime §10; keyboard translate frame + return-to-initial →
+  04-runtime §6 and §10.5, 05-ui §8.2; **Online DAgger** (operator decisions,
+  coordinator phases + refusals, core models, wire, config / REST, UI, skill,
+  policy-node, implementation record) → 15-online-dagger §0, §3, §5–§10, §12
+  (`15-pro-dagger.md` v1.0 is history only — superseded the evening of
+  2026-09-08); the per-repo Online
+  DAgger amendments → 04-runtime §10.7, 05-ui §8, 10-frames §7.4 / §11.10,
+  12-dagger, 14-dora; dora bus + external policy → 14-dora.
+- `docs/prompts/phase-XX-*.md` — the phased plan; one phase = one session's work,
+  status table in `docs/prompts/README.md`.
+  **Next: restart the runtime and take phase-13 / the 2026-09-08 follow-ups to
+  the real cell; the first policy-repo trainer on the Online DAgger shell (sim);
+  admitting Online DAgger on hardware is the operator's call (D7)** — phase-12 /
+  13 / 14 are implemented but uncommitted and have never run on the real arms;
+  the docs sweep from PRO-DAgger to Online DAgger wording is DONE (2026-09-08,
+  late evening). Plan: `docs/prompts/phase-14-online-dagger.md`.
+- `docs/deploy/DEPLOYMENT.md` — the lab machine, services, network profiles,
+  troubleshooting. `docs/research/` — background notes, reference only.
 
 ## Conventions
 
-- Converse with the user in Chinese; write code, comments, and repo docs in English.
-- Python ≥3.10, managed with `uv`; each sub-repo is an installable package
-  (`apollo_mavis_v2_core`, `_hardware`, `_sim`, `_runtime`). UI is React+Vite+TS.
-- Dependency direction is strict: core depends on nothing in the stack;
-  hardware/sim depend only on core; runtime depends on core (+ hardware/sim
-  as optional extras); ui talks to runtime over HTTP/WebSocket only.
-- Commit/push in sub-repos only when the user asks.
+- Converse with the user in Chinese; write code, comments and repo docs in English.
+- Python ≥3.10 for core / sim / hardware, **3.12 for runtime** (lerobot floor);
+  all `uv`-managed. Each sub-repo is an installable package (`apollo_mavis_v2_*`).
+- Dependency direction is strict: core depends on nothing in the stack; hardware /
+  sim depend only on core; runtime depends on core (+ hardware / sim as extras);
+  ui talks to runtime over HTTP / WebSocket only.
+- Commit / push in sub-repos only when the user asks. Never rewrite the
+  operator's settings unasked (next section).
+
+## Rules that protect the cell
+
+- **No implicit motion.** The driver's `connect()` never homes a track; `home_rail`
+  (Hardware-tab arm card, twin-gated, session-less) is the ONLY motion-class
+  maintenance op. Error clearing, `apply_backstops` and `recover` produce no
+  motion. Teardown leaves the arms stopped with brakes engaged; tracks keep their
+  homed state.
+- **`hardware_session.armed` gates every real driver connection.** The repo config
+  is `false`; only a RENDERED config arms it (lab render `render-lab-config.sh` with
+  `HARDWARE_ARMED=true`, or the dev render `mavis-dev.sh render` with the gitignored
+  `scripts/dev/local.env`). Never set `armed: true` in a tracked config. Never run
+  the runtime test suite on the lab machine without the `tests/conftest.py`
+  guard (on 2026-09-05 a test without the fake seam started a rail-homing job on the
+  real Manipulation Arm; 04-runtime §16).
+- Never open UFACTORY Studio "Live control" during a session. Controller
+  `state 2` (standby) is HEALTHY for a mode-1 arm holding a posture; `clean_error`
+  returning 1/2/9 is a status echo, not a failure (02-hardware §16).
+- Both arms are always in a hardware session; the default active arm is ALWAYS
+  the Manipulation Arm (hardware and sim).
+- **Twin-planned multi-arm motions execute ONE ARM AT A TIME in the planner's
+  `arm_order`** (`SessionManager._execute_arms`: return phases, per-episode return,
+  `start_from`, `goto_profile`; 2026-09-08 incident: simultaneous execution of
+  sequentially planned paths blocked the gate at 5 mm). A plan the gate holds for
+  `hardware_session.plan_gate_hold_s` (3 s) is cancelled by the loop with the
+  blocking pair in the reason — never wait out the 30 s budget to learn the pair.
+- **A plan from inside the inflation shell starts with an OPENING escape that mirrors
+  the gate's T8 rule (2026-09-09)**: every pinched pair opens every tick, no new pair
+  enters the shell, `no_escape` when that is impossible; the finished path is
+  re-verified at the executor's tick resolution (11-safety §9, 03-sim §10). Never
+  whitelist a violating pair in the planner again — the gate is the safety authority.
+- Driver caps at speed scale 1.0: `max_joint_vel` 0.6 rad/s, `max_cart_step_m`
+  0.004 (= 4 mm/tick, deliberately HALF the gate's 8 mm inflation — do not raise
+  it without changing the gate), rail 50 mm/s. Hardware tab picks 10 / 50 / 100 %,
+  default 100 % (operator decision 2026-09-08 evening; 50 % was the 2026-09-07 call).
+
+## Operator-owned settings — do not change unasked
+
+- The Vive controller map (`tracker.controller_map`: clutch trigger, gripper
+  pad up/down, rail pad left/right, arm_next menu) — code default and lab YAML
+  are identical. A 2026-09-07 remap "to work around" a pad bug was wrong and was
+  reverted; the bug was in `note_edges` (13-tracker §1.1).
+- The keymap (00-overview §5) and the input-interface decision below.
+- Pose filter values (`beta 5.0`, `d_cutoff_hz 1.0`, `deadband_m 0.001`): re-run
+  the two experiments in `control/pose_filter.py`'s docstring before touching them.
+- Speed default 100 % (operator decision 2026-09-08 evening; 50 % was 2026-09-07),
+  the user-facing arm names, the `mavis_v2` scene as the only exposed scene.
+
+## Teleop input interfaces (operator decisions, 2026-09-07 / 09-08)
+
+- The **Vive controller and the keyboard are peers**; the gamepad mirrors a subset.
+  Keyboard (00-overview §5, 01-core §13): `W/S` forward/back, `A/D` left/right,
+  `E/Q` up/down, `I/K` roll, `J/L` pitch, `U/O` yaw, `F/H` gripper close/open,
+  `←/→` rail, `Tab` / `Z` switch arm, `C` clutch (hold), `Space` takeover (DAgger /
+  inference), **`R` return to the initial condition**, **`N` new episode, `Enter`
+  save, `Backspace` discard**.
+- **Keyboard translate frame default = WORLD** (`control.translate_frame`,
+  default `world`: `W` away from the operator = −Y, `A` operator's left = +X,
+  `E` up; operator decision 2026-09-08 evening — that morning's default `camera`
+  was superseded the same day). `camera` = the active arm's WRIST CAMERA (W along
+  the optical axis, A/D, E/Q image left/right, up/down — follows the tool so the
+  keys match the wrist stream); `base` = the pre-2026-09-08 arm-base axes.
+  Rotations stay about the TCP axes in every frame. Under `camera` the camera
+  orientation is read from the model PER ARM — the gripper base is mounted 180°
+  about the tool axis under link7, so one constant key→TCP matrix reverses `A/D`
+  and `E/Q` on the Manipulation Arm (04-runtime §6; `tests/test_camera_frame.py`).
+  The runtime e2e suites pin `translate_frame: "base"` because they assert
+  displacement along their test scenes' base axes; `tests/test_configs.py` pins
+  the `world` default on both shipped configs. **Property of `camera` to say out
+  loud: `E`/`Q` are up/down in the WRIST IMAGE, not world up/down** — with the
+  tool aimed at the table they run nearly horizontal and `W` runs into the table.
+  The live frame is captioned above the keymap overlay
+  (`telemetry.session.translate_frame`; `world` reads "(the default)").
+- Precedence: while any source holds the clutch (trigger / `C` / RT) the tracker
+  pose drives translation and rotation and keyboard translate / rotate keys are
+  ignored; gripper and rail inputs from every source merge; clutch released ⇒ the
+  keyboard drives. Unchanged runtime rule.
+- **Do not remove keyboard teleop again.** An uncommitted 2026-09-07 core change
+  flagged every held row `keyboard=False` and put episode save / discard on
+  `KeyS` / `KeyF` (colliding with −x / gripper close); phase-13 reverts it.
+
+## Datasets (operator decisions, 2026-09-07 / 09-08)
+
+- **One directory per episode** (`episodes/<episode_id>/{episode.json,
+  frames.parquet, video/<camera_id>.mp4, audio.wav}`); ids are capture-time
+  stamps, never reused or renumbered. **Roots are per namespace (operator
+  decision 2026-09-08, 15-online-dagger §0 item 6 / D5)**: demonstrations
+  `bc_demo/<name>` → `~/data/bc_demo/<name>` (the default namespace — a bare
+  `dataset: "<name>"` resolves there), Online DAgger rollouts
+  `online_dagger/<session>` → `~/data/online_dagger/<session>/rollouts` (next to
+  `session.json`; whatever the trainer writes beside them, e.g. `trainer/`, the
+  runtime never reads), every other namespace → the generic `datasets_root`
+  (`var/datasets/<ns>/<name>`, where the old `apollo/...` data stays listable /
+  deletable). `~` is the HOME of the account running the runtime; the roots live
+  OUTSIDE `var/` on purpose. `GET /api/datasets/layout` publishes the map — the
+  UI never hard-codes a namespace. Repo ids keep the `<ns>/<name>` grammar
+  everywhere. **LeRobot v3 is a derived export** (`exports/lerobot_v3/`, built by
+  stream-copy remux — never a re-encode). Deleting an episode removes one
+  directory (409 for a saved rollout of the RUNNING Online DAgger session).
+  Spec: 10-frames §11, 04-runtime §10, 15-online-dagger §7; UI: 05-ui §8.1
+  items 6–7. (`~/data/pro_dagger` never shipped — the morning-of-2026-09-08 name.)
+- After every episode save / discard the arms **return to the start profile by
+  default** (twin-planned, gated, cancelled by any input; per-session opt-out;
+  409 at launch when no start / initial-condition profile exists) — 04-runtime
+  §10.5. Operator decision 2026-09-07. **Applies to Online DAgger rollouts too**
+  (`return_to_start` is a collect-or-dagger field since 2026-09-08, D6).
+- Every DAgger / Online DAgger frame carries the **`actor` column** (int8, `0`
+  novice / `1` expert, `actor = 1 iff control_mode != policy`) next to
+  `control_mode` / `intervention`; `EpisodeSummary.n_expert_frames /
+  n_novice_frames` count it; `episode.json` and `events.episode_saved` carry the
+  per-rollout actor counts. Training labels stay `control_mode == human`
+  (12-dagger). Operator decision 2026-09-08 (§0 item 3 / D4).
+- **Return to the initial condition (operator request 2026-09-08)**: the `R` key
+  (`reset_to_initial`, fire-and-forget) and `POST /api/session/return_home`
+  (synchronous — the Cockpit's "End session" runs it BEFORE the DELETE and shows
+  a dialog if the arms did not get there, offering "End session anyway"). Two
+  separately planned + gated phases: joints first with the carriages held, then
+  the carriages. Both are no-ops with a reason when no initial condition is
+  designated. `teardown()` still produces NO motion of its own. 04-runtime §10.5.
+- The default posture lives in the profile store, seeded by `python -m
+  apollo_mavis_v2_runtime.profiles.seed_initial` (one initial-condition profile
+  per workcell kind, idempotent): Manipulation Arm
+  `[-180, -12, -20, 30, -5, 35, -8.9]°`, Perception Arm
+  `[0, 0.8, 0, 28.9, 0, 28.2, 0]°`, carriages left unset (kept where they are).
+  Twin-verified collision-free at both carriage ends, mic on and off, and
+  plannable from the keyframe. Seeded into `var/profiles/` on 2026-09-08.
+- Never write a vanilla LeRobot v3 dataset from the recorder again; never edit an
+  export in place — regenerate it.
+- Recording filters idle / small-motion frames by default (`SessionSpec.
+  action_filter`, checkbox in the Collect launch sheet): the pro-dagger
+  hesitation heuristic and its defaults (1 mm / 1 mrad / 1 % / 1 mm vs the last
+  kept frame, gripper changes exempt within 1.6 s) — operator decision
+  2026-09-07; 04-runtime §10.5, 10-frames §11.4.
+
+## Online DAgger (operator decisions 2026-09-08 evening; 15-online-dagger v2.0 is the contract)
+
+- The landing page's third card is **Online DAgger** — an algorithm-agnostic
+  shell. The runtime knows NO DAgger algorithm: no iterations, hyper-parameters,
+  reference gradients or offline-dataset picker anywhere in core / runtime / ui
+  (§0 items 1–3). That morning's PRO-DAgger shell (`15-pro-dagger.md` v1.0,
+  `ProDaggerCoordinator`, `~/data/pro_dagger`, `/api/pro_dagger/*`,
+  `iteration_complete`) never shipped and was deleted, not aliased.
+- **D1** wire: `mode: dagger` + `policy_source: external` + a non-null
+  `SessionSpec.online_dagger` (`session_name` slug ≤ 64, `resume`,
+  `pause_while_training`, `wait_for_trainer_ready`; `extra="forbid"`); people
+  read "Online DAgger" everywhere (card, sheet, Cockpit title, keymap overlay).
+- **D2** ONE generic inbound stream `trainer_status` (`idle | preparing |
+  training | ready | error`, free-form finite `metrics`, MUST echo the announced
+  `session_id` — `null` counts as alive only); ONE generic gate: `episode_new`
+  is refused while the trainer reports `training` and, with
+  `wait_for_trainer_ready`, until it has reported `ready` once for this session
+  (`"waiting for the trainer to report ready (…)"`, `"training in progress (…)"`,
+  `"trainer error: …"`, `"no Online DAgger trainer attached"`).
+- **D3** the runtime publishes `events.gate {arm_id, mode, seq, source,
+  episode_id}` on every take-over / hand-back and accepts explicit `takeover` /
+  `handback` actions (idempotent) beside `Space`; keymaps untouched. Cockpit
+  buttons Take over / Hand back / **Train now** (`train_now` →
+  `events.train_now`; refused only while an episode is open or the trainer
+  status is stale; the trainer may ignore it).
+- **D4** rollout bookkeeping stays in the recorder (`actor` column, counts in
+  `episode.json` + `events.episode_saved.online_dagger`); a **discard leaves
+  nothing on disk** and publishes `events.episode_discarded` only (§0 item 5).
+- **D5** session dir `~/data/online_dagger/<session>/{session.json, rollouts/}`
+  (namespace `online_dagger`, subdir `rollouts`); the trainer's artefacts are
+  its own business (skill suggests `<session>/trainer/`). **D6** return-to-start
+  applies to rollouts (default ON). **D7 hardware still refuses dagger**
+  (`409 hardware sessions support teleop and data collection only`) until the
+  operator says go.
+- **D8** the skill is **`mavis-online-dagger-trainer`** (the generic
+  `OnlineDaggerTrainer` hooks + `references/contract.md` + a worked
+  `references/pro-dagger-example.md`), shipped INSIDE the runtime wheel
+  (`GET /api/online_dagger/skill` + `/skill.tgz`) and mirrored byte-for-byte in
+  the policy-node repo (a runtime test enforces it — edit both copies together).
+  One-liner shown in the sheet: `curl -s http://<lab-host>:8765/api/
+  online_dagger/skill.tgz | tar xz -C ~/.claude/skills/` (port **8765**, never 8000).
+- REST: `GET /api/online_dagger/{skill,skill.tgz,sessions}`; `POST /api/session`
+  409s in order: session-dir rules (`"Online DAgger session '<s>' already exists -
+  resume it or pick another name"` / `… not found` / `… session.json is
+  unreadable`), exporting / legacy tree, `no external policy attached (…)`,
+  `no Online DAgger trainer attached (the policy node does not report the
+  online_dagger capability)`.
+- Policy-node repo: `~/projects/apollo-mavis-v2-ws-p12/apollo-mavis-v2-policy-node`
+  (independent git repo, no remote yet). Generic shell `mavis_policy_node.
+  online_dagger` (`OnlineDaggerTrainer` hooks, `OnlineDaggerLoop`, `FakeTrainer`,
+  `selftest`); CLI `mavis-policy-node --online-dagger <fake|pkg.mod:make_trainer>
+  [--trainer-config <yaml|json>]`, `--selftest online-dagger` (no dora needed);
+  `spec.capabilities` lists `online_dagger`. **PRO-DAgger = the reference
+  implementation on top** (`mavis_policy_node.pro_dagger`, `--online-dagger
+  mavis_policy_node.pro_dagger:make_trainer --trainer-config pro_dagger.yaml`;
+  `offline_dataset` required in ITS config, resolved under `datasets_home`
+  `~/data`) with the corrected defaults: `freeze_offline_gref: true` (offline
+  pool → reference gradient only) and `replay_buffer: true`, `max_demos: 0`
+  (the online buffer accumulates every intervention and trains every iteration)
+  — §0 item 7. Say "PGrad" / "projected gradient", never "A-GEM". The runtime's
+  `nodes/fake_policy.py` (`FAKE_TRAINER=1`, knobs `FAKE_TRAINER_PREPARE_S /
+  _TRAIN_S / _EVERY / _FAIL_AT`) is the e2e stand-in; sim e2e
+  `tests/dora_bridge/test_e2e_online_dagger.py`.
+
+## Work in progress (2026-09-08, uncommitted)
+
+- **Phase-12 (dora), phase-13 (keyboard / episode datasets / return-to-start),
+  the 2026-09-08 follow-ups (translate frame, `R`, return-before-exit) and
+  phase-14 v2.0 (Online DAgger shell; the morning's PRO-DAgger v1.0 was
+  rewritten the same evening) are ALL implemented and UNCOMMITTED in the five
+  main working trees** (phase-12 was three-way merged onto the phase-13 trees at
+  05:52; backups of both sides in `~/projects/.merge-backup-20260908/{main,p12}/`).
+  Test state: core 464 + `export_schemas --check` clean; runtime 737 collected
+  (last non-dora run 715 passed / 2 hardware-probe skips / 20 dora deselected;
+  last full run 713 passed / 1 timing flake / 2 skips, ~11.5 min;
+  `test_e2e_online_dagger.py` 3 tests ~31 s); ui 44 files / 436 (vitest,
+  build, lint, prettier, gen:check); policy-node 141 non-dora + 2 dora e2e;
+  sim 155 (EGL), hardware 293 (untouched by phase-14). Review findings of the
+  v2.0 round (ui 1+10, policy-node 2+6, runtime 1+8 major+minor) and of the
+  follow-ups (2+7) are fixed; open ones in
+  `docs/prompts/phase-14-online-dagger.md` "实施记录".
+- **Operator follow-ups landed the same evening (uncommitted)**: the Welcome
+  profile list is filtered per tab kind (`src/lib/profiles.ts`); a hardware
+  `start_from=profile` refused by a one-tick transient RECOVERING now waits
+  `hardware_session.start_from_fault_grace_s` (3.0 s), retries once, and a
+  final refusal reaches the wire (`session.fault_detail`, Cockpit `SESSION —`
+  banner); new action **`goto_profile`** (`GotoProfileArgs {profile_id}`,
+  Cockpit "Go to profile", same twin-planned + gated + interruptible path as
+  `R`, refused under POLICY / while recording); profile motions are serialized
+  (`MOTION_BUSY`). 04-runtime §10.5 / §13.3.
+- The workspace docs carry the Online DAgger wording throughout (sweep done
+  2026-09-08 late evening: 15-online-dagger v2.0, this file, prompts,
+  DEPLOYMENT, and the per-repo design docs 12-dagger v1.3 / 14-dora v1.2 /
+  04-runtime / 05-ui / 10-frames / 01-core / 00-overview v0.4). PRO-DAgger
+  remains only in dated history notes, as the policy-repo reference
+  implementation, and as the skill's worked example.
+- **Not yet exercised on the real cell** — no phase-12 / 13 / 14 code has run on
+  the arms. **The dev runtime (PID 2144376, started 18:00:02 on 2026-09-08 from
+  `apollo-mavis-v2-runtime/` with `var/mavis_v2_local.yaml`, rendered 17:59)
+  runs the 18:00 snapshot of the trees — after the 05:52 phase-12 merge, before
+  the 18:38 Online DAgger v2.0 refactor (i.e. the morning's PRO-DAgger v1.0
+  code); its config already says `translate_frame: world`, but none of v2.0 or
+  the evening follow-ups (`start_from_fault_grace_s`, `goto_profile`,
+  `session.fault_detail`) is live. Restart it to pick anything up** (config or
+  code). Corrected 2026-09-08 late evening — the earlier note named a 01:27
+  pre-merge process (PID 3749060) that no longer exists.
+- `~/projects/apollo-mavis-v2-ws-merge/` (branch `merge-13-12`, 03:15) is a
+  stale leftover of an earlier merge attempt — unused; deleting it is the
+  operator's call. `~/projects/apollo-mavis-v2-ws-p12/` is now only the home of
+  the policy-node repo.
+- Known follow-ups: lerobot's `StreamingVideoEncoder` start / finish hold the
+  GIL 160–330 ms at `start_episode` and up to 324 ms at `finish_episode` with
+  `h264_nvenc` (measured 2026-09-07, 04-runtime §10.5 "GIL stall"; drops the
+  100 Hz loop, trips the WS deadman; an encoder subprocess is the fix); `test_perf_bridge` `overruns == 0` flakes 1-in-2 (not
+  loosened); dora live tests leak-check with a machine-wide `pgrep -x dora`, so
+  never run two dora suites on this host at once.
+- Commit only when the user says so.
 
 ## Hardware facts (not discoverable from code)
 
-- Exactly TWO xArm7 control boxes, one per arm, each on its own ethernet NIC with a
-  NetworkManager profile that must be matched to the NIC programmatically at startup:
-  `mavis_manipulation_arm` on `enp36s0f1` (192.168.1.11/24) → Manipulation Arm
-  (`grip`) control box 192.168.1.201; `mavis_viewpoint_arm` on `enp36s0f0`
-  (192.168.2.12/24) → Perception Arm (`view`) control box 192.168.2.219. The
-  Manipulation Arm carries the xArm Gripper G2 (gripper model `xarm_g2`); there is no
-  6-axis F/T sensor. The default teleop (active) arm is ALWAYS the Manipulation Arm
-  (`grip`), hardware and sim.
-- Arms may or may not have a linear track (rail); max rail travel 0.65 m.
-  Presence must be auto-detected via the xArm SDK.
-- Lab cell geometry (tape-measured 2026-09-02): 1.215 × 0.62 × 0.03 m table, top
-  0.735 m above the floor; two identical rails 39.0 cm apart along the long axis (39.5 by
-  tape on 2026-09-02; 39.0 by the wrist-camera overlay on 2026-09-06, see 03-sim §4.3)
-  (Perception Arm (`view`) on the outer rail, nearest the operator, 2.6 cm from the
-  edge the operator stands at; Manipulation Arm (`grip`) inward). Frame is the
-  OPERATOR's view (they are the authority on left/right): +Y = outer edge (operator
-  side), operator faces −Y so their right = −X, left = +X. Each linear rail is a
-  chiral part, so making its thin plate face the interior (−Y, away from the operator)
-  is a true 180° rotation about z, NOT a mirror (a mirror would flip the mesh
-  handedness): base_quat yaw +90, which reverses travel — rail zero (q=0) is at the
-  operator's LEFT (+X) and qpos increases toward −X (q = 0.65 = the operator's RIGHT
-  end, flush with the table edge). Digital-twin INITIAL STATE (mavis_v2 keyframe, user
-  decision 2026-09-04): both arms at the xArm7 factory zero posture — joints 2–7 = 0,
-  joint 1 = π (the base flip's forward-facing zero) — with the rails at opposite ends:
-  Manipulation Arm (`grip`) rail 0.65 m = the operator's RIGHT end, Perception Arm
-  (`view`) rail 0.0 = the operator's LEFT end, next to the obstacle. The xArm zero is
-  a FOLDED pose (forearm beside the upper arm, tool straight down, flange 12 cm above
-  the mount plane, 20.6 cm to the −Y side): the gripper hangs just outside the
-  table's inner edge, the D435 + mic hang into the channel looking down (mic tip 3.8
-  cm above the table — the tightest initial clearance). The intra-arm pair
-  link2↔link4 is 1.78 cm at that posture and is whitelisted in the scene
-  (`allowed_pairs`) so the twin audit / gate accept it at the 0.025 debug inflation.
-  0.16 × 0.16 × 0.24 m untouchable obstacle flush against the operator's-left (+X)
-  end in the channel. (Earlier the scene was mirrored in X from an inner-side
-  viewpoint, then fixed to yaw −90 which left the plate facing the operator; turned
-  each rail 180° to yaw +90 on 2026-09-03; until 2026-09-04 both arms rested together
-  at q ≈ 0.597 in a lowered ready pose, now only the guardrail scenarios use it.)
-  RAIL ZERO ALONG TRAVEL, measured 2026-09-05, END FEATURE CORRECTED 2026-09-06 (it
-  had been DERIVED from the mavis mesh and was 4 cm wrong). **The operator's "rail end"
-  is the rail's WIDE END FACE (the 14 cm end plate), NOT the 3.2 cm boss that protrudes
-  2.0 cm past it** — 09-05 anchored the boss by mistake and it cost a whole round of
-  contradictory overlay measurements. Measured: wide face 14.5 cm from the table's +X
-  edge, wide face → arm base cylinder centre 18.5-19 cm, boss tip ~12 cm (sleeve fitted,
-  hard to read) → the shared `xarm7_on_rail.xml` rail geom offset y = **0.365093** (was 0.325,
-  then 0.385093) and `base_pos` x0 = **+0.2800** (was +0.2375; the tape chain alone gives 0.2750,
-  but with the wrist camera pinned to tape-referenced table dots both rails' end faces still sat
-  4–7 mm further +X — the two table-referenced tape readings disagree by 4.5 mm and the image
-  decides; face → base stays at the measured 18.7 cm, so arms and rails moved together).
-  Grip rail Y: `base_pos` −0.1786 (spacing **39.0**, not the tape's 39.5: the same mesh edge is
-  0 px off on the outer rail and 5 mm off on the inner one).
-  **Both arms had sat ~4 cm too far from the obstacle end**, i.e. every obstacle-side
-  clearance the twin reported — and every rail sweep that passed near the +X end — was
-  optimistic by that much (view carriage ↔ obstacle 12.4 cm not 15.4, view flange ↔
-  obstacle 11.55 cm, mic ↔ obstacle 12.75 cm not 17). Still optimistic and NOT fixable
-  without better meshes: the mesh carriage is ~7.5 cm SHORT along the rail (real one ≈
-  26 cm, base-centred; mesh 18.6, so it stops 8.95 cm short of the rail's zero end where
-  the real one stops 5-6 cm short), and the mesh rail is 1.0926 m against the real
-  1.075 m (drawn rail's −X end stops 0.24 cm short of the table's −X edge; the zero end is
-  anchored on purpose — it has the obstacle). The mesh carriage is also 1.0 cm ASYMMETRIC about
-  the base: +X edge base+0.098, −X edge base−0.088.
-- WRIST CAMERA EXTRINSIC, measured 2026-09-06 (03-sim §4.3 "wrist camera extrinsic"):
-  the camera pose on link7 was the reference model's GUESS `0.07 0 0.05`; solved from
-  four tape-referenced dots it is `pos="0.06832 -0.02220 0.02945"` in `xarm7_on_rail.xml`
-  — ~22 mm sideways and ~20 mm too far from the flange (re-solved after the residual pass
-  moved `base_pos`; the mount = measured camera − FK, so it absorbs the arm's placement). **That single error was the
-  entire visible twin-overlay offset the operator reported** and the twin's 2.7 %
-  table-plane over-scale. Ruled OUT before that, in order: the D435 colour intrinsics
-  (a three-height tape solve gave fx 607 ± 4 vs the configured 608.19 — the YUYV 640×480
-  UVC path really does have librealsense's colour intrinsics), the camera ROTATION (a
-  195 × 96 mm rectangle's near/far-edge perspective convergence: 1.0226 measured vs
-  1.0226 predicted; the operator's "displacement mismatch, no rotation mismatch" was
-  exactly right), and the principal-point sign convention in `twin_overlay.py` (correct).
-  Method notes worth keeping: a single-height scale reading CANNOT separate focal length
-  from camera distance — use ≥ 2 heights with h ≥ 0.5 m, and `f ∝ h` so f is never better
-  than h; a free 6-DoF PnP on 4 co-planar points is degenerate between tilt and scale
-  (it "wanted" 19.6° of tilt — not evidence); tape-verify hand-drawn dot spacing (the
-  "20 cm" dots were 19.5 and the "10 cm" ones 9.6); localise dot centroids with a LOCAL
-  PLANE background (a constant background under a shadow gradient biased v by 1 px). The
-  MICROPHONE body is deliberately NOT tied to the camera pose (`MIC_REF_PLANE_Z_M` in
-  `scenes/builder.py`) and is still unverified. Remaining overlay residual after the fix
-  and the residual pass: dots 1.24 px RMS, every measured rail/table edge within ±2 px.
-  Applies to the Manipulation Arm's camera; the Perception Arm shares the MJCF `wrist_cam`
-  pose but its own hand-assembled bracket makes its overlay sit a UNIFORM +21 px x / +13 px y
-  (~2 cm at the arm) off across EVERY link — depth-/pose-independent (far and mid Sobel-edge
-  bands give the same shift), so a fixed mount discrepancy, not parallax. FIXED 2026-09-06 as
-  an OVERLAY-ONLY per-camera principal-point nudge `twin_overlay.principal_offset_px:
-  {view_wrist: [21, 13]}` in `apollo-mavis-v2-runtime/configs/mavis_v2.yaml` (applied by
-  `TwinOverlayRenderer`; residual < 1 px live). It does NOT touch `CameraConfig.intrinsics` —
-  those are the true factory D435 values `session/manager.py` bakes into recordings; a
-  principal-point offset cancels a uniform pose-independent shift exactly (03-sim §4.3
-  "per-arm wrist camera overlay offset"). The carriage mesh is still ~7.5 cm short along the
-  rail (unmeasured).
-  Encoded in `apollo-mavis-v2-sim/src/apollo_mavis_v2_sim/assets/scenes/mavis_v2.yaml`
-  (header lists every measurement and what is still unverified);
-  docs/design/03-sim.md §4.3 has the arithmetic. It is the ONLY scene the UI / API
-  expose (registry `title: APOLLO MAVIS V2 Digital Twin`); the other scene YAMLs are
-  `hidden: true` and kept for CI/tests.
-- Microphone (phase-11, 2026-09-03): a RØDE NT-USB Mini is mounted on the Perception
-  Arm (`view`) ahead of its wrist camera. ALSA card `Mini` (USB 19f7:0015, serial 750BFEE8),
-  PulseAudio source
+- Two control boxes on two NICs; NetworkManager profiles matched programmatically:
+  `mavis_manipulation_arm` on `enp36s0f1` (192.168.1.11/24) → Manipulation Arm box
+  192.168.1.201; `mavis_viewpoint_arm` on `enp36s0f0` (192.168.2.12/24) →
+  Perception Arm box 192.168.2.219. Firmware v1.12.10, xarm-python-sdk 1.18.5
+  (API gaps in 02-hardware §12). `arm.sn` reads `XS1305` on both — the NIC ↔
+  profile mapping is the swapped-cable check. No F/T sensor. The Perception Arm's
+  C19 was fixed for good in xArm Studio (Externals → End Effector → None, 2026-09-05).
+- Rails: 0.65 m travel, presence auto-detected via the SDK, both homed since
+  2026-09-05. Rail zero is at the operator's LEFT (+X); after any re-homing check
+  the `*_align` overlay and `hardware_session.rail_flip`. Frame = the operator's
+  view: +Y = operator side, operator's right = −X. Joint mapping controller ↔ twin
+  is an identity (joint 1 = π is the real posture). Geometry was tape- and
+  camera-measured 2026-09-02..06 (03-sim §4.3); still unverified: the carriage mesh
+  is ~7.5 cm short along the rail, the microphone body pose, the Perception Arm's
+  bracket (its overlay carries an overlay-only principal-point nudge).
+- Wrist cameras: both D435i (USB `8086:0b3a`) as plain UVC YUYV 640×480@30, addressed
+  by USB serial (349643062582 → `grip_wrist`, 322143060792 → `view_wrist`), never
+  by `/dev/v4l/by-id`. Cold-boot quirk: no frames until librealsense has opened the
+  device once — `OpenCVCamera` runs `rs-enumerate-devices -s`; keep it installed.
+  Colour intrinsics are in `configs/mavis_v2.yaml` (fovy ≈ 43.2°, not the MJCF 57;
+  MuJoCo's principal-point sign is opposite to OpenCV's).
+- Microphone: RØDE NT-USB Mini via PulseAudio ONLY (direct `hw:CARD=Mini` gives
+  EBUSY and stalls other recorders); source
   `alsa_input.usb-R__DE_Microphones_R__DE_NT-USB_Mini_750BFEE8-00.mono-fallback`,
-  S24_3LE mono 48 kHz only. PulseAudio 15.99 owns the card: opening `hw:CARD=Mini`
-  directly gives EBUSY and can stall every other recorder — ALWAYS go through Pulse
-  (PortAudio/sounddevice via the ALSA `pulse` plugin with `PULSE_SOURCE` pinned, or
-  `parec`). The runtime exposes it session-less (`GET /api/microphones`,
-  `telemetry.microphone`); the Welcome page shows its live waveform even with no arms.
-  In the sim it is an optional collision body on the Perception Arm (`ArmSpec.microphone` /
-  `ArmConfig.microphone`, default off; the hardware workcell's digital twin turns it
-  on): a cylinder of radius 0.040 m (8 cm diameter) along link7 +z, `size=[0.040,
-  0.095]`, `pos=[0, 0, 0.095]` (flange face to 0.14 m beyond the wrist-camera plane
-  at z=0.05), mass 0.45 kg (NT-USB Mini ≈0.35 kg + mount — to be weighed), 1.5 cm
-  radial clearance to the side-mounted camera. With the body on, the twin's view wrist-cam image is
-  occluded from the bottom by the mic (~12 % of the 640×480 frame at the MJCF fovy 57, 03-sim
-  §4.3; an earlier estimate said 7–8 %) — expected in the twin. The REAL `view_wrist` image
-  (2026-09-04) shows NO occlusion at all: the mic body's size/position in the twin does not
-  match the real mount, and the `view_wrist_align` overlay shows exactly that; measure the
-  mount before changing the scene, do not "fix" the overlay.
-- Wrist cameras (2026-09-04): BOTH arms carry an Intel RealSense D435i (USB 8086:0b3a),
-  used as plain UVC colour cameras (`kind: v4l2`, colour stream is YUYV only, 640×480@30;
-  no depth is recorded, pyrealsense2 is not installed). USB serial 349643062582 (PCI bus
-  29:00.3, USB bus 6) → `grip_wrist` (Manipulation Arm); USB serial 322143060792 (29:00.1,
-  USB bus 4) → `view_wrist` (Perception Arm) — CONFIRMED by the user 2026-09-04 from the
-  Hardware-tab tiles (an earlier guess had them swapped). Address them by USB serial (sysfs
-  lookup in `OpenCVCamera`), NEVER by `/dev/v4l/by-id`: the depth and colour UVC
-  interfaces both claim `...-video-index0`, so only one symlink survives and which one
-  changes between plugs. COLD-BOOT QUIRK (2026-09-04): after a reboot the colour UVC stream
-  delivers no frames (`select() timeout`) until librealsense has opened the device once;
-  `OpenCVCamera` therefore runs `rs-enumerate-devices -s` (librealsense2-utils, Intel apt
-  repo, installed) once per process before opening a RealSense node — keep that tool
-  installed. `rs-enumerate-devices` prints the ASIC serials (243522071002 fw 5.15.1,
-  327122074467 fw 5.17.0.10), NOT the USB serials the config uses. The hardware camera ids
-  differ from the twin's `grip_wrist_cam` / `view_wrist_cam` on purpose (both coexist in the
-  VideoHub). D435i COLOUR intrinsics at 640×480 (`rs-enumerate-devices -c`, Inverse
-  Brown-Conrady, distortion ignored; in `configs/mavis_v2.yaml` as `intrinsics:`):
-  `grip_wrist` (ASIC 327122074467) fx 608.19 fy 608.23 cx 327.39 cy 247.90; `view_wrist`
-  (ASIC 243522071002) fx 606.36 fy 606.38 cx 311.90 cy 249.45 → fovy = 2·atan(240/fy) ≈
-  43.2°, NOT the MJCF `wrist_cam` fovy 57 (that is the depth FOV). When rendering the twin
-  from these cameras use `cam.resolution/sensor_size/focal_pixel/principal_pixel` with
-  `principal_pixel = [320 − cx, 240 − cy]` (MuJoCo's sign is the OPPOSITE of OpenCV's) and
-  `offsamples = 0` for segmentation (03-sim §7).
-- Control boxes, read-only facts (phase-09a, 2026-09-04; `docs/prompts/phase-09a-hardware-twin-overlay.md`):
-  both run firmware **v1.12.10** (`7,7,XS1305,MC1303`; below the 2.7.100 gripper-current
-  gate) with xarm-python-sdk **1.18.5** (pinned git rev); both arms `state 4` (not enabled),
-  `mode 0`. The Perception Arm (`view`, 192.168.2.219) persistently reports controller error
-  **C19** (SDK title "End Effector Communication Error"; xArm Studio: "End Module
-  Communication Error" — the end-effector bus); the Manipulation Arm has no error. **Joint
-  convention is an IDENTITY mapping**: the controller's 7 joint radians written verbatim into
-  `mavis_v2`'s `<arm>_joint1..7` reproduce `get_position()` (flange, tcp_offset zero) to
-  0.0 mm / 0.00° on both arms — NO +π on joint 1 (the keyframe's joint1 = π is the real arm's
-  actual posture, not an offset); link7 origin = controller flange TCP, `<arm>_link_tcp` site
-  168.6 mm below it. **Both linear tracks are unhomed and unenabled**:
-  `get_linear_track_registers` → `{pos: 0, status: 2, error: 0, is_enabled: 0, on_zero: 0}`,
-  so `pos` is meaningless (the Manipulation Arm's carriage is physically at the operator's
-  RIGHT end ≈ sim q 0.65 while its register reads 0); homing (`set_linear_track_back_origin`)
-  is a motion command → since phase-09c the operator-triggered, twin-gated `home_rail`
-  maintenance op (bullet below), never the driver's connect. SDK 1.18.5 API gaps (verified in
-  source): `XArmAPI` has NO `get_linear_track_sn` / `get_linear_track_version` (`__getattr__` raises; only
-  `get_linear_track_registers/pos/status/error/is_enabled/on_zero`, `set_linear_track_*`,
-  `clean_linear_track_error`, `get_linear_motor_registers`); `register_report_callback` has
-  NO `report_mode` kwarg; the 30003 report payload carries NO `mode` (use `api.mode`);
-  `api.version` is the RAW string `7,7,XS1305,MC1303,v1.12.10` (use `api.version_number`);
-  G2/classic gripper `set_*` need `wait_motion=False` or they `wait_move()`. The runtime's
-  session-less READ-ONLY monitor (`telemetry.hardware_monitor`, one SDK client per arm,
-  polling allowlist in hardware `monitor.py`; since phase-09b "zero writes unless an explicit
-  maintenance request", next bullet) drives the twin overlays `grip_wrist_align` /
-  `view_wrist_align` (kind `twin`, Hardware tab); it is PAUSED = disconnected while a
-  hardware session owns a box (two SDK clients on one box are unevidenced). Read-only is not
-  side-effect-free: SDK `connect()` runs `clean_warn()` if a warning is latched, and the first
-  track/gripper register read may rewrite the RS-485 baud + soft-reboot the end module if the
-  controller's baud differs from the SDK default (02-hardware §8.5).
-- Controller error clearing / recovery + controller-side safety parameters (phase-09b,
-  2026-09-04; `docs/prompts/phase-09b-error-recovery.md`). **C19 cause**: the control box looks
-  for an end effector on the tool-port RS-485 bus and the Perception Arm has none
-  (`get_tgpio_modbus_baudrate` → `(1, -1)`); it comes back after every clear until the one-off
-  fix in xArm Studio: Settings → Externals → End Effector → **None** (SDK 1.18.5 has no write
-  API for it). **Clearing errors produces no motion (measured 2026-09-04)**: `clean_error()` on
-  the Perception Arm cleared C19, no recurrence for 6 s, all seven joints changed ≤ 5e-5 rad
-  (encoder noise); the full recovery sequence `clean_error → clean_warn → motion_enable(True)
-  → set_mode(1) → set_state(0)` is equally motion-free (it only enables / enters servo state;
-  `motion_enable` releases the brakes so the motors hold position actively — motion comes only
-  from explicit motion commands). Linear-track homing (`set_linear_track_back_origin`) IS motion;
-  since phase-09c it is the ONE motion-class maintenance op, `home_rail` (next bullet). Interface:
-  `POST /api/hardware/arms/{arm_id}/maintenance {op}` — `clear_errors` (no session: `clean_error`
-  + `clean_warn` on the read-only monitor's poll thread, never enables; INSIDE a hardware session it is routed to the session driver's
-  user-initiated recovery and is then equivalent to `recover`, i.e. it DOES `motion_enable` —
-  the Welcome button never posts it then), `apply_backstops` (no session; 409 during one),
-  `recover` (hardware session only: the driver's user-initiated recovery + re-seed from the
-  MEASURED position; 409 without one). UI: Hardware-tab arm card **Clear errors** / **Apply
-  safety settings** (disabled with "Use the Cockpit" while a hardware session owns the boxes),
-  Cockpit `FaultBanner` **Clear errors & resume** (then re-grip the clutch). The monitor's
-  guarantee is now "zero writes unless an explicit maintenance request"; the driver's own
-  bounded auto-recovery (3 per 30 s for recoverable codes) is unchanged, anything LATCHED
-  beyond it waits for the click. **Controller-side backstops live in core `ArmConfig`**
-  (`tcp_load_kg`, `tcp_load_cog_mm`, `collision_sensitivity` 0..5, optional
-  `reduced_tcp_boundary_mm`, `expected_sn`) → `configs/mavis_v2.yaml`, estimates the user accepted
-  on 2026-09-05 without weighing (whole-arm collision detection is the goal): Manipulation Arm (G2 + D435i + mount) **0.95 kg @ (0, 0, 60) mm**,
-  Perception Arm (D435i 0.072 kg + NT-USB Mini ≈ 0.35 kg + mount) **0.55 kg @ (0, 0, 90) mm**,
-  collision sensitivity **3 on both**. As found 2026-09-04 both boxes had `tcp_load` 0 kg
-  (wrong — collision detection is torque-estimate based) and sensitivity 3 (grip) / 1 (view).
-  They are volatile (lost at a controller reboot, never `save_conf()`ed); the driver re-applies
-  them at every connect. Read-back: SDK 1.18.5 has no `get_tcp_load` /
-  `get_collision_sensitivity`; `XArmAPI.tcp_load` / `.collision_sensitivity` are properties fed
-  by the rich 30002 report frame (NOT the 30003 stream the session driver uses) →
-  `telemetry.hardware_monitor.arms[*]` `tcp_load_kg` / `tcp_load_cog_mm` /
-  `collision_sensitivity` / `backstops_match` (sensitivity equal, |Δ load| ≤ 0.05 kg, |Δ cog| ≤
-  10 mm). **`arm.sn` reads the model code `XS1305` on BOTH boxes**, not a unique serial →
-  `expected_sn` stays None (useless for catching swapped cables; the NIC ↔ profile mapping is
-  the check). Never open UFACTORY Studio "Live control" during a session (the driver's
-  `StudioConflictWarning` shows as `fault_detail` "warning: close UFACTORY Studio live control").
-- Hardware session bring-up (phase-09c + 09d, designed + implemented 2026-09-05 against fakes
-  only — **never run on the real boxes yet**; `docs/prompts/phase-09c-hardware-session.md` and
-  `docs/prompts/phase-09d-rail-homing-planning.md` are the contracts, the 09c 真机验收步骤 as
-  amended by its 09d header note the first-run procedure, user present, e-stop in hand). **Both
-  arms are ALWAYS in a hardware session** (09d): `SessionSpec.arms` must equal every configured
-  arm (409 "hardware sessions include every configured arm (Manipulation Arm, Perception Arm) -
-  missing […]"); the Hardware tab has no per-arm include switch and `hardware_session.default_arms`
-  is gone (an old YAML key is ignored). **No
-  implicit motion**: the driver's `connect()` NEVER homes the track — `RailController.require_homed()`
-  raises `RailNotHomedError` (`ArmBringupStatus.rail = "unhomed"`) and `POST /api/session
-  kind=hardware` is refused (409 "rail not homed") while either arm's track is unhomed
-  (carriage position unknown → the twin cannot gate). **`home_rail` is the ONLY motion-class
-  maintenance op**: operator-triggered from the Hardware-tab arm card (**Home rail** →
-  `HomeRailSheet`), session-less (409 "end the session first"), executed on the read-only
-  monitor's poll thread as `set_linear_track_back_origin(wait=True, timeout=30, auto_enable=False)`
-  → `set_linear_track_enable(True)` → `set_linear_track_speed(50)`, success judged from the
-  registers ONLY (`on_zero == 1 and is_enabled == 1 and error == 0` — SDK 1.18.5 overwrites the
-  wait result with the enable's code when `auto_enable=True`), and **gated by a STATIC full-travel
-  twin sweep** (`runtime/devices/rail_sweep.py`: the arm's CURRENT 7 joints, the other arm at its
-  last monitor sample or `rail_fallback_m`, rail slot 0–0.65 m in 5 mm steps = 131 checks at
-  0.025 m inflation — the guardrail's debug margin; ≈ 32 ms on `mavis_v2`, 310 pairs).
-  `dry_run: true` returns the `RailSweepVerdict` alone; a blocked sweep is `ok: false` + verdict
-  with zero writes; the monitor re-samples and refuses if the joints moved > 0.02 rad. REST waits
-  45 s, the UI 60 s; the arm reads `stale` + `maintenance_busy` meanwhile and `POST /api/session`
-  is 409. The carriage drives to the operator's LEFT (+X) end at the track's OWN homing speed (no
-  SDK setter, unmeasured; `rail_speed_mm_s` 50 is the positioning cap written after homing) —
-  right after the first homing look
-  at the `*_align` overlay and set `hardware_session.rail_flip: true` if the twin's carriage sits
-  at the wrong end (the key moved from `twin_overlay.rail_flip`, kept as an alias; overlay, gate
-  twin and sweep twin share it). **Since 09d a posture that blocks the sweep is not a flat
-  refusal — the dry run also PLANS** (`RailSweepVerdict.pre_position: PrePositionPlan`,
-  `runtime/devices/rail_homing.py`): twin RRT-Connect on the 0.025 m sweep twin from the current
-  7 joints to the scene keyframe's posture for that arm (then the `<arm>_home` key) with the rail
-  slot LOCKED at `rail_fallback_m`, validated POSITION-AGNOSTICALLY (`RailSweepChecker.check_path`:
-  every configuration of the 0.05 rad-densified path × all 131 rail positions, under the
-  planner's start-state hysteresis) — that check is the ONLY safety basis of the motion (the
-  carriage is unknown while it runs, the gate twin only guesses it). On the operator's confirm
-  (**Home rail — move arm, then carriage**) the op runs as a per-arm `RailHomingJob`: REST **202**
-  `status: accepted` + `job_id`; phases queued → sweeping → planning → connecting → positioning →
-  homing → verifying → done|failed on `telemetry.hardware_monitor.arms[].maintenance`; final
-  result at `GET /api/hardware/arms/{arm_id}/maintenance/last`. The job connects THAT arm alone
-  (`XArmDriverConfig.rail_homing: "allow_unhomed"` — the driver publishes `q[7] == 0.0` as a
-  PLACEHOLDER flagged by `XArmDriver.rail_position_known == False`; the runtime's `RailHoldArm`
-  shows the twin the fallback and pins every rail command), speed scale 0.1, the other arm frozen
-  at its last sample (D1), a private bus and no teleop source; executes the waypoints through the
-  gated plan executor (`_op_execute_plan`, straight joint-space segments); STOPS the loop; homes
-  with `XArmDriver.home_rail()` on the job thread while the servo stream holds the joints
-  (register-judged like the monitor op); verifies; hands the arm back braked **in the folded
-  posture — no automatic return**; resumes the monitor. No candidate posture / no
-  position-agnostic path → `status: refused` (200, `ok: false`, a Studio suggestion). While a job
-  runs every maintenance op and `POST /api/session` are 409 "rail homing in progress";
-  `maintenance_busy` is true for the job's whole life. Decisions D1–D6: **D1** (since 09d ONLY
-  the rail-homing job's other arm — a teleop session has no unselected arm) all monitors pause
-  together, the arm is posed ONCE in the gate twin from its last sample (q7 + rail or
-  `rail_fallback_m`) and frozen — braked, never commanded, do NOT move it from xArm Studio
-  (undetected in this phase; UI hint "Perception Arm frozen at last sample"); **D2**
-  `SessionSpec.speed_scale` ∈ (0, 1], Hardware tab 10 % / 30 % / 100 %, default 10 %, multiplies
-  the host caps (`teleop.*`, `target_rate.*`, `dq_max_rad`, `jog.*`) and the driver caps (at
-  scale 1.0 since 2026-09-07: `max_joint_vel` **0.6** rad/s, `max_cart_step_m` **0.004** = 0.4 m/s,
-  `rail_speed_mm_s` 50 — the first-run 0.3 / 0.002 were "over-conservative" per the operator;
-  4 mm/tick is deliberately HALF the gate's 8 mm inflation so one tick can never cross the
-  inflated shell the gate checks once per tick — do not raise it further without also
-  changing the gate); **D3**
-  `home_rail` = synchronous POST, 45 s server budget; **D4** sweep margin 0.025 m, step 5 mm;
-  **D5** `SessionInfo.kind` / `.speed_scale`, `SessionTelemetry.bringup` rows, `GET /api/session`
-  → `state: bringup` during bring-up; **D6** `XArmDriver.disconnect()` = `set_mode(0)` →
-  `set_state(4)` → `motion_enable(False)` — **teardown leaves the arms STOPPED with the BRAKES
-  ENGAGED** (as found after power-on); the track keeps its homed flag + enable (no re-homing
-  between sessions, no `set_linear_track_enable(False)`). Bring-up order: refusal matrix (teleop
-  only, arms == EVERY configured arm and all in the twin scene, no homing in flight — monitor op
-  or job —, per arm: monitor sample, box reachable, `error_code == 0`, rail homed + enabled) →
-  monitor `pause()` + `join(15 s)` → session `WorkcellConfig` (every arm, `cameras: []`) →
-  `HardwareWorkcell(driver_factory=speed-scaled XArmDriver, netsetup=None)` → `bring_up` → FRESH
-  gate twin + UNCONDITIONAL `SafetyGate` (`ControlLoop` raises `SafetyConfigError` otherwise; three
-  twins — gate, overlay, sweep — are separate instances) → `start_from=profile:<id>` is PLANNED
-  on that gate twin INSIDE bring-up (09d; the start_from worker only executes the stored plan; no
-  path → teardown + 409 "profile motion not collision-free: <failure> (<pair>) - …") →
-  `ControlLoop(workcell_kind="hardware")` → the preview cameras are ADOPTED (`hub.set_fps`, no UVC
-  re-open; `SessionInfo.streams == []`). Teleop only for now (collect / DAgger / inference on
-  hardware → 409); the first live session = BOTH arms at 10 % with the Manipulation Arm active
-  (the default active arm; the Perception Arm just holds) — the Perception Arm's latched C19 must
-  be cleared first (the matrix 409s "clear errors first"; a connected driver would LATCH on it),
-  so fix it in Studio (Externals → End Effector → None) before the first session. DONE
-  2026-09-05: C19 is gone (`error_code` 0) and both tracks are homed; the first session then
-  hit the three false alarms in the next bullet. The Welcome
-  page's top-right link is **Debug** (`#/devices`, title "APOLLO MAVIS V2 · Debug", heading
-  "Debug — gamepad & tracker"; renamed from "Devices" in 09d, route and testids unchanged).
-- FIRST LIVE HARDWARE SESSION (2026-09-05, `docs/design/02-hardware.md` §14.4): the session
-  came up and then latched BOTH arms every ~0.5 s with "external mode/state conflict
-  persisted (UFACTORY Studio?)" **with no Studio running** (nothing on port 18333; the
-  runtime was the only client on 502/30003). Three of our own misreadings, now fixed:
-  (1) **controller `state 2` (standby) is HEALTHY** — a mode-1 arm HOLDING a posture
-  reports state 2, not 0 (re-sending the same joints is not "motion"), and across the whole
-  session the boxes reported only `mode 1 state 2` (15×) plus one `mode 1 state 4`. The
-  Studio detector accepted just `{0, 1}` → `SERVO_HEALTHY_STATES = {0, 1, 2}`,
-  `SERVO_CONFLICT_STATES = {3, 4, 5, 6}` in `hardware/driver.py`; the SDK's own rule is
-  `ready = state not in (4, 5)`. The latch text now reports the MEASURED mode/state and
-  only *suggests* closing Studio (who holds 18333 is invisible to the host — never assert
-  it). (2) **entering servo mode is not instantaneous**: `set_mode(1); set_state(0)` returns
-  before `move_servoj` is accepted (replies still carry the 0x10 not-ready bit → APIState
-  **9**), so the first servo tick after a blind `sleep(0.1)` faulted the Perception Arm mid
-  bring-up → `_enter_servo_mode()` polls `get_state()` for readiness (≤1.5 s) and the
-  streamer retries a code 9 inside a bounded 0.3 s post-`resume()` grace. (3) **`clean_error`
-  returning 1/2/9 is a STATUS ECHO, not a failure** (those are the only writes that skip the
-  SDK's `_check_code`): `clear_errors` reported "FAILED - clean_error returned 2" while the
-  error HAD been cleared → `monitor.py` tolerates `STATUS_ECHO_CODES` and judges from the
-  read-back, like `home_rail` does with its registers. The test fake had hidden all three
-  (it moved to `state 0` on `set_state(0)` and gated servo sends on `state == 0`); it now
-  mirrors the box (`state 2` + a separate `ready_to_move` flag for the 0x10 bit,
-  `FaultScript.not_ready_ticks`). The Perception Arm's C19 is GONE (`error_code` 0 — the
-  Studio Externals → End Effector → None fix stuck).
-- ARMING SWITCH (2026-09-05): `hardware_session.armed` in the runtime config gates every real
-  driver connection (hardware sessions, `home_rail` motion). The repo config keeps it FALSE;
-  only the rendered lab config (`scripts/deploy/render-lab-config.sh`, `HARDWARE_ARMED=true`)
-  arms it. Reason: on 2026-09-05 a runtime test without the fake seam started a rail-homing
-  job against the real Manipulation Arm controller (no motion; the arm was enabled and
-  braked again). Never run the runtime suite on the lab machine without the conftest
-  guard, and never set `armed: true` in the repo config.
-- VIVE CONTROLLER LINK, and what the UI now shows (2026-09-07). The Welcome page has a
-  THIRD tab, **Setting** (`kind-setting`, `TabKey = Kind | "setting"` — not a workcell kind, so
-  it launches nothing and the Start-from / Scene / Modes sections are hidden while it is open):
-  controller link + pairing status, both calibrations (the Debug page's own `CalibrationPanel` +
-  `TrackerCalibrationWizard`, shared not moved) and the controller angle (yaw wizard +
-  `TrackerSettingsForm`). Both workcell tabs carry a controller pill (`controller-link-<tab>`)
-  from one pure classifier `controllerLink()` (`ui/src/components/controller.tsx`): no receiver →
-  not paired → error → searching → stale → connected, i.e. the FIRST actionable fact.
-  **Pairing stays status-only**: it needs exclusive USB access to the receiver, which the
-  runtime's libsurvive context holds, and pysurvive's simple API has no pairing call — the panel
-  prints the `survive-cli --pair-device` command instead. Three additive telemetry fields feed
-  this (13-tracker §3.5 item 7b): `controller_age_s` (age of the newest BUTTON/axis event, from
-  `ControllerState.rx_mono` — independent of the pose age `age_s`), `objects` (libsurvive's
-  OBJECT-type names, e.g. `["WM0"]`; empty = nothing paired / interface not openable) and
-  `dongle_present` (USB `28de:2101` in sysfs, `tracker.dongle_present()`, 5 s throttle). The UI
-  must read `undefined` on these as UNKNOWN, never as "unplugged"/"unpaired". WHY they exist:
-  see the next bullet.
-- CONTROLLER BUTTON PATH CAN DIE WHILE POSES KEEP FLOWING (measured 2026-09-06/07). The pose
-  path and the button path are independent. Symptom: teleop unusable because the clutch never
-  engages, while `telemetry.tracker` looked healthy (`status: tracking`, 135 Hz, pose age 4 ms)
-  and `controller` was FROZEN at a plausible value (`trigger: 1.0` with `trigger_pressed:
-  false`, `trackpad_x: 0.99997`) — zero controller-state changes over 20 s. Evidence: libsurvive
-  logged **50 787** `WM0 handle_input needed 1 bytes but had 4294967295` in 11 minutes,
-  continuously (~75/s), where the two previous days had 11 513 confined to the 15 minutes the
-  controller was actually in use (and buttons worked then: two `device action switch_arm -> ok`
-  on 09-04). The runtime side was clean (zero `event N handling failed: dropped`), so libsurvive
-  delivered no button event at all. **A runtime restart cleared it**: `handle_input` errors 0,
-  `controller_age_s` ≤ 0.30 s, 32 distinct controller states in 20 s, trigger back to 0.0 at
-  rest. So it is a stuck libsurvive/USB state in the process, not (necessarily) broken hardware
-  — restart the runtime before suspecting the controller. The clutch also rides KeyC / gamepad
-  RT, so a dead button path does not block verifying pose teleop.
-- LIBSURVIVE REWRITES THE LIGHTHOUSE CONFIG ON EVERY RUN, and it degrades (2026-09-07). Since
-  `devices/tracker.py` passes `--configfile ${APOLLO_HOME}/var/libsurvive/config.json`, that
-  workspace file is libsurvive's to write, and it does — with `--globalscenesolver 0
-  --disable-calibrate 1`. Observed: the pristine 3-station 09-03 calibration became **9 then 10**
-  `lighthouse*` blocks, and station **ch3 (id 2684858188)** lost its calibrated pose (demoted to
-  an unpositioned slot) while slot 0 was taken by a channel-0 station with `PositionSet: 1` and a
-  pose **1.11 m** off. With it, a resting controller wandered std 12/35/13 mm and 14 cm
-  peak-to-peak; after restoring the tracked copy
-  (`apollo-mavis-v2-runtime/configs/libsurvive/mavis_v2-lighthouses-20260903.json`) and
-  restarting, 0.1 mm peak-to-peak at rest. Backups: `var/libsurvive/config.json.bak-<ts>` and
-  `~/.config/libsurvive/config.json`. OPEN: the runtime should hand libsurvive a COPY and keep
-  the calibration read-only (the wizard's install step is the only legitimate writer), and ch3's
-  OOTX not decoding needs checking at the station.
-- TELEOP FEEL DEFECTS, ROOT CAUSE + FIX (2026-09-07; 04-runtime §6 "The rate must not exceed
-  what the arm executes"). The operator reported "doesn't follow the hand", "moving the
-  controller down barely moves the end effector", "keeps moving after I release the trigger".
-  Cause: the host commanded the tracker target at `target_rate.v_mps` 1.0 m/s while the
-  driver's servo streamer executed at most `max_cart_step_m` 0.002 m/tick = 0.2 m/s at speed
-  scale 1.0 (**0.02 m/s at the 0.1 default**) and `max_joint_vel` 0.3 rad/s (both doubled later
-  the same day, see D2); the target ran
-  into the 25 mm leash and `TrackerTeleop.slip()` folded the truncation into the anchor —
-  hand travel silently DISCARDED (worst along large-joint-motion directions such as straight
-  down), the remainder arriving up to one leash (0.125 s at scale 1.0, 1.25 s at 0.1) after
-  the hand stopped. Fix: `session/hardware.py` `apply_teleop_caps` (called in hardware
-  bring-up after `apply_executor_caps`) lowers `target_rate.*`, `teleop.linear_mps/angular_rps`
-  and `dq_max_rad` to the connected drivers' servo bounds (`ExecutorCaps.joint_step_rad` is the
-  servo's own per-joint step; `slew_rad_per_tick` is ALSO bounded by the jog slew and must not
-  be used for teleop). No safety bound is relaxed — top speed was always the streamer's; a
-  faster feel = `speed_scale` / `ServoLimits`, chosen deliberately. Both cap sets are logged at
-  INFO at bring-up. NOT yet verified live (the 2026-09-07 01:12 session started at scale 1.0
-  BEFORE this change; the runtime must be restarted to pick it up).
-- CONTROLLER MAP + TRACKPAD (2026-09-07): the lab YAML binds **gripper_close: grip_click,
-  gripper_open: menu_click, arm_next: trackpad_up, arm_prev: trackpad_down** (the code default
-  `ControllerMapConfig` keeps the reference map the tests pin: pad up/down = gripper, menu =
-  arm_next). Reason: a pad click only acts once its direction is classified from axes that an
-  event-driven reader refreshes only on an axis EVENT, so an idle/just-woken controller read a
-  stale centre at the press edge and the click stayed dead — the trigger squeeze produced axis
-  events and appeared to "unlock" the gripper. `note_edges` now also RE-CLASSIFIES a deadzone
-  click while it is still held (late classification; one extra edge). Squeezing the grip closes,
-  menu opens; pad left/right = rail as before.
-- LOGGING (2026-09-07; 04-runtime §14 "Logging"): `RuntimeConfig.logging` → a rotating
-  `${APOLLO_HOME}/var/logs/runtime.log` (20 MB × 10, `level` INFO, uvicorn access log OFF) plus
-  the stderr stream; the dev launcher's raw stderr goes to `var/logs/runtime.stderr.log`
-  (libsurvive's `WM0 handle_input` flood and MuJoCo prints land ONLY there). The control loop
-  writes a 1 Hz `loop:` health line (tick Hz/p50/p99/overruns, active arm, held codes, tracker
-  pose age vs controller age, `leash_slips` = discarded hand travel, gate, `ik_slips`, per-arm
-  `cmd-meas` lag, servo `tick_stats`) and edge lines for clutch ENGAGED/released, controller
-  stream STALE/fresh, WS watchdog LATCHED/cleared; gate edges were already `collision event`.
-  `grep 'loop:' var/logs/runtime.log` is the first thing to read after a bad session. The 40 MB
-  pre-2026-09-07 `runtime.log` (no health lines) gets rotated away on the first write.
-- COCKPIT PROXIMITY FRAME (2026-09-07; 05-ui §8.2 "ProximityFrame"): the stream grid's outer
-  frame goes colourless → gradient amber (< 0.10 m) → gradient red (< 0.05 m, saturating at
-  0.02 m) from the smallest twin clearance, full red while blocked, grey when telemetry is
-  stale; `SafetyConfig.clearance_sweep_m` (core) was raised 0.05 → 0.10 so the sweep reports
-  the range the frame needs. A plain sim session has no safety twin (`safety_debug: false`) →
-  no clearances → the frame stays off; hardware always has it.
-- Machine: Ubuntu 22.04, 2× RTX 4090, node 22, nmcli available. Python: core/sim/
-  hardware target ≥3.10; runtime requires 3.12 (lerobot floor; uv-managed).
-  NVIDIA driver 580.173.02 (upgraded 2026-09-01); NVENC works. lerobot's
-  `g=2` GOP needs `bf=0` on NVENC (runtime recorder injects it), otherwise
-  the open fails and `vcodec: auto` falls back to libsvtav1.
+  48 kHz mono; exposed session-less (`GET /api/microphones`, `telemetry.microphone`).
+- Tracker: libsurvive REWRITES `var/libsurvive/config.json` on every run and the
+  file degrades (extra lighthouse blocks, a station demoted, cm-scale wander) —
+  restore `apollo-mavis-v2-runtime/configs/libsurvive/mavis_v2-lighthouses-20260903.json`
+  and restart (13-tracker §6.1; making it read-only is OPEN). The controller's
+  button path can die while poses keep flowing — restart the runtime before
+  suspecting the controller (13-tracker §3 item 7b).
+
+- Dora external interface (phase-12, 2026-09-08; 14-dora v1.0 + §16; **merged
+  into the main trees 2026-09-08**): the runtime publishes observations over a
+  PRIVATE dora 1.0.1 control plane; the policy node returns `action` / `spec` /
+  `status` and, since phase-14, **`trainer_status`** (runtime input
+  `policy_trainer_status`, queue 8; 10-field generic `TrainerStatusAnnounce`;
+  `PolicySpecAnnounce.capabilities` lists `online_dagger`,
+  `SessionAnnounce.online_dagger` carries `{session_name, session_dir,
+  rollouts_dir}`, `EVENT_KINDS` = the phase-12 nine + `train_now`;
+  `iteration_complete` / `pro_dagger_phase` never shipped). Spelling authority:
+  core `protocol/external.py`; both contract goldens (runtime + policy-node) are
+  byte-identical and tested (sha256 `4dc67e12…`, 3698 B).
+  `dora.enabled` is FALSE in the repo config; the lab render turns it on with
+  `DORA_BIND_HOST=wlp38s0` (the "APOLLO Lab" Wi-Fi, 192.168.0.88/24 on
+  2026-09-07, DHCP) — never `0.0.0.0`, never the arm links. Ports 6113 / 53391
+  / 7447, token in `${APOLLO_HOME}/var/dora/.dora-token` (never served by REST).
+  Never run `dora up/down/destroy` without `--coordinator-addr/--coordinator-port`;
+  never `pkill -f dora` (matches your own shell) — `pgrep -x dora`. dora 1.0.1
+  quirks we work around: `Node()` blocks holding the GIL until every remote
+  placeholder attached (join handshake + `canary` subprocess); a dead remote
+  daemon makes the coordinator answer 429 for ~50 s (no automatic restart on
+  loss); `Node()` replaces `logging.basicConfig` (restored); the first
+  `to_numpy()` costs 190 ms (warm-up before attaching). Tick median unchanged
+  with the bridge on, p99 3 → 5–8 ms (open).
+
+## Debugging first steps
+
+- `grep 'loop:' var/logs/runtime.log` — the 1 Hz health line (tick rate, held
+  codes, tracker pose age vs controller age, `leash_slips`, gate, `ik_slips`,
+  `dq_capped` = ticks the uniform step cap bound this window, watchdog) plus
+  edge lines; `var/logs/runtime.stderr.log` holds libsurvive / MuJoCo prints.
+- Joint panel dead while Vive works ⇒ `watchdog=LATCHED` next to `src=joint_jog`
+  (11-safety §10.1). Buttons dead while poses flow ⇒ restart the runtime.
+- Teleop caps and the pose-filter retune are measured offline and **not yet
+  verified live**; the runtime must be restarted to pick up config changes.
+
+## Machine
+
+- **Run the runtime with `OPENBLAS_NUM_THREADS=1` (also OMP/MKL)**: numpy's OpenBLAS is built for 64
+  threads and spin-waits between the loop's tiny matrix ops — measured 2026-09-09: an IDLE runtime at
+  4390 % CPU / 63 hot threads, tick p99 50–78 ms in the live session. `__main__` setdefaults it; the dev
+  launcher and the systemd unit export it.
+
+Ubuntu 22.04, 2× RTX 4090 (NVIDIA 580.173.02, NVENC works; lerobot's `g=2` needs
+`bf=0` on NVENC — the recorder injects it, else `vcodec: auto` falls back to
+libsvtav1), node 22, nmcli available. **npm is the UI package manager**
+(`package-lock.json` is the lockfile; pnpm 11's pre-run `pnpm install` fails here
+with `ERR_PNPM_IGNORED_BUILDS` for esbuild — use `npm run <script>` or
+`pnpm --config.verify-deps-before-run=false <script>`; never commit
+`pnpm-lock.yaml` / `pnpm-workspace.yaml`). Lab host details:
+`docs/deploy/DEPLOYMENT.md`.

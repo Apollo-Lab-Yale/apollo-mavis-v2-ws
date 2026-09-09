@@ -2,10 +2,14 @@
 
 Status: v0.2, 2026-09-03 (v0.1 2026-09-02; amended 2026-09-03 — phase-10
 tracker calibration: §3 items 7–8, §4 "Calibration modes", §5 "Calibration"
-wizard, §6 rewritten around the wizard, §7). Extends 04-runtime §6 (teleop
+wizard, §6 rewritten around the wizard, §7; amended 2026-09-07 — §1.1 the
+keyboard is a peer input again, §3 item 7b / §6.1 / §7 field evidence, §4 pose
+filter retune). Extends 04-runtime §6 (teleop
 path), 01-core §13 (keymap), 05-ui §6 (input) and, since v0.2, 01-core §12 /
 04-runtime §13.1 (`/api/tracker/calibration`). Everything here is additive to the existing
-keyboard teleop; the keyboard path keeps working unchanged, with one revised
+keyboard teleop; the keyboard path keeps working unchanged (re-affirmed by the
+operator on 2026-09-07 — the keyboard is a full teleop interface beside the
+controller, §1.1), with one revised
 semantic shared by every rail input: a rail-only tick holds the joint posture
 and lets the TCP ride the rail (§1.1, 04-runtime §6 "Rail"; 2026-09-02).
 
@@ -39,7 +43,38 @@ the UI never hard-codes it):
 
 No other gamepad control is mapped (Start/Back/sticks/LT/X/Y are ignored).
 
-### 1.1 Vive controller as the only input (lab default since 2026-09-02)
+### 1.1 Vive controller as the lab's primary input (since 2026-09-02) — the keyboard is a peer (2026-09-07)
+
+**Input interfaces (operator decision, 2026-09-07; overview §5).** The
+controller is the lab's everyday input, but the keyboard is a FULL teleop
+interface, not an auxiliary: W/S/A/D/E/Q translate, I/K/J/L/U/O rotate, F/H
+gripper, ←/→ rail, Tab / Z arm switch, C clutch, Space takeover, R return to the
+initial condition (2026-09-08) and N / Enter / Backspace for episode new / save /
+discard — the 01-core §13 table. The translate keys act in
+`control.translate_frame` — default the operator-fixed WORLD frame since the
+2026-09-08 evening decision (that morning's default, the active arm's
+wrist-camera frame, stays selectable as `camera`; 04-runtime §6); the clutched
+tracker path is untouched by that change — it maps the hand's motion into world
+as before.
+Both reach the loop as the same wire codes (the controller injects `KeyC` /
+`KeyH` / `KeyF` / `ArrowLeft` / `ArrowRight` as device-held codes, below), and
+the tick merges them as a UNION with a per-code max scale (04-runtime §6
+`HeldSources`). Precedence: while ANY source holds the clutch (trigger, `KeyC`,
+gamepad RT) the tracker pose drives translation and rotation and the
+keyboard's translate / rotate keys are ignored for that tick (rail and gripper
+keys keep working; this presupposes a configured tracker — without one `KeyC`
+is inert and the keyboard drives, `test_without_provider_clutch_key_is_inert_and_keyboard_unchanged`;
+a clutch held only by a latched WS deadman or a stale controller sample still
+suppresses the keyboard translate / rotate keys but holds the arm instead of
+driving it); with the clutch released the keyboard drives the arm
+directly — "taking over" from the wand is releasing the trigger and pressing a
+key, handing back is squeezing the trigger. No runtime change: this is the
+rule the loop has implemented and tested since 2026-09-02
+(`test_keyboard_translate_ignored_but_rail_and_gripper_work_while_clutched`).
+A 2026-09-07 core change flagged every held row `keyboard=False` ("teleop is
+the Vive only") and moved episode save / discard onto `KeyS` / `KeyF` — which
+collide with translate −x and gripper close; it is reverted by phase-13 and
+must not come back.
 
 With a Vive Pro controller paired to the dongle, the same device supplies the
 pose AND the discrete inputs; the gamepad is optional. libsurvive button events
@@ -77,14 +112,13 @@ trigger squeeze that produced axis events then appeared to "unlock" the pad
 `controller_map`: `{clutch: trigger_click, gripper_open: trackpad_up,
 gripper_close: trackpad_down, rail_neg: trackpad_left, rail_pos:
 trackpad_right, arm_next: menu_click, arm_prev: none}` with
-`trackpad_deadzone: 0.3` — the reference map the tests pin. **The lab config
-(`apollo-mavis-v2-runtime/configs/mavis_v2.yaml`) departs from it since
-2026-09-07:** `gripper_close: grip_click, gripper_open: menu_click, arm_next:
-trackpad_up, arm_prev: trackpad_down` — the wand has six bindable inputs once
-the trigger is the clutch, four of them the pad's directions, and the pad is
-the least reliable of them (it needs a classification), so the two actions
-that must never miss while the clutch is held moved to the plain buttons and
-arm switching (also `Tab`/`KeyZ` and the Cockpit) took the pad. Bindable inputs:
+`trackpad_deadzone: 0.3`. **This is the operator's map — code default and lab
+config alike, and it is not to be changed without being asked.** (On 2026-09-07
+it was briefly remapped onto the plain buttons to route around the stale-axes
+bug above. That was the wrong fix: the bug belongs in `note_edges`, which now
+resolves a deadzone click late, and moving the gripper off the pad also took
+`menu_click` away from arm switching, which the operator relies on. Reverted the
+same day.) Bindable inputs:
 `trigger_click`, `trackpad_left|right|up|down`, `menu_click`, `grip_click`,
 `none`; held actions accept any input, discrete actions accept any input except
 `trigger_click`; an input serves at most one action. Device-sourced discrete
@@ -102,7 +136,8 @@ device source's scale (1.0 while the sample stream is fresh, 0.0 when stale) —
 the same per-source rule as the gripper codes; the WS deadman latch never zeroes
 a device-held rail input and a device-held code never depends on a browser
 being connected. **Rail-only semantics** (arrow keys, D-pad and trackpad alike;
-decided 2026-09-02, to be confirmed on hardware in phase-09): while only a rail
+decided 2026-09-02; hardware sessions have run since 2026-09-05 without a
+contrary observation, not yet exercised on purpose): while only a rail
 input is held the arm keeps its joint posture and the TCP rides the rail — the
 IK is not run against the frozen world-frame target — and the teleop seed is
 invalidated so that the next translate key or clutch engage re-seeds from the
@@ -238,6 +273,24 @@ injected codes (`TrackerTelemetry.controller`, `.device_held`).
    All three are optional on the wire, and the UI must read `undefined` as
    UNKNOWN (a runtime that has not been restarted omits them) rather than as
    "unplugged" / "unpaired".
+   Measured 2026-09-06/07: `status: tracking`, 135 Hz, pose age 4 ms while no
+   button event arrived for minutes; the frozen `controller` read `trigger:
+   1.0` with `trigger_pressed: false` and `trackpad_x: 0.99997`, unchanged for
+   20 s — a value no healthy controller holds at rest. Diagnostic signature:
+   libsurvive's stderr flood `WM0 handle_input needed 1 bytes but had
+   4294967295` at ~75 lines/s (50 787 in 11 min) while poses kept flowing; a
+   low, use-correlated rate of these warnings is normal (11 513 over the two
+   previous days, confined to the ~15 minutes the controller was actually in
+   use, and the buttons worked then — two `device action switch_arm -> ok`
+   lines in `runtime.log` on 2026-09-04) — the fault is a CONTINUOUS flood
+   while idle. Zero `event N handling failed:
+   dropped` lines in `runtime.log` means the reader dropped nothing: libsurvive
+   delivered nothing. A runtime restart cleared it (flood 0, `controller_age_s`
+   ≤ 0.30 s, 32 distinct controller states in 20 s, trigger 0.0 at rest) —
+   restart the runtime before suspecting the controller or the dongle. Pose
+   teleop can still be verified meanwhile because the clutch also rides KeyC /
+   gamepad RT. The flood lands only in `var/logs/runtime.stderr.log`
+   (04-runtime §14).
 8. **Transport (binding, 2026-09-03):** calibration adds **no** `ActionName`
    and **no** keymap row (item 2's 23-entry invariant holds). Commands ride
    REST — `GET /api/tracker/calibration -> TrackerCalibrationStatus`, `POST
@@ -301,8 +354,8 @@ move together.
   into `ControllerState`; `TrackerConfig.controller_map` defaults to the §1.1 table
   (`{clutch: trigger_click, gripper_open: trackpad_up, gripper_close:
   trackpad_down, rail_neg: trackpad_left, rail_pos: trackpad_right, arm_next:
-  menu_click, arm_prev: none}`; the lab YAML binds the gripper to grip/menu and
-  arm switching to pad up/down, §1.1) with `trackpad_deadzone: 0.3`; the reader
+  menu_click, arm_prev: none}`, which is also what the lab YAML ships — §1.1)
+  with `trackpad_deadzone: 0.3`; the reader
   attaches the latest controller state and the derived `held_codes` (clutch,
   gripper and rail codes looked up from the keymap by action) to every sample
   and publishes a sample on each button edge (re-publishing the last pose; this
@@ -318,15 +371,40 @@ move together.
   path is unit-testable with a scripted controller state.
 - **Pose filter** (`TrackerConfig.filter`): the aligned tracker pose is passed
   through a One Euro filter before the anchor/delta math — position per axis
-  (`min_cutoff_hz: 1.0`, `beta: 0.05`, `d_cutoff_hz: 1.0`) and orientation via
+  (`min_cutoff_hz: 1.0`, `beta: 5.0`, `d_cutoff_hz: 1.0`) and orientation via
   the same filter on the rotation-vector increment (slerp-equivalent for small
-  steps), followed by a rest deadband (`deadband_m: 0.002`, `deadband_rad:
+  steps), followed by a rest deadband (`deadband_m: 0.001`, `deadband_rad:
   0.005`): displacements below the deadband since the last emitted pose are
-  dropped. The filter runs in the provider at the 100 Hz tick on the latest
-  sample (not in the reader), resets on engage and on stale/invalid gaps, and
-  `filter.enabled: false` bypasses it. `tracker_settings` gains optional
-  `filter_min_cutoff_hz` / `filter_beta` so the debug page can tune it live;
-  telemetry echoes the effective settings and reports `pose_filtered`.
+  dropped. **`beta` is Hz per (m/s) and that is the tuning trap
+  (RETUNED 2026-09-07):** the paper's ~0.007 is per pixel/s, and the values
+  shipped until then (`beta: 0.05`, `d_cutoff_hz: 1.0`) could not lift a 1 Hz
+  cutoff at hand speeds, so the filter was a fixed 159 ms low-pass — measured
+  148 ms / 15 mm behind at 0.1 m/s and 131 ms / 39 mm at 0.3 m/s, i.e. past the
+  25 mm leash, which then truncated and slipped the travel away (04-runtime §6).
+  That was the operator's remaining "the trigger has a delay". `beta: 5.0` gives
+  7.6 mm / ~25 ms at 0.3 m/s (4.3 mm / 43 ms at 0.1, 11.7 mm / 15 ms at 0.8) and
+  costs nothing measurable at rest. **`d_cutoff_hz` deliberately stays at 1.0**:
+  it is the cutoff of the *speed estimate*, so raising it reacts to acceleration
+  sooner (`beta 10` + `d_cutoff 10` measured 5.2 mm / ~17 ms) but couples the input
+  noise into that estimate, which lifts the cutoff while the hand rests — against
+  3 mm-std input the rest suppression falls 4.9× → 2.8× (position) and 5.9× → 2.0×
+  (orientation). Buying 8 ms for a third of the jitter rejection is the wrong trade
+  while libsurvive keeps corrupting the lighthouse calibration (§6 "libsurvive
+  rewrites the config"), because the degraded regime is exactly the noisy one. At
+  the retuned values the measured suppression is 4.3× / 4.0× and the unit contracts
+  ask for ≥ 4× (they asked for ≥ 5× while the filter was accidentally non-adaptive;
+  an adaptive cutoff trades rest rejection for lag by construction, and at rest the
+  deadband freezes the output exactly anyway). Re-measure ramp lag AND rest std
+  before changing any of them. Status: the retune is measured offline (ramp +
+  rest-noise experiments) and not yet verified on the arms. The filter runs in
+  the provider at the 100 Hz tick on the latest sample (not in the reader),
+  resets on engage and on stale/invalid gaps (measured irrelevant either way — a
+  resting hand leaves the speed estimate near zero, so reset and warm transients
+  are identical), and `filter.enabled: false` bypasses it. `tracker_settings`
+  gains optional `filter_min_cutoff_hz` / `filter_beta` (beta bound `0..200`,
+  raised from `0..5` when the units above were understood) so the debug page can
+  tune it live; telemetry echoes the effective settings and reports
+  `pose_filtered`.
 - **Anchor and re-seed rules (review 2026-09-02):** (a) whenever an arm's tick
   was resolved by a non-teleop source (goto plan, joint jog, policy), the teleop
   target is re-seeded from the measured TCP before teleop resumes, so the first
@@ -403,10 +481,12 @@ move together.
     rewrites the file `--configfile` points at, so a calibration always runs
     on a **temporary config** `calibration_dir/base_station-<ts>.json` (a byte
     copy of `tracker.libsurvive_config_path`, default
-    `~/.config/libsurvive/config.json`); the real file is replaced only by
-    `install`. The runtime always passes `--configfile` explicitly
-    (`--record` without it silently switches the config to `<rec>.json`) and
-    never relies on `--run-time` (inert in this build).
+    `${APOLLO_HOME}/var/libsurvive/config.json`, 04-runtime §14.1 — not
+    `~/.config/libsurvive/config.json`, which the runtime no longer touches);
+    the real file is replaced only by `install`. The runtime always passes
+    `--configfile` explicitly (`--record` without it silently switches the
+    config to `<rec>.json`) and never relies on `--run-time` (inert in this
+    build).
   - **`base_station` state machine.** `start`: requires backend `libsurvive`
     (409 `"backend is not libsurvive"`), no session, no calibration running;
     copies the config to the temp file; `reader.restart(stripped +
@@ -564,8 +644,11 @@ move together.
   pairing status, both calibrations (the Debug page's own `CalibrationPanel` and
   `TrackerCalibrationWizard`, unchanged and shared) and the controller angle
   (the yaw wizard plus `TrackerSettingsForm` for live nudging). The link ladder
-  reports the FIRST actionable fact — no receiver → not paired → error →
-  searching → stale → connected — and separates the button path from the pose
+  reports the FIRST actionable fact, with the precedence as implemented in
+  `controllerLink()`: a fresh pose stream (status `tracking`, or `stale` with
+  `age_s < POSE_STALE_UI_S = 1.0 s`) wins; otherwise no receiver
+  (`dongle_present === false`) → error → not detected (`objects === []`) →
+  signal lost (stale) → searching. It separates the button path from the pose
   path: a fresh pose stream never speaks for the buttons, whose own row shows
   `controller_age_s` and asks for a trigger squeeze, verified live by
   `ControllerView`.
@@ -659,8 +742,10 @@ radio MCU is stuck in Nordic DFU (BLE name `LHB-DFU`), the FPGA image reads
 reports `Radio Timeout`; it blinks amber and never sweeps. Until it is
 re-flashed with SteamVR (or RMA'd) the cell runs on **three** stations
 (channels 3/12/14, `--lighthousecount 3`). With a clean 3-station calibration
-the resting pose noise is 0.1 mm std / 1 mm peak-to-peak / 0.08° — the 5 cm
-"jitter" seen before was the broken station plus a stale calibration.
+the resting pose noise is at the 0.1 mm level (2026-09-03: 0.1 mm std / 1 mm
+p-p over the session / 0.08°; 2026-09-07, clean 3-station config, 20 s at
+rest: 0.1 mm p-p) — the 5 cm "jitter" seen before was the broken station plus
+a stale calibration.
 libsurvive's poser thread uses about one CPU core continuously.
 
 Pairing a controller to the dongle (once): run libsurvive with `--pair-device`,
@@ -689,7 +774,8 @@ through `survive-cli` on a temp copy of the config with `--globalscenesolver 0
 on (`--use-stationary-sensor-window 0`) for all lighthouses and leave-one-out
 (`--disable-lighthouse i`), and prints the scatter of the fixes; consistent =
 a few mm std in every column and near-zero offsets between columns. It never
-touches `~/.config/libsurvive/config.json`; the runtime must not be running
+touches the installed config — `${APOLLO_HOME}/var/libsurvive/config.json`,
+nor `~/.config/libsurvive/config.json`; the runtime must not be running
 while it holds the dongle). It is the command-line ancestor of the wizard's
 Validate step (§4 "Calibration modes").
 
@@ -699,11 +785,19 @@ libsurvive_args: ["--lighthousecount", "3", "--globalscenesolver", "0",
 tracker_calibration.json wins, §4>}`. `--lighthousecount` is 3 in the live
 config (three working stations); the repo `configs/mavis_v2.yaml` still says
 4 — reconcile when the channel-7 station is repaired or written off (§7).
-`--globalscenesolver 0 --disable-calibrate 1` **freeze the lighthouse
-calibration during teleop**: on 2026-09-03 the online global scene solver
+`--globalscenesolver 0 --disable-calibrate 1` **stop the online solver from
+moving stations during teleop**: on 2026-09-03 the online global scene solver
 moved a base station's solution 32 cm in the middle of a session. Calibration
 is therefore an explicit, operator-driven mode (below), never a side effect of
 running the arm.
+
+**libsurvive rewrites the config (2026-09-07).** Even with `--globalscenesolver
+0 --disable-calibrate 1` libsurvive REWRITES the `--configfile` on every run
+and the file degrades (observed 2026-09-07): the flags stop the online solver
+from moving stations mid-session, they do not make the file read-only. (Until
+2026-09-07 this paragraph said the flags "freeze the lighthouse calibration" —
+they do not.) What the degradation looks like and how it was recovered: §6.1
+"Files"; the fix is open (§7).
 
 ### 6.1 Base-station calibration (wizard first, CLI as fallback)
 
@@ -737,8 +831,8 @@ after the previous one, so walking around does not count) → **Validate** once
 `scenes ≥ 6`: hold the controller still for ~13 s (3 s skipped + 10 s
 measured with the moving-mode window, scene solver off); pass = std < 5 mm
 and max step < 20 mm on the result table; fail → "Capture more" at further
-spots → **Install**: the runtime backs `~/.config/libsurvive/config.json` up
-as `config.json.bak-YYYYMMDD-HHMMSS`, copies the validated temp config over
+spots → **Install**: the runtime backs `${APOLLO_HOME}/var/libsurvive/config.json`
+up as `config.json.bak-YYYYMMDD-HHMMSS`, copies the validated temp config over
 it, keeps `~/apollo/calibration/base_station-<ts>-installed.json`, marks the
 yaw **invalid** and restarts libsurvive with the normal (frozen) arguments →
 **Yaw alignment** (§6.2) is mandatory after every install: the lighthouse
@@ -746,14 +840,28 @@ world frame is re-anchored by a recalibration (the 2026-09-03 install rotated
 it by −14.2° relative to the previous frame). Abort at any time restores the
 normal arguments; temp configs stay under `~/apollo/calibration/`.
 
-**Files.** Installed config: `~/.config/libsurvive/config.json` (three
+**Files.** Installed config: `${APOLLO_HOME}/var/libsurvive/config.json`
+(`TrackerConfig.libsurvive_config_path`, 04-runtime §14.1; not
+`~/.config/libsurvive/config.json`, which earlier revisions named here) — three
 lighthouse blocks with a 7-vector `pose` and a 6-vector `variance`,
-`"poser": "MPFIT"`, `"configed-lighthouse-gen": "2"`). A copy of the cell's
+`"poser": "MPFIT"`, `"configed-lighthouse-gen": "2"`. A copy of the cell's
 reference calibration lives in the runtime repo as
 `apollo-mavis-v2-runtime/configs/libsurvive/<cell>-lighthouses-<date>.json`
 (currently `mavis_v2-lighthouses-20260903.json`) so a fresh machine or a
 corrupted config can be restored by copying it back; update the copy after
-every accepted install.
+every accepted install. Backups: `var/libsurvive/config.json.bak-<ts>` (wizard
+install and manual restores) and the untouched `~/.config/libsurvive/config.json`
+(the 3-block 2026-09-03 calibration, identical to the tracked reference
+`apollo-mavis-v2-runtime/configs/libsurvive/mavis_v2-lighthouses-20260903.json`).
+Observed 2026-09-07 (§6 "libsurvive rewrites the config"): the 3-block
+reference grew to 9, then 10 `lighthouse*` blocks; station ch3 (id 2684858188,
+`lighthouse0` in the reference) was demoted to an unpositioned slot
+(`PositionSet: 0`, zero pose) while slot 0 held an `id: 0` (channel-0) station
+≈ 1.11 m from the reference ch3 pose. Symptom: a resting controller wandered
+std 12 / 35 / 13 mm (x/y/z), 14 cm peak-to-peak; after restoring the reference
+copy and restarting, 0.1 mm peak-to-peak. The restore is temporary — libsurvive
+re-degraded the file within ~30 min (`config.json.bak-20260907-042815` and the
+live file are the same 10-block content).
 
 **CLI fallback (runtime stopped — the dongle is exclusive, `LIBUSB_ERROR_BUSY`
 otherwise).** Capture with `survive-cli --configfile <tmp copy>
@@ -761,8 +869,9 @@ otherwise).** Capture with `survive-cli --configfile <tmp copy>
 still-at-many-spots discipline (watch for `Global solve with N scenes for M`
 in the INFO output); validate with `scripts/tracker/03-lh-consistency-check.sh`
 (set `LIBSURVIVE_CONFIG` to the temp copy); then back up and copy the temp
-config over `~/.config/libsurvive/config.json` by hand and redo the yaw
-gesture. Deleting `config.json` and letting libsurvive recalibrate from a
+config over the installed `${APOLLO_HOME}/var/libsurvive/config.json` by hand
+(and keep the tracked reference `configs/libsurvive/mavis_v2-lighthouses-*.json`
+in step) and redo the yaw gesture. Deleting `config.json` and letting libsurvive recalibrate from a
 single spot on the next start — the v0.1 procedure — is exactly what produced
 the inconsistent solutions and is no longer recommended.
 
@@ -824,3 +933,9 @@ station E9BFDF83 and then reconciling `--lighthousecount` (3 live vs 4 in the
 repo YAML, §6); base-station placement advice; a second controller; writing
 the applied yaw back into the YAML (the persisted `tracker_calibration.json`
 is authoritative, §4); SteamVR.
+
+OPEN (2026-09-07): start libsurvive on a per-run COPY of
+`libsurvive_config_path` and keep the installed calibration read-only — the
+wizard's install step is the only legitimate writer (§6 "libsurvive rewrites
+the config", §6.1 "Files"). OPEN: station ch3 (id 2684858188) lost its pose in
+the rewritten config — check at the station why its OOTX is not decoding.

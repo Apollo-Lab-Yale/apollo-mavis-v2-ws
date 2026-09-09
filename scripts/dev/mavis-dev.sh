@@ -71,6 +71,7 @@ start_runtime() {
   _rotate_raw "$LOGS/runtime.stderr.log"
   echo "=== start $(date -Is) APOLLO_HOME=$WS config $CONFIG" >> "$LOGS/runtime.stderr.log"
   ( cd "$WS/apollo-mavis-v2-runtime" && APOLLO_HOME="$WS" MUJOCO_GL=egl PYTHONUNBUFFERED=1 \
+      OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
       exec nohup .venv/bin/python -m apollo_mavis_v2_runtime --config "$CONFIG" >> "$LOGS/runtime.stderr.log" 2>&1 ) &
   echo $! > "$RUN/runtime.pid"; echo "runtime started pid $(cat "$RUN/runtime.pid") config $CONFIG (log $LOGS/runtime.log, raw stderr $LOGS/runtime.stderr.log)"
 }

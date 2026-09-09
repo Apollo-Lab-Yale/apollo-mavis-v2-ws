@@ -102,7 +102,13 @@ Binding decisions:
   (`mj_resetDataKeyframe(model, data, 0)`).
 - Physics options live in the *parent* scene spec only (§4 `options`). TCP
   site stays at menagerie's `0 0 .172` (the mavis fork moved it to .165; we
-  do not — overview §3.1).
+  do not — overview §3.1). The `<arm>_link7` origin coincides with the
+  controller's flange TCP (tcp_offset zero) and the `<arm>_link_tcp` site sits
+  below it along the tool axis (0.172 m on the gripper arm; on the flange
+  itself on a camera-only arm, §4.1) — verified against `get_position()` on
+  both real arms on 2026-09-04: the controller's 7 joint radians written
+  verbatim reproduce the flange pose to 0.0 mm / 0.00°, i.e. the joint mapping
+  is an identity (02-hardware §12).
 - **Optional microphone body** (`ArmSpec.microphone`, phase-11; camera-only arms
   only — `wrist_cam: true` + `gripper: none`, enforced by an `ArmSpec`
   after-validator). `_customize_child` adds a **joint-less** body `microphone`
@@ -285,10 +291,10 @@ the opposite-ends factory-zero posture below — user decision.)
 | Perception Arm rail (`view`, camera-only: D435 + microphone) | outer edge 2.6 cm from the table's outer edge | y0 = 0.31 − 0.026 − 0.0724 = **0.2116** |
 | Manipulation Arm rail (`grip`, gripper + wrist cam) | 39.5 cm inward by tape (2026-09-02); **39.0 cm by the wrist-camera overlay (2026-09-06)**: the same mesh edge (+Y body edge) aligns to 0 px on the outer rail, whose Y is pinned by the 2.6 cm reading, and is 4 px = 5 mm off on this one | y0 = 0.2116 − 0.3902 = **−0.1786**; plate edge 1.14 cm from the inner table edge |
 | channel | between the rail bodies | y ∈ [−0.1062, 0.0916] (19.8 cm with the 19.2 cm mavis mesh) |
-| rail placement along travel | **MEASURED 2026-09-05, end feature corrected 2026-09-06** (supersedes the 2026-09-02 derivation). The operator's reference is the rail's **WIDE END FACE** (the 14 cm end plate), not the 3.2 cm boss protruding 2.0 cm past it: wide face **14.5 cm** from the table's +X edge, wide face → base cylinder centre **18.5–19 cm**; boss tip ~12 cm (hard to read with the sleeve fitted) | rail geom offset y = **0.365093** puts the wide face 0.187 m and the boss tip 0.2075 m from the base centre; base centre x0 = **+0.2800**, 32.75 cm from the +X edge (twin: face 14.05 cm, boss 12.0 cm from the edge — the operator's rough boss reading was 12). **Why 0.2800 and not the tape chain's 0.2750**: with the wrist camera pinned to the tape-referenced table dots, BOTH rails' end faces still sat 4–7 mm further +X in the frame than the twin's; the face is 5.95 cm +X of the dots that the tape called 20.0 cm from the edge, so the two table-referenced tape readings (face 14.5, dots 20.0) disagree by 4.5 mm and the image decides. Face → base stays at the measured 18.7, so arms and rails moved together. **09-05 anchored the BOSS at 14.0 cm by mistake** (x0 0.2800, offset 0.385093): the drawn rail sat 20 mm too far −X and the arms 5 mm too far +X, which surfaced as a 22 mm contradiction between the tape-referenced dots and the rail end in the wrist frame during the 09-06 camera solve — the wide-face definition resolves it to 1.3 px. **Before 09-05 x0 = +0.2375** from the reference mesh (carriage centred at mid-travel), a 4 cm error that put BOTH arms too far from the obstacle end; every obstacle-side clearance the twin reported was optimistic by that much. The mesh is 1.0926 m against the real 1.075 m; with the zero end anchored the drawn rail's −X end stops 0.24 cm short of the table's −X edge (the real track is flush there — the zero end has the obstacle, so it wins). At the keyframe's q = 0.65 the carriage's −X edge is 14.95 cm from the −X edge |
+| rail placement along travel | **MEASURED 2026-09-05, end feature corrected 2026-09-06** (supersedes the 2026-09-02 derivation). The operator's reference is the rail's **WIDE END FACE** (the 14 cm end plate), not the 3.2 cm boss protruding 2.0 cm past it: wide face **14.5 cm** from the table's +X edge, wide face → base cylinder centre **18.5–19 cm**; boss tip ~12 cm (hard to read with the sleeve fitted) | rail geom offset y = **0.365093** puts the wide face 0.187 m and the boss tip 0.2075 m from the base centre; base centre x0 = **+0.2800**, 32.75 cm from the +X edge (twin: face 14.05 cm, boss 12.0 cm from the edge — the operator's rough boss reading was 12). **Why 0.2800 and not the tape chain's 0.2750**: with the wrist camera pinned to the tape-referenced table dots, BOTH rails' end faces still sat 4–7 mm further +X in the frame than the twin's; the face is 5.95 cm +X of the dots that the tape called 20.0 cm from the edge, so the two table-referenced tape readings (face 14.5, dots 20.0) disagree by 4.5 mm and the image decides. Face → base stays at the measured 18.7, so arms and rails moved together. **09-05 anchored the BOSS at 14.0 cm by mistake** (x0 0.2800, offset 0.385093): the drawn rail sat 20 mm too far −X and the arms 5 mm too far +X, which surfaced as a 22 mm contradiction between the tape-referenced dots and the rail end in the wrist frame during the 09-06 camera solve — the wide-face definition resolves it to 1.3 px. **Before 09-05 x0 = +0.2375** from the reference mesh (carriage centred at mid-travel), a 4 cm error that put BOTH arms too far from the obstacle end; every obstacle-side clearance the twin reported was optimistic by that much. Rail geom offset history: 0.325 (mavis reference mesh, carriage centred at mid-travel) → 0.385093 (2026-09-05, boss anchored) → 0.365093 (2026-09-06, wide face anchored). The mesh is 1.0926 m against the real 1.075 m; with the zero end anchored the drawn rail's −X end stops 0.24 cm short of the table's −X edge (the real track is flush there — the zero end has the obstacle, so it wins). At the keyframe's q = 0.65 the carriage's −X edge is 14.95 cm from the −X edge |
 | obstacle | 0.16 × 0.16 × 0.24 m untouchable block, flush against the **+X** edge (operator's left, the empty end) in the channel; near face 27.5 cm in from the outer edge | half `[0.08, 0.08, 0.12]` at `(**0.5275**, −0.045, 0.855)`, y ∈ [−0.125, 0.035]; its inner face is 1.4 cm past the mesh gripper-rail inner edge and the 1.0926 m mesh rail's boss reaches 4.0 cm into its x-span — a static corner overlap (mesh vs real track) that MuJoCo filters, both being welded to the world, so it never reaches the gate or the sweep |
 | keyframe = **initial state** (user decision 2026-09-04) | both arms at the xArm7 factory zero posture — joints 2–7 = 0, **joint 1 = π** (the yaw +90 base flip) — with the rails at **opposite ends**: `grip` q = **0.65** (−X, operator's right, link_base x = −0.3700), `view` q = **0** (+X, operator's left, link_base x = +0.2800; its carriage 6.95 cm short of the obstacle's −X face and 9.7 cm outside its y span). The xArm7 zero is a FOLDED pose: forearm hanging beside the upper arm, tool pointing straight down, flange 12.05 cm above the mounting plane and 20.6 cm to the side; joint 1 = π puts that side at −Y (away from the operator) — the gripper hangs at y ≈ −0.39, 8 cm outside the table's inner edge with the finger pads 9.3 cm above the table plane; the D435 hangs into the channel at y ≈ 0.006 looking down at the table 22 cm below. Gripper open | MJCF order (rail FIRST): `view: [0, π, 0, 0, 0, 0, 0, 0]`, `grip: [0.65, π, 0, 0, 0, 0, 0, 0]`, `gripper: 1.0`. Twin audit clean at δ = 0.008 and 0.025, mic off and on, given the link2↔link4 allowed pair below. Smallest monitored clearances (obstacle-side ones ~4 cm tighter than the pre-09-05 twin claimed): grip finger pads ↔ table 8.97 cm (a diagonal to the table's inner edge: the pads hang 8 cm outside it), link_base ↔ table 10.7 cm, view flange (link7) ↔ obstacle 11.55 cm, `view_d435_mount` ↔ grip rail 12.2 cm, view carriage ↔ obstacle 12.4 cm (was 15.4); mic on: **mic tip ↔ table 3.8 cm** (tip z ≈ 0.773 — the tightest clearance of the initial state, 1.3 cm outside the safety_debug band), mic ↔ grip rail 7.2 cm, mic ↔ obstacle 12.75 cm (was 17), mic ↔ own link1 12.4 cm. Nothing monitored within 8.5 cm with the mic off |
-| **wrist camera extrinsic** (both arms, shared MJCF) | **MEASURED 2026-09-06**: four hand-drawn dots on the table, world positions tape-referenced (near pair 20.0 cm from the +X edge, near row 25.5 cm from the operator's +Y edge, 195 × 96 mm rectangle), imaged by the Manipulation Arm's wrist camera with the arm braked | `<camera name="wrist_cam" pos="0.06832 -0.02220 0.02945">` in `d435_mount` on link7 — solved for POSITION with the rotation held at the model's value, re-solved after the residual pass moved `base_pos` (the mount absorbs the arm's placement: mount = measured camera − FK). **The reference model's guess `0.07 0 0.05` was ~22 mm sideways and ~20 mm too far from the flange**; that one error was the entire visible overlay offset the operator reported and the twin's 2.7 % table-plane over-scale. What was ruled OUT first: fx/fy (three-height tape solve, 607 ± 4 px vs the configured 608.19, 0.24 σ) and the camera rotation (the rectangle's near/far-edge convergence 1.0226 measured vs 1.0226 predicted; a free PnP that "wanted" 19.6° of tilt was the co-planar degeneracy, not evidence). Fit: 3 unknowns / 8 observations, reprojection RMS 1.24 px. **Residual pass (same day)** on features NOT in the fit: both rails' zero-end faces and the inner rail's channel edge were each 4–7 mm off in one direction → `base_pos` X +5 mm (both arms) and grip Y +5 mm (spacing 39.0), after which every measured edge is within ±2 px: table +X edge −1.0, outer rail edge +0.5, inner rail channel edge 0.0, outer rail face −1.0, inner rail face +2.0. Naive single-height readings are ambiguous between focal and distance — the split needs ≥ 2 heights with a long lever arm (h ≥ 0.5 m), and hand-drawn dot spacing must be tape-verified (the "20 cm" dots were 19.5). The mic body is deliberately NOT coupled to this pose (`MIC_REF_PLANE_Z_M`) |
+| **wrist camera extrinsic** (both arms, shared MJCF) | **MEASURED 2026-09-06**: four hand-drawn dots on the table, world positions tape-referenced (near pair 20.0 cm from the +X edge, near row 25.5 cm from the operator's +Y edge, 195 × 96 mm rectangle), imaged by the Manipulation Arm's wrist camera with the arm braked | `<camera name="wrist_cam" pos="0.06832 -0.02220 0.02945">` in `d435_mount` on link7 — solved for POSITION with the rotation held at the model's value, re-solved after the residual pass moved `base_pos` (the mount absorbs the arm's placement: mount = measured camera − FK). **The reference model's guess `0.07 0 0.05` was ~22 mm sideways and ~20 mm too far from the flange**; that one error was the entire visible overlay offset the operator reported and the twin's 2.7 % table-plane over-scale. What was ruled OUT first: fx/fy (three-height tape solve, 607 ± 4 px vs the configured 608.19, 0.24 σ — i.e. the YUYV 640×480 UVC path really does carry librealsense's colour intrinsics), the camera rotation (the rectangle's near/far-edge convergence 1.0226 measured vs 1.0226 predicted; a free PnP that "wanted" 19.6° of tilt was the co-planar degeneracy, not evidence) and the principal-point sign convention in runtime `streams/twin_overlay.py` (`principal_pixel = [W/2 − cx, H/2 − cy]`, §7) — verified correct. Fit: 3 unknowns / 8 observations, reprojection RMS 1.24 px. **Residual pass (same day)** on features NOT in the fit: both rails' zero-end faces and the inner rail's channel edge were each 4–7 mm off in one direction → `base_pos` X +5 mm (both arms) and grip Y +5 mm (spacing 39.0), after which every measured edge is within ±2 px: table +X edge −1.0, outer rail edge +0.5, inner rail channel edge 0.0, outer rail face −1.0, inner rail face +2.0. Naive single-height readings are ambiguous between focal and distance — the split needs ≥ 2 heights with a long lever arm (h ≥ 0.5 m); because f ∝ h in that solve, the focal-length estimate is never better than the height measurement. Hand-drawn dot spacing must be tape-verified (the "20 cm" dots were 19.5 cm, the "10 cm" dots 9.6 cm). Localise dot centroids against a locally fitted plane background — a constant background under the shadow gradient biased v by 1 px. The mic body is deliberately NOT coupled to this pose (`MIC_REF_PLANE_Z_M`) |
 | **per-arm wrist camera overlay offset** (runtime, not MJCF) | **MEASURED 2026-09-06**: with the shared `wrist_cam` pose (solved on the Manipulation Arm) and each camera's own factory intrinsics, the twin overlay aligns the **Manipulation** Arm to 0 px but the **Perception** Arm's twin sits a **uniform +21 px x / +13 px y (~2 cm at the arm)** off the real arm across EVERY link. Edge-alignment of the twin silhouette to the real Sobel edges in a FAR band (top cylinder) and a MID band gave the SAME shift → depth-/pose-independent, so it is a fixed view-camera mount discrepancy (a small mount pitch/yaw or principal-point difference between the two hand-assembled camera brackets), NOT parallax (a camera-position error would vary with depth) and NOT a shared-geometry error (grip is clean) | encoded as `twin_overlay.principal_offset_px: {view_wrist: [21, 13]}` in `configs/mavis_v2.yaml` — an **overlay-only** nudge (`cx += du`, `cy += dv`) applied by `TwinOverlayRenderer` when rendering the overlay. It does **not** touch `CameraConfig.intrinsics` (those are the true factory D435 values that `session/manager.py` bakes into recordings as ground truth). A principal-point offset cancels a uniform pose-independent shift exactly: residual < 1 px after the fix, confirmed live at a fresh posture. Encoding it as a principal point is an approximation of a likely mount-orientation error, but the two are indistinguishable from images and produce identical (pose-independent) overlay shifts, so the overlay is correct at every posture |
 | microphone (`view`, optional) | RØDE NT-USB Mini + bracket in front of the wrist camera: 8 cm diameter, tip 14 cm past the camera plane; mass ~0.45 kg (to be weighed) | `microphone: false` in the YAML (pure sim); the hardware twin builds with `SceneOverrides(microphones={"view": True})` → body `view_microphone`, cylinder `size [0.040, 0.095]`, `pos [0, 0, 0.095]` in link7 (§3); 1.5 cm radial gap to the D435 block; occludes ~12 % of `view_wrist_cam` (bottom-centre silhouette) by design |
 | `allowed_pairs` | carriages ↔ table (24 mm by construction); per arm **link2 ↔ link4**: at the factory zero the elbow housing sits 1.78 cm from the shoulder housing — inside the safety_debug band (0.025) whenever J4 ≈ 0 (J4 ≥ 0.10 rad opens it past 2.5 cm), so without the whitelist the audit refuses the initial state and the `safety_debug` gate would hold every command from it. The pair can truly meet only near J4's −11° stop with J3 rolled; intra-arm self-collision is the xArm controller's own job | four pairs; the link pairs remove link2↔link4 from the audit and from `check()` (mj_collision's full contact list) — the clearance sweep / IK rows never held intra-arm pairs, and physics still collides. None for the mic (initial-state clearances ≥ 3.8 cm) |
@@ -320,7 +326,11 @@ yaw +90 flip its **+X (operator's left) edge is base + 0.098** and its
 **−X edge base − 0.088**. Two doc lines used 0.098 on both sides and were 1 cm
 off (fixed 2026-09-05 with the rail-zero measurement); at q = 0 the mesh
 carriage's +X edge stops 8.95 cm short of the mesh zero end, 0.1496 m of rail
-beyond it. **Closed 2026-09-05** by the operator's homed-carriage measurement:
+beyond it. The mesh carriage is also **~7.5 cm SHORT along the rail**
+(noted 2026-09-07): 18.6 cm (local y −0.098…+0.088) against the real ≈ 26 cm,
+base-centred (the real length is not yet tape-measured) — which is why it stops
+8.95 cm short of the rail's zero end where the real one stops 5–6 cm short.
+**Closed 2026-09-05** by the operator's homed-carriage measurement:
 the zero-end overhang that sets x0 (see the rail-placement row — it was 6.0 cm
 wrong) and the rail length (1.0926 m mesh vs 1.075 m real). Still open, and both
 make the twin OPTIMISTIC rather than conservative: the real carriage stops 5–6 cm
@@ -542,6 +552,12 @@ EGL) and is the recipe to reuse for any future segmentation / intrinsics work:
   segmentation) live on the overlay thread and are created/closed there; the
   phase-09 gate's `DigitalTwin` instance is never shared with it.
 
+**Depth rendering (phase-12, 2026-09-08).** `SimCamera(depth=True)` /
+`SimWorkcell(depth_cameras=[…])` render depth in the same pass
+(`rendering.depth_m_to_u16_mm`, 0.001 m scale, ≥ 65.535 m clipped) into
+`CameraFrame.depth`; the digital twin publishes `view_wrist_cam` depth by
+default (`dora.publish.depth_cameras`, 14-dora §4.2).
+
 ## 8. DigitalTwin — `DigitalTwinInterface` implementation
 
 Kinematic-only mirror: own `MjModel`/`MjData` built from the
@@ -597,8 +613,17 @@ check(q_cmd): data.qpos[...] = q_cmd          # COMMANDED config, not measured
 
 **Pair labels** are body names for arm geoms (`view_link5`, `grip_rail_platform`,
 `view_d435_mount`, `view_microphone`) and geom names for world geoms (`table`,
-`obstacle`, `floor`); `_arms_of_pair` attributes a label to an arm by its
-`<arm_id>_` prefix. The optional microphone body (§3) therefore appears as
+`obstacle`, `floor`); `_arms_of_pair` attributes a label to the arm whose
+JOINTS move it (kinematic ownership, 2026-09-09: a body below one of the arm's
+seven joints or its rail joint — links, carriage, arm base, gripper, camera
+mount, microphone; the static `<arm_id>_rail_base`, a child of `world` with no
+joint, belongs to no arm, like the world geoms). Until that day the rule was
+the `<arm_id>_` name prefix, so the Perception Arm's camera mount pinched
+against the Manipulation Arm's rail read as a pair of BOTH arms and the gate
+demanded that the Manipulation Arm open a distance none of its joints can
+change — hold-last-safe for good (runtime `tests/test_return_fuzz_mavis_v2.py`,
+seeds 20261013 / 20261014: planned returns held from their first moving tick;
+teleop would have frozen the same way). The optional microphone body (§3) therefore appears as
 `view_microphone`: in `mavis_v2` with the mic on, `build_monitored_pairs` adds 20
 pairs (mic ↔ floor, table, obstacle and the 17 collidable `grip_*` bodies) and the
 IK avoidance rows follow through `default_collision_pairs`; mic ↔ `view_d435_mount`
@@ -775,7 +800,8 @@ wire shape of its own.
 @dataclass
 class PlannerParams:                        # local tuning knobs only; request-level
     rail_weight: float = 4.0                #   knobs (timeout_s, max_step_rad) ride
-    max_iters: int = 2000                   #   PlanRequest (core §6)
+    max_iters: int = 10000                  #   PlanRequest (core §6); per seed - the
+    #   request deadline bounds planning, restarts happen at this count (2026-09-09)
     shortcut_attempts: int = 50             # 11-safety §9
     vel_limits: dict[str, float]            # time-param caps: 0.6 rad/s joints,
     acc_limits: dict[str, float]            #   2 rad/s²; rail 0.1 m/s (11-safety §9)
@@ -787,7 +813,10 @@ class ResetPlanner:
         # PlanRequest{q_start, q_goal, arm_order?, timeout_s=5.0 (per arm),
         #   max_step_rad=0.05 (rail 0.01 m)}; PlanResult{ok, waypoints:
         #   dict[str, list[list[float]]], failure: "goal_in_collision" |
-        #   "start_in_collision" | "timeout" | None, failing_pair}
+        #   "start_in_collision" | "no_escape" | "timeout" | None, failing_pair,
+        #   arm_order: list[str] (2026-09-08: the order actually validated —
+        #   the heuristic order, or the reversed retry that succeeded, or the
+        #   caller's explicit order; [] on failure)}
 ```
 
 Algorithm (**per-arm sequential — the v1 strategy**, 11-safety §9; composite
@@ -798,20 +827,136 @@ with rail dims × `rail_weight`, uniform sampling within limits, rail
 [0, 0.65]) with arms `<k` frozen at their **goals** and arms `>k` at their
 **starts** as static obstacles; on failure retry the reverse order —
 two-arm swap deadlocks fail loudly (11-safety §14.2). (2) Validity =
-`twin.check_config(q_full)` (`mj_kinematics` + `mj_collision` + allowed-pair
-filter, §8); edges interpolated at `req.max_step_rad` per joint (rail
-0.01 m). (3) **Start-state hysteresis**: pairs already violating at
-`q_start` (arm parked inside the inflation shell) are whitelisted until first
-exceeding `inflation + 5 mm`, then re-armed — else a clamped arm could never
-plan out. (4) **Shortcut smoothing**: `shortcut_attempts` random replacements
-kept when the straight edge validates; then time-parameterization with
-`vel_limits`/`acc_limits`.
+`mj_kinematics` + `mj_collision` + allowed-pair filter (§8) on the planner's
+fine model copy — **the RRT, the direct edge and the shortcut pass use the same
+predicate as the final verification of item (5)**: every movable pair
+≥ `δ + FINE_MARGIN_M`, pairs already that tight at the path's endpoints ≥ δ
+(2026-09-09 fuzz: with the bare "≥ δ" predicate the RRT skimmed an intra-arm
+pair at 8-10 mm for a whole segment after a correct escape, the repair pass
+ran out of nudges and all three seeds failed alike — `timeout` after 0.7 s of
+a 5 s budget); edges interpolated at `req.max_step_rad` per joint (rail
+0.01 m). **Held carriage** (same day): a rail slot whose start and goal
+coincide within `RAIL_HOLD_TOL_M` (1 mm) is a request for NO carriage motion
+and is pinned for the RRT samples, the escape candidates and the repair nudges
+alike (the goal snaps to the start's rail; arm k+1 is validated against arm k
+where its path ENDS). The runtime's joints phase promises "each carriage held"
+(04-runtime §10.5) and the rail-homing pre-positioning plans on a carriage
+whose position is unknown; before, the RRT sampled the rail like any dof and
+the fuzz measured a 12.6 cm carriage excursion inside a "joints" phase. Joints
+are not held this way — the joint-panel `goto` relies on them for routing. **Only pairs the planned arm's joints can move count** (`_moves`,
+2026-09-09 review): a pair the arm is not part of (the OTHER arm's intra-arm
+pinch, the other arm against the table) or whose two bodies hang under the same
+set of this arm's joints (the gripper's own knuckles, gripper base vs finger —
+only the finger joints move them) is a constant for this arm — never escaped,
+never its `start_in_collision`, never a block for its RRT — exactly as the gate
+never holds an arm outside the offending set. An arm whose goal IS its start is
+left alone (two identical waypoints; nothing will be commanded) so the other
+arm can be planned around it. (3) **Pinched start ⇒ escape phase mirroring
+the gate** (2026-09-09; 11-safety §9): this arm's movable pairs closer than
+`δ + hysteresis_m` at `q_start` — inside the inflation shell OR the gate's
+hysteresis band (`DigitalTwin(hysteresis_m=…)` = `SafetyConfig.hysteresis_m`,
+detected on a model copy inflated by it: a blocked gate demands that every pair
+in its `_block_pairs`, band pairs included, opens on every tick) — are first
+walked out by a greedy local search under exactly the gate's T8 rule, judged
+**per executor tick of the session the plan will run at**: the runtime executor
+walks a segment in `ceil(ratio)` equal ticks (`ratio` = the segment in caps:
+`HW_SLEW_RAD_PER_TICK` 0.006 rad, `HW_RAIL_M_PER_TICK` 0.5 mm, `HW_CART_STEP_M`
+4 mm of lever-weighted travel, × `PlanRequest.speed_scale`; duplicated from the
+hardware `ServoLimits` and pinned by runtime `tests/test_plan_passes_gate.py`),
+and every pinched pair must open by ≥ `ESCAPE_RATE_MARGIN` (1.25) ×
+`PLANNER_ESCAPE_EPS_M` (= runtime `gate.ESCAPE_EPS_M`, 1e-5 m, duplicated: sim
+may not import the runtime) on every one of those ticks (`_tick_count`), no
+other movable pair comes within `δ + 2 mm` (checked at ≤ 0.002 rad AND ≤ 4 mm
+of arm-point travel), a re-armed pair never falls back below `δ + 5 mm`.
+Candidates per step = the opening gradient of the tightest pair, the joint
+ascent, the axes and 24 random directions at half the edge resolution, filtered
+at the coarse resolution for the same rate, ranked by the largest smallest
+opening, the best one whose tick-level re-walk passes kept. A slower session has
+smaller ticks and less opening per tick, so a plan judged at `speed_scale` s is
+valid at any speed ≥ s; the core default (0.1, the slowest speed offered) is
+the conservative choice, the runtime passes the session's speed (the rail-homing
+job its 10 %). Done once every pinched pair is past `δ + REARM_MARGIN_M` (5 mm,
+above the gate's hysteresis band), then the normal RRT-Connect with the
+margin predicate of item (2). The goal is judged BEFORE the escape (a goal
+inside the shell is `goal_in_collision`, the certain diagnosis). A pinched pair
+at ≤ 0 mm is `start_in_collision`; a start no step can open at that rate is
+**`no_escape`** (`failing_pair` = the tightest pair; `PlannerParams.
+escape_max_steps` 400) — on the 40-pinch sweep of the review 39 planned and
+replayed with 0 holds at 100 / 50 / 10 %, the one refusal (three pairs against
+`view_link1` / `view_link2`) is a start the real gate holds for good at 10 %
+when the rate is ignored. Replaces the whitelist that let the 01:14 incident's
+plan close `grip_right_finger` / `view_link3` 2.1 → 1.1 mm in its first
+segment. When both orderings of a two-arm request fail, the ordering that got
+furthest (more arms planned) is reported, the heuristic's on a tie; the
+heuristic itself also weighs the violating pairs at the start (intra-arm ones
+included), so an arm pinched against itself is planned first. (4) **Shortcut
+smoothing**: `shortcut_attempts` random replacements kept when the straight
+edge validates. (5) **Verification at the gate's resolution** (same day): the
+finished path is re-sampled so that no arm point travels more than
+`FINE_STEP_M` = 4 mm between samples (per-joint lever bound `_LEVER_ARM_M` =
+the driver's `ServoLimits.lever_arm_m`, rail 1:1 — the executor's Cartesian
+cap per tick) on a planner-private model copy inflated by a further
+`FINE_MARGIN_M` = 2 mm, so the ticks in between stay ≥ δ (pairs already that
+tight at the endpoints only have to stay ≥ δ); a grazing sample is nudged off
+its pair along the opening gradient, else the RRT is re-run with the next seed
+— **until the request deadline** (2026-09-09 fuzz; an RRT that exhausts
+`max_iters` restarts with a new seed too, and after a repair failure the
+direct edge and the shortcut pass are skipped so the retries differ), so
+`timeout` means the budget was really spent (it used to mean "three seeds",
+reported with 4 s of a 5 s budget unused). Two-arm requests without an explicit
+order first PROBE both orderings with `ORDER_PROBE_FRACTION` (0.2) of the
+per-arm budget — the RRT cannot prove a dead end, and an arm whose goal is
+clear but walled in by the other arm's START would otherwise spend its whole
+budget before the reverse ordering (which frees it in 0.1 s) is tried; a
+deterministic probe failure (`goal_in_collision` / `start_in_collision` /
+`no_escape`) is not retried with more budget. `LOCAL_SAMPLE_FRACTION` (0.7) of
+the RRT samples come from the box spanned by start and goal widened by 1.5 rad
+(rail 0.15 m), the rest from the full range (completeness): four joints have
+±2π limits and uniform samples over two turns grew the trees toward postures no
+return needs. Found by the first gate replay: a shortcut edge grazed
+`grip_left_finger` / `view_link4` at 7.92 mm between two 0.05 rad samples.
+For UNPINCHED starts this is the same code path as before but not the same
+output: the fine pass reseeds / nudges, so plans differ and planning takes
+~4-5× longer (guardrail_env detour 16 → 73 ms, mavis free → initial 85 →
+120 ms) — and the OLD plans for both requests were held for good by the real
+gate (detour: `arm0_left_finger` / `pedestal` 7.14 mm from tick 84; mavis:
+`grip_right_finger` / `view_link3` 7.99 mm from tick 326) while the new ones
+replay with 0 holds at 100 % and 10 % (runtime `tests/test_plan_passes_gate.py`).
+Then time-parameterization with `vel_limits`/`acc_limits`.
+
+**Fuzz evidence (2026-09-09; runtime `tests/test_return_fuzz_mavis_v2.py`).**
+The whole two-phase return / reset flow (04-runtime §10.5) replayed headless on
+the mavis_v2 twin from random two-arm starts with the closest cross-arm pair at
+1-20 mm (inside the shell, inside the band, just outside) plus normal ones at
+20-60 mm, toward the seeded default posture (joints phase) and the folded
+keyframe with the carriages at the rail ends (joints + carriage phases), every
+tick through the real `SafetyGate` at the hardware caps: **0 gate holds** in
+every sweep once the fixes above and the kinematic pair ownership of §8 were in
+(the 200-start sweep had found the Perception Arm's camera mount against the
+Manipulation Arm's static rail base holding the Manipulation Arm for good — a
+gate-attribution bug, not a planner one); the remaining failures are honest
+`timeout`s (a 2.7 rad base rotation of the Manipulation Arm past the Perception
+Arm from j1 ≈ -336°, or a genuine sequential deadlock — each arm's path blocked
+by the other's start, which the one-arm-at-a-time strategy cannot solve) and
+`goal_in_collision` (the default posture against the other arm's start in both
+orderings). The tables live in the phase-13 notes; `MAVIS_FUZZ_N=200` for the
+long sweep. Open: the sequential planner's capacity on interlocked starts, and
+the joint-space profile's 2π branch (a profile stored on the far branch of a
+±2π joint asks for a full turn — the fuzz writes its keyframe goal on the
+branch nearest the start).
 
 **Waypoint execution contract** (runtime side, binding): waypoints are
 sparse; runtime interpolates them into 100 Hz setpoints streamed through the
 **same** servo path and **same twin gate** as teleop (overview §6 — planner
-trajectories are not exempt). Plans execute arm-by-arm in the planned
-sequential order. Goal configs for pose-level requests come from
+trajectories are not exempt). Plans execute arm-by-arm in **`PlanResult.arm_order`**
+— the order `_plan_ordered` actually validated (arm k with arms `<k` frozen at
+their goals and arms `>k` at their starts), which since 2026-09-08 the planner
+reports explicitly and the runtime's `SessionManager._execute_arms` honours by
+submitting ONE arm per `execute_plan` and waiting for its arrival before the
+next (the `waypoints` dict's insertion order equals it, but `arm_order` is the
+contract; 04-runtime §10.5). That day a two-arm return executed as one plan
+moved both arms simultaneously and the gate blocked at 5.2 mm — the paths are
+collision-free in this order and in no other. Goal configs for pose-level requests come from
 `solve_to_convergence` (§9). Failed plan ⇒ `PlanResult(ok=False,
 failure=..., failing_pair=...)`: runtime refuses the profile load and
 reports to the UI — never unplanned motion, never xArm native gohome.
@@ -952,7 +1097,7 @@ No hardware anywhere; the only split is CPU-only vs EGL-capable. Markers:
 | SimWorkcell (§6) | command_joints reaches target (servo settle < 0.5 s); rail clamp [0, 0.65]; snapshot immutability; pacing: 200 ticks within ±2% wall time (perf); fault injection latches & recovers via stop/start |
 | Twin (§8) | inflation thresholds: contact appears at δ, not 1.1δ (two-arm approach sweep); link_base↔link1 excluded; grasp whitelist; `check` restores measured qpos; clearance vs analytic sphere distance; audit sweep (no false alarms at δ=0.025) |
 | IK (§9) | circle-tracking servo 500 ticks: pos err < 0.5 mm, no limit violations; rail-preference (lateral target moves joints, rail < 1 cm); unreachable target sets `diverged` within 10 ticks; ECAA weight slews & floors; flat-tolerance frees roll; row cap respected (perf: p99 < 1 ms with 3 arms + env) |
-| Planner (§10) | two-arm position swap on `dual_rail_tabletop`: sequential plan succeeds within ≤2 orderings, edges valid at `max_step_rad` resolution; impossible variant returns `goal_in_collision` with the correct pair; start-inside-inflation hysteresis escapes; waypoints all pass `check_config` |
+| Planner (§10) | two-arm position swap on `dual_rail_tabletop`: sequential plan succeeds within ≤2 orderings, edges valid at `max_step_rad` resolution; impossible variant returns `goal_in_collision` with the correct pair; start inside the inflation shell / the gate's band escapes tick by tick at the requested speed (the other arm's pinch and the gripper's own knuckle pairs are constants; goal judged first; the executor's equal ticks); waypoints all pass `check_config` |
 | Guardrail (§11) | all six scenarios (incl. `mavis_v2_rail_sweep_mic`) × {gate-only main, IK-on main, IK-on graze}, full A1–A5 contract (11-safety §5.1) — this IS the safety CI; the two mavis scenarios carry `start_q = MAVIS_SWEEP_START_Q` (the pre-2026-09-04 ready pose), the others none |
 | Semantics (§13) | `test_mujoco_semantics.py` suite |
 | Rendering (§7) | egl: 640×480 frame non-black & correct shape; stream fps pacing; `show_inflation` toggles group-3 pixels; renderer crash isolates stream |

@@ -230,8 +230,13 @@ holding the twist, and steps the control loop tick-by-tick. **Ground truth** = t
   `mj_geomDistance` recomputation (|Δ| ≤ 1e-6 m).
 - **A3 Hold is a hold**: while blocked with twist still applied,
   `max |q_sent(t) − q_sent(t_block)| ≤ 1e-4` (rad; rail slot m) per driven arm.
-- **A4 Escape works**: after twist reversal, `kind="cleared"` within 100 ticks, min
-  pair clearance non-decreasing (tol 1e-4 m), motion resumes.
+- **A4 Escape works**: after twist reversal, `kind="cleared"` within 100 ticks; on every
+  ACCEPTED escape tick each pair the gate constrained (contact or hysteresis band) is at
+  least as open at `q_cmd` as at `q_meas` (the step-6 rule as a black box); the measured
+  clearance of the blocked pairs never sags more than 1 mm below its value at the reversal
+  (physical compliance: the sim carriage yields ~0.5 mm under the arm swing — until
+  2026-09-09 the check was "non-decreasing, tol 1e-4 m", which only held because the arm
+  froze inside the band, §7.1); motion resumes.
 - **A5 Layer independence**: each scenario runs three times — gate-only main
   (`--no-ik-avoidance`: L1 alone must satisfy A1–A4), IK-on main, and the IK-on
   graze variant, which must produce **0 blocked events** (L2 glides).
@@ -347,7 +352,9 @@ class SafetyGate:                  # state: _last_safe per arm, _blocked, _block
     inflated-surface contact; unblock needs +hysteresis_m clearance — no chattering).
 4. no violations → q_out = q_cmd; _last_safe = q_cmd; if _blocked: emit "cleared";
    _blocked = False. DONE.
-5. blocked: offending arms = arms owning ≥1 violating geom. Non-offending arms keep
+5. blocked: offending arms = arms owning ≥1 violating geom — "owning" = the arm whose
+   JOINTS move the geom's body (twin `_arms_of_pair`, kinematic since 2026-09-09; the
+   static rail base of an arm belongs to no arm, like the table). Non-offending arms keep
    q_cmd (step 2 checked all arms jointly — proven safe against the commanded world).
 6. escape test (T8): accept an offending arm's q_cmd iff it strictly opens EVERY
    violating pair p: mj_geomDistance(p|q_cmd) ≥ mj_geomDistance(p|q_meas) + 1e-5, and
@@ -355,6 +362,30 @@ class SafetyGate:                  # state: _last_safe per arm, _blocked, _block
 7. else q_out[arm] = _last_safe[arm] (hold). Emit "blocked" (pairs, dists, source) on
    the rising edge or when the offending pair set changes.
 ```
+
+Step 6's "creates no new violating pair" judges *violating at `q_meas`* with the **same
+step-3 window as the command** — while `_blocked` the hysteresis band counts. Until
+2026-09-09 both gate implementations used the bare δ there, so a pair the T8 escape had
+already opened INTO the band (measured 8.03 mm, commanded 8.16 mm) read as *new* and step 7
+held the arm inside the band for good; teleop never noticed because `dq_max` 0.04 rad jumps
+the 2 mm band in one tick, a twin plan at 10 / 50 % speed cannot (runtime
+`tests/test_plan_passes_gate.py`, `tests/test_gate.py`). A closing command inside the band is
+still held (step 6 clause 1), and the band still has to be cleared for `cleared`. Scope of
+that change (review, same day): ONLY a pair already in `_block_pairs` gains passage through
+[δ, δ + hysteresis) — a contact pair entering from the band is still held (`opens` needs
+`d_cmd > d_meas ≥ δ`), a band pair that closes is still held; it lets an escape the gate
+has already accepted keep opening. It is a gate-rule change and needs the operator's
+sign-off before the next live session.
+
+Step 5's ownership was the `<arm_id>_` name prefix until 2026-09-09. The return fuzz
+(runtime `tests/test_return_fuzz_mavis_v2.py`, seeds 20261013 / 20261014) found the
+Perception Arm's camera mount 3.7 / 6.7 mm from `grip_rail_base` — the Manipulation Arm's
+static rail — read as a pair of BOTH arms: step 6 then demanded that the Manipulation Arm
+open a distance none of its joints can change, so every command of that arm was held,
+teleop included, and a planned return was held from its first moving tick although the
+planner (rightly) treated the pair as a constant for it. Ownership is kinematic now: the
+pair is the Perception Arm's alone; the Manipulation Arm moves (step 2 still checks it
+against the commanded world) and the Perception Arm has to open it.
 
 Clamp/hold policy is **hold-last-safe**, not segment bisection: bisection costs up to
 3 extra collision passes (~2.3 ms worst case — over the 2 ms/tick budget), and L2 makes
@@ -440,8 +471,10 @@ class PlanRequest(BaseModel):
 class PlanResult(BaseModel):
     ok: bool
     waypoints: dict[str, list[list[float]]]  # per-arm joint waypoints (post-shortcut)
-    failure: Literal["goal_in_collision", "start_in_collision", "timeout"] | None = None
+    failure: Literal["goal_in_collision", "start_in_collision", "no_escape", "timeout"] | None = None
     failing_pair: tuple[str, str] | None = None
+    arm_order: list[str] = []  # 2026-09-08: the order the sequential planner validated —
+                               #   the ONLY order the arms may be executed in; [] on failure
 ```
 
 - **Per-arm sequential** over the composite twin model: plan arm k with arms `<k` frozen
@@ -451,20 +484,88 @@ class PlanResult(BaseModel):
 - Validity checker: candidate q → **planner-private `MjData`**, `mj_kinematics` +
   `mj_collision`, violations per §7 step-3 semantics on inflated geoms. Measured 4k–60k
   checks/s/core ⇒ the 5 s budget is generous.
-- **Start-state hysteresis** (sim `planner.py`; 03-sim §10 item 3): pairs already violating
-  at `q_start` — the arm parked inside the inflation shell, e.g. held there by the gate —
-  are whitelisted until they first exceed `inflation + 5 mm` (`REARM_MARGIN_M`), then
-  re-armed for the rest of the plan; a pair at or below 0 mm (real penetration) is
-  `start_in_collision` instead. Without it a clamped arm could never plan its way out.
-  The phase-09d position-agnostic path check (`RailSweepChecker.check_path`, §4 item 7)
-  applies the same rule per rail position.
+- **Pinched start ⇒ escape phase, mirroring the gate** (sim `planner.py`; 03-sim §10 item
+  3; 2026-09-09, reworked by the same-day review). The planned arm's MOVABLE pairs closer
+  than `δ + hysteresis_m` at `q_start` — inside the inflation shell (held there by the
+  gate) or inside the gate's hysteresis band (a blocked gate keeps such a pair in
+  `_block_pairs` and step 6 demands that it opens too; a two-pair block followed by a
+  partial retreat leaves exactly this, and a plan that merely tolerated the band pair was
+  held from its first moving tick at 10 %) — are first walked OUT by a greedy local search
+  that obeys exactly the §7.1 step-6 rule the gate will apply, **tick by tick at the speed
+  the plan will run at**: the executor walks a segment in `ceil(ratio)` equal ticks
+  (`ratio` = the segment in the servo caps × `PlanRequest.speed_scale`; the planner
+  duplicates the caps, runtime `tests/test_plan_passes_gate.py` pins them), and on every
+  such tick every pinched pair opens by ≥ `ESCAPE_RATE_MARGIN` (1.25) ×
+  `PLANNER_ESCAPE_EPS_M` (= the gate's `ESCAPE_EPS_M`, 1e-5 m, duplicated because sim may
+  not import the runtime), no other movable pair comes within `δ + 2 mm`, a pair already
+  re-armed never falls back below `δ + 5 mm`, joint limits hold. A slower session has
+  smaller ticks and less opening per tick, so a plan judged at speed s is valid at any
+  speed ≥ s: the runtime passes the session's `speed_scale` (the rail-homing job its 10 %),
+  the core default is 0.1, the slowest speed offered. Each step tries the finite-difference
+  opening gradient of the tightest pair, the joint ascent of all pinched pairs, the
+  coordinate axes and 24 random directions at half the edge resolution, filtered at the
+  coarse resolution for the same rate, ranked by the largest smallest opening, and keeps
+  the best one whose tick-level re-walk passes; the phase ends when every pinched pair is
+  past `δ + REARM_MARGIN_M` (5 mm — above the gate's `δ + hysteresis_m` band, so the gate
+  has `cleared` by then), and the normal RRT-Connect plans the rest with the plain "every
+  movable pair ≥ δ" predicate. The goal is judged BEFORE the escape: a goal inside the
+  shell is `goal_in_collision`, honestly. **Pairs the arm cannot move are constants**: the
+  other arm's pairs (its intra-arm pinch, it against the table — the gate never holds an
+  arm outside the offending set, step 5) and pairs whose two bodies hang under the same
+  set of this arm's joints (the gripper's own knuckles) are never escaped, never this arm's
+  `start_in_collision`, never a block for its RRT; an arm whose goal is its start is left
+  alone. A pair at or below 0 mm (real penetration) is `start_in_collision`; a start no
+  candidate step can open at the required rate is the failure kind **`no_escape`** (core
+  `PlanResult.failure`, `failing_pair` = the tightest pair; ≤ 400 steps) — on the review's
+  40-pinch sweep 39 planned and replayed with 0 holds at 100 / 50 / 10 %, the one refusal
+  is a start the gate holds for good at 10 % when the rate is ignored. *Incident,
+  2026-09-09 01:14*: the previous rule WHITELISTED the pinched pairs (ignored until they
+  first exceeded `δ + 5 mm`, no monotonicity, the goal excused too), so `goto_profile`
+  planned `grip` as ONE straight segment that first CLOSED `grip_right_finger` /
+  `view_link3` from 2.1 to 1.1 mm; the gate held the first step and `plan_gate_hold_s`
+  cancelled the plan. The gate is the safety authority; the planner produces paths the
+  gate will pass. The phase-09d position-agnostic path check (`RailSweepChecker.check_path`,
+  §4 item 7) still applies its own per-rail-position hysteresis rule (tolerance 2 mm, never
+  closing) — not yet re-aligned with the escape.
+- **Executor ticks** (runtime `control/joint_panel.py::PlanExecutor`, same review): a
+  segment is walked in `ceil(ratio)` EQUAL ticks instead of full ticks plus a remainder.
+  The remainder tick could be arbitrarily small (measured 3-13 % of a tick at 10 %, opening
+  4-8 um < the gate's 10 um) and was held; the executor had already advanced its index, so
+  the next tick headed for the following waypoint from the held point — an unvalidated
+  bend. Same tick count, same straight segments, no tick shorter than half a full one.
+- **Final verification at the gate's resolution** (same day). RRT edges are sampled at
+  `max_step_rad` (0.05 rad) but the gate checks EVERY executor tick, and between two
+  0.05 rad samples an arm point can travel centimetres: the first gate replay of a plan
+  found `grip_left_finger` / `view_link4` at 7.92 mm between two validated samples — a
+  permanent hold. The finished path is re-sampled so that no arm point moves more than
+  `FINE_STEP_M` = 4 mm (per-joint lever bound `1.20 1.20 1.00 0.75 0.44 0.30 0.10` m/rad, the
+  driver's `ServoLimits.lever_arm_m`; rail 1:1 — the executor's Cartesian cap per tick) and
+  every sample must clear `δ + FINE_MARGIN_M` (2 mm) on a planner-private model copy
+  inflated by that much; a distance is 1-Lipschitz in the displacement, so the ticks between
+  samples stay ≥ δ. Pairs already tighter than that at the path's endpoints (where the arm
+  rests) only have to stay ≥ δ. A grazing sample is nudged off its pair along the opening
+  gradient (inserted as a waypoint); failing that the RRT is re-run with the next seed,
+  then `timeout`.
 - Edges interpolated at `max_step_rad` per joint (rail 0.01 m); post-process: 50 random
   shortcut passes, then time-parameterization with per-joint velocity/accel caps
   (defaults 0.6 rad/s, 2 rad/s²; rail 0.1 m/s).
 - **Execution**: the ControlLoop planner source streams waypoints at 100 Hz — joint-space
   interpolation → slew-limited `command_joints`, rail as sparse absolute mm targets —
-  through the §4 gate every tick like any other source. A mid-execution gate block (e.g.
-  a human jogs the other arm) pauses, resumes when cleared; > 5 s blocked aborts with a UI error.
+  through the §4 gate every tick like any other source. **Executed sequentially since
+  2026-09-08**: the SessionManager submits ONE arm's waypoints per `execute_plan` in
+  `PlanResult.arm_order` and the next arm only once the previous one has MEASURABLY arrived
+  (its driver-reported q within 1e-3 rad / 2 mm of its last waypoint — the executor retiring
+  the waypoints only says the command got there, and a carriage trails its targets at the
+  track's speed; 04-runtime §10.5 "Sequential execution") — the per-arm plans are collision-free only
+  with the earlier arms AT their goals and the later arms AT their starts. Incident,
+  2026-09-08 23:16:52: a two-arm `reset_to_initial` executed as one plan moved both arms
+  simultaneously through never-validated combinations and the gate blocked at 5.2 mm
+  (`grip_right_finger` / `view_link3`) for the whole 30 s budget. A mid-execution gate block
+  (e.g. a human jogs the other arm) pauses, resumes when cleared; a hold longer than
+  `hardware_session.plan_gate_hold_s` (default 3 s) with no waypoint progress aborts the plan
+  from the control thread with the blocking pair and distance in `plan_cancel_reason`
+  (`"held by the safety gate: <a> / <b> at <mm> mm"`; the UI sees `plan_status: cancelled`
+  and the manager's "held by the safety gate (<pair>)" text) — the arms hold where they are.
 - Planning runs in a worker thread; session state shows `loading_profile` and rejects
   teleop for the planned arms. Failure UX: toast with failure kind + failing pair;
   arms stay held; options: retry / other profile / jog-clear. `start_in_collision`
@@ -488,6 +589,36 @@ rail held-keys are covered identically (always sent; server drops them for rail-
 arms). After a latch, held keys are ignored until the client sends an empty held-key set
 — a reconnecting/un-frozen tab cannot resume motion with keys still down (T4/T5). 25 Hz
 heartbeats mean `timeout_s=0.2` tolerates 4 lost messages.
+
+Two consequences that bit us live on 2026-09-07 (05-ui §5.2):
+
+- **`joint_target mode:"jog"` is scaled by this watchdog too**, even though it is a
+  destination command, not a held key: `ControlLoop._jog_step` returns `None` at
+  `scale <= 0.0`, so a latched deadman silently drops every jog tick — no nack, no
+  fault, `gate=ok`. The 1 Hz `loop:` health line is the only signal
+  (`watchdog=LATCHED` next to `src=joint_jog`). In the 2026-09-07 log the
+  `watchdog=LATCHED` edge carried the same timestamp as the health line where `src`
+  flipped from `teleop` to `joint_jog` — the click that used the panel; correlate
+  those two lines first when the panel goes dead. Device-held codes are unaffected
+  (`HeldSources.scale_for` takes the per-code max), so Vive teleop keeps working while
+  the Joint panel looks dead. **The UI must therefore heartbeat for the socket's whole
+  life, not only while capture is armed.** Runtime side of the fix: the latch edge
+  calls `JogState.clear_all()`, so a pending jog destination is dropped and no stale
+  target resumes when the browser returns (04-runtime §7).
+- **`_last_rx is None` returns 1.0**: a client that has never sent a `KeysMsg` gets no
+  deadman at all. That grace exists so headless tests and a keyboard-less operator can
+  move at all; it means the deadman's coverage begins at the client's first message,
+  which — with a socket-scoped heartbeat — is the post-`hello` empty set.
+
+**Process stall vs silent browser (2026-09-07, phase-13).** A control-loop tick
+interval longer than the deadman timeout is treated as a PROCESS STALL (the GIL
+was held — measured 118–330 ms by the video encoder's open / close): that tick
+holds every arm, and if the browser's last `KeysMsg` was fresh when the stall
+began the `InputWatchdog` is credited once (`on_process_stall(now)`), so a
+frozen process is not misread as a silent browser. A browser that really went
+silent is still caught one timeout later, during which nothing moved. The
+interruptible return-to-start plan cancels on the PRESENCE of a movement code
+regardless of the watchdog scale (04-runtime §10.5).
 
 ### 10.2 Other watchdogs
 

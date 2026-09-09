@@ -30,16 +30,22 @@ Before you start — **read this first**:
    dispatcher, `install --python/--user`), runtime `f7e9868`, sim `5c58840`, ui `3647a03`.
    If core lags runtime, the S4 render fails validation; if ui lags core, `gen:check` fails.
 2. Real-arm sessions landed with **phase-09c / 09d** (2026-09-05; contracts
-   `docs/prompts/phase-09c-hardware-session.md` + `phase-09d-rail-homing-planning.md`) but have
-   **never run on the real boxes yet** (fakes only): `POST /api/session kind=hardware` is
-   teleop-only, ALWAYS brings up both arms (phase-09d: `SessionSpec.arms` must be every
-   configured arm — no per-arm switch on the Hardware tab) at `speed_scale` (default 10 %),
-   and is refused (409 `rail not homed`) while either linear track is unhomed — the operator
-   homes it first with the arm card's **Home rail**, the ONE maintenance action that moves
+   `docs/prompts/phase-09c-hardware-session.md` + `phase-09d-rail-homing-planning.md`) and
+   **first ran on the real boxes on 2026-09-05** (`docs/design/02-hardware.md` §16: three
+   false alarms of our own, fixed the same day; fakes only until then): `POST /api/session
+   kind=hardware` is teleop-only, ALWAYS brings up both arms (phase-09d: `SessionSpec.arms`
+   must be every configured arm — no per-arm switch on the Hardware tab) at `speed_scale`
+   (Hardware tab 10 / 50 / 100 %, default 100 % since 2026-09-08 evening — the operator's call,
+   `hardware_session.default_speed_scale: 1.0`, uncommitted in the runtime/ui working trees; 50 %
+   from 2026-09-07; the rendered lab config keeps whatever value it was rendered with until
+   re-rendered (S4) AND the runtime restarted; was 10 / 30 / 100 %,
+   default 10 %), and is refused (409 `rail not homed`) while either linear track is unhomed —
+   the operator homes it first with the arm card's **Home rail**, the ONE maintenance action that moves
    hardware (twin-gated; since phase-09d it may first drive the arm along a twin-planned,
    rail-position-agnostic path to a folded posture at 10 % and then hold it there, S7). The
-   first live run follows the 09c contract's 真机验收步骤 (as amended by its 09d header note)
-   with the user present and the e-stop in hand (S7).
+   first live run followed the 09c contract's 真机验收步骤 (as amended by its 09d header note)
+   with the user present and the e-stop in hand — still the procedure after every runtime
+   change (S7).
    Also running against the real cell: arm reachability probes, the read-only controller
    monitor + twin overlays, the RØDE microphone preview, Vive tracker teleop + calibration
    wizard, the two RealSense colour previews (mapped to the arms by USB serial, S4), and
@@ -76,6 +82,7 @@ Before you start — **read this first**:
 | Workspace checkout (5 submodules, 4 venvs, uv interpreters in `.uv/python`, UI dist) | `/opt/apollo-mavis-v2` | `mavis:mavis`, setgid 2775, developers in group `mavis` may write |
 | Profiles, datasets, checkpoints, tracker calibration, libsurvive config, pysurvive wheel staging | `/var/lib/apollo-mavis-v2/{profiles,datasets,checkpoints,calibration,libsurvive,wheels}` | `mavis:mavis`, 2775 + default ACL |
 | Lab runtime config (rendered by S4 — no sudo, re-rendered by mavis alone in S9) | `/var/lib/apollo-mavis-v2/mavis_v2_lab.yaml` | `mavis:mavis`, 664 |
+| **Demonstrations and Online DAgger sessions (2026-09-08, operator decision — outside `var/` and outside `/var/lib`; the morning's `~/data/pro_dagger` name never shipped)**: `datasets.namespaces` in the runtime config maps `bc_demo/<name>` → `~/data/bc_demo/<name>` and `online_dagger/<session>` → `~/data/online_dagger/<session>/{session.json,rollouts/}` (the trainer may add its own files there, e.g. `trainer/` — the runtime never reads them); `~` is the HOME of the account that runs the runtime, so under the service it is `/home/mavis/data/...`. Only the generic `datasets_root` (legacy `apollo/...` data) stays under `/var/lib/apollo-mavis-v2/datasets`. `GET /api/datasets/layout` prints the effective roots | `~/data/bc_demo`, `~/data/online_dagger` | the runtime account (`mavis`); created on first use (`mkdir -p`) |
 | netsetup system state | `/etc/apollo-mavis-v2/nic_map.json` (written by root) | root |
 | Service unit | `/home/mavis/.config/systemd/user/mavis-runtime.service` | mavis |
 | Logs | `journalctl --user -u mavis-runtime` (as mavis) **and** the runtime's own rotating `$DATA_ROOT/logs/runtime.log` (20 MB × 10; `logging:` block, `LOG_LEVEL` render knob, 2026-09-07); netsetup: `/var/log/mavis-netsetup.log` | `<ws>/var/logs/runtime.log` (rotating) + `runtime.stderr.log` (raw stderr: libsurvive / MuJoCo C prints) |
@@ -87,7 +94,11 @@ the NetworkManager profiles `mavis_manipulation_arm` / `mavis_viewpoint_arm`.
 
 Ports in use on this machine you must not collide with: 22 ssh, 8000 (gohttpserver),
 4000, 631 cups, 5939 TeamViewer, 21115-21119 RustDesk, 7001/12001/20804-5/25001 NoMachine.
-The stack uses 8765 (runtime), 5757 (trainer ZMQ), 5173 (Vite, developers only).
+The stack uses 8765 (runtime), 5757 (trainer ZMQ), 5173 (Vite, developers only) and — only
+when the lab render turns the dora external interface on (`DORA_BIND_HOST`, S4) — 6113 /
+53391 / 7447 (dora coordinator / daemon / zenoh, bound to the lab Wi-Fi interface, never
+`0.0.0.0`). The Online DAgger policy node (S8.5) is a separate process the policy repo starts;
+it attaches to 53391 and needs no port of its own.
 
 ---
 
@@ -111,7 +122,7 @@ account, not as root). It performs S1 and the system half of S5.
    Not needed: `python3-venv` (uv creates venvs itself), a system CUDA toolkit (the
    runtime venv ships CUDA 13 wheels), `pyrealsense2` (cameras are opened as v4l2/OpenCV).
 
-2. NVIDIA driver + EGL — must already be there (580.173.02 on this box):
+2. NVIDIA driver + EGL — must already be there (580.173.02 on this box, upgraded 2026-09-01):
 
    ```bash
    nvidia-smi --query-gpu=index,name,driver_version,pci.bus_id --format=csv
@@ -303,7 +314,11 @@ cameras' D435i colour `intrinsics` (2026-09-04), the phase-09b per-arm controlle
 driver writes them at every session connect, the Hardware tab's **Apply safety settings** writes
 them without a session), the phase-09c/09d `hardware_session` block (`armed: true` — the lab render is the ONLY config that
 arms the real drivers, `HARDWARE_ARMED=false` renders a monitor-only config; `default_speed_scale:
-0.1`, `rail_flip: false` — set `true` and re-render if the `*_align` overlay shows the twin's
+1.0` — the Hardware tab's speed picker is 10 / 50 / 100 %, default 100 %, since 2026-09-08 evening
+(operator's call; 0.5 = 50 % from 2026-09-07; uncommitted in the runtime/ui working trees, so the lab
+config rendered from the pushed pins keeps its older value until re-rendered AND the runtime
+restarted — the new default reaches the operator only then); `rail_flip: false` —
+set `true` and re-render if the `*_align` overlay shows the twin's
 carriage at the wrong end after the first **Home rail**; `home_rail_inflation_m: 0.025`,
 `home_rail_step_m: 0.005` — also the margin / step of the phase-09d pre-positioning path check;
 `bringup_timeout_s: 60`; there is NO `default_arms` any more — since phase-09d a hardware
@@ -318,10 +333,59 @@ place they lived; `/tmp` is wiped at reboot): `tracker.backend: libsurvive`,
 `yaw_deg: 116.3`, `control.rail_in_ik: false`. They are the script defaults
 (`TRACKER_BACKEND`, `LIGHTHOUSE_COUNT`, `TRACKER_YAW_DEG`, `RAIL_IN_IK`).
 
+### Render knobs added since 2026-09-07 (phase-12 dora, phase-13 datasets, phase-14 Online DAgger)
+
+The script always had these knobs; this section documents them (2026-09-08).
+
+- **`DORA_BIND_HOST`** (default empty = leave the repo's `dora.enabled: false` alone). When set
+  the render writes `dora.enabled: true`, `dora.bind_host: <value>` (an IPv4 **or an interface
+  name** — the lab uses `wlp38s0`, the "APOLLO Lab" Wi-Fi, DHCP 192.168.0.88/24 on 2026-09-07;
+  `tailscale0` also works) and, unless `KEEP_REPO_PATHS=1`, `dora.var_dir: $DATA_ROOT/dora`
+  (the auth token lands in `<var_dir>/.dora-token`, never in the YAML and never served by
+  REST). Never `0.0.0.0`, never the arm links 192.168.1.11 / 192.168.2.12 — the runtime refuses
+  them and reports `external.state: disabled`. Ports 6113 / 53391 / 7447 (14-dora §9/§12).
+  The validation line the script prints ends with `dora: enabled=… bind_host=… ports=…`.
+- **`DORA_MACHINES="gpubox,laptop"`** (optional, only with `DORA_BIND_HOST`): comma list of
+  remote consumer machine ids allowed to join; each gets the default `viewer` + `observer`
+  placeholders in `dora.machines`. The policy node runs ON the lab machine (placeholder
+  `policy`, machine `lab`) and is not listed here.
+- **Not templated: `datasets.namespaces`** (phase-14, 15-online-dagger D5). The render still
+  points the generic `datasets_root` at `$DATA_ROOT/datasets`, but the two mapped namespaces
+  keep the repo values `bc_demo: {root: ~/data/bc_demo}` and `online_dagger: {root:
+  ~/data/online_dagger, subdir: rollouts}` (2026-09-08 evening; the morning's `pro_dagger`
+  namespace never shipped) — `~` expands in the runtime process, i.e. `/home/mavis/data/...`
+  under the service, `/home/xiatao/data/...` for a developer instance. That is the operator's
+  2026-09-08 decision (data outside `var/`), not an omission; a `DATASETS_HOME` knob is an
+  open item. The UI shows the effective folders (Data Collection sheet preview, Welcome
+  DatasetsPanel groups, `GET /api/datasets/layout`).
+- Carried over unchanged from the repo (no knob): `datasets.default_namespace: bc_demo`,
+  the `online_dagger:` block (`skill_dir: null` = the skill shipped inside the runtime wheel,
+  `session_file_hz: 1.0`), `control.translate_frame: world` (the keyboard translate frame;
+  operator decision 2026-09-08 evening — `camera` / `base` stay selectable in the YAML).
+- Not a YAML line at all (2026-09-08 evening): `hardware_session.start_from_fault_grace_s`
+  (how long a hardware `start_from=profile` waits for a transient RECOVERING arm before
+  submitting its plan) has no key in `configs/mavis_v2.yaml`, `configs/sim.yaml` or the render
+  script — every rendered config inherits the pydantic default
+  `HardwareSessionConfig.start_from_fault_grace_s = 3.0` (runtime `config.py`). To change it,
+  add the key under `hardware_session:` in the rendered YAML by hand and restart. (An earlier
+  wording listed it among the "carried over" YAML lines; corrected 2026-09-08 late evening.)
+
+**Restart after every render or upgrade.** The runtime reads the config ONCE at start
+(`systemctl --user restart mavis-runtime`; the script's last line says so). The same holds
+for the developer's long-running instance: as of 2026-09-08 (late evening) the dev runtime
+(PID 2144376, started 18:00:02 with `var/mavis_v2_local.yaml`, rendered 17:59) runs the 18:00
+snapshot of the working trees — the 05:52 phase-12 / 13 merge plus the morning's PRO-DAgger
+v1.0 code; its config already carries `translate_frame: world`, but nothing from the 18:38
+Online DAgger v2.0 refactor, `start_from_fault_grace_s` or Go to profile is live until it is
+restarted. (An earlier note here named a 01:27 pre-merge process; corrected.)
+
 ```bash
 bash /opt/apollo-mavis-v2/scripts/deploy/render-lab-config.sh          # -> /var/lib/apollo-mavis-v2/mavis_v2_lab.yaml
 # stop-gap if the two camera tiles turn out crossed (see below): swap the serials without touching the repo
 CAMERA_SERIALS="grip_wrist=322143060792,view_wrist=349643062582" bash /opt/apollo-mavis-v2/scripts/deploy/render-lab-config.sh
+# turn the dora external interface on for policy nodes / LAN subscribers (phase-12; see the knobs above)
+DORA_BIND_HOST=wlp38s0 bash /opt/apollo-mavis-v2/scripts/deploy/render-lab-config.sh
+DORA_BIND_HOST=wlp38s0 DORA_MACHINES="gpubox" bash /opt/apollo-mavis-v2/scripts/deploy/render-lab-config.sh   # + one remote consumer machine
 ```
 
 Cameras (**verify on first deploy**): the runtime opens each RealSense's colour stream as a
@@ -329,10 +393,13 @@ plain v4l2 device that it finds by **USB serial** (core `CameraConfig.serial`, s
 no by-id path, no `pyrealsense2`, `fourcc: YUYV` because the RS colour node offers no MJPG),
 so `/dev/video*` numbering and plug order do not matter. Two D435i are attached, serials
 `322143060792` and `349643062582` (`lsusb -d 8086: -v 2>/dev/null | grep iSerial`, or
-`v4l2-ctl --list-devices`). The repo maps `349643062582 → grip_wrist` (Manipulation Arm) and
-`322143060792 → view_wrist` (Perception Arm) — **confirmed by the operator on 2026-09-04**
-from the Hardware-tab tiles. If a camera is ever replaced or moved: cover one lens and watch
-the Welcome page → Hardware tab tiles; if they are crossed, swap the two serials in
+`v4l2-ctl --list-devices`). `lsusb -d 8086:0b3a` lists both D435i units; on apollo-pc-1 they
+hang off different USB host controllers — 349643062582 on PCI 29:00.3 (USB bus 6),
+322143060792 on PCI 29:00.1 (USB bus 4). The repo maps `349643062582 → grip_wrist`
+(Manipulation Arm) and `322143060792 → view_wrist` (Perception Arm) — **confirmed by the
+operator on 2026-09-04** from the Hardware-tab tiles (the pre-2026-09-04 config had the two
+serials the other way round — a guess, corrected from those tiles). If a camera is ever
+replaced or moved: cover one lens and watch the Welcome page → Hardware tab tiles; if they are crossed, swap the two serials in
 `configs/mavis_v2.yaml` (developer: commit + push, then S9 re-render) or use the
 `CAMERA_SERIALS` stop-gap above until then (note that `rs-enumerate-devices` prints the
 ASIC serials, not these USB serials — read them with `lsusb -v`). The script exits with an
@@ -415,7 +482,10 @@ after S7.
    **mavis**, not `$SUDO_USER`, into `netdev`; the `--arm` list must be given in the same
    order each time, or `--check` reports the hook as "differs from the rendered script".
    Details: `apollo-mavis-v2-hardware/docs/netsetup-install.md`. Log:
-   `/var/log/mavis-netsetup.log`. The MAC/interface pinning of both profiles is done (the
+   `/var/log/mavis-netsetup.log`. The two profiles: `mavis_manipulation_arm` = 192.168.1.11/24
+   on `enp36s0f1` (MAC 08:BF:B8:89:4F:3B) → Manipulation Arm control box 192.168.1.201;
+   `mavis_viewpoint_arm` = 192.168.2.12/24 on `enp36s0f0` (MAC 08:BF:B8:89:4F:3A) → Perception
+   Arm control box 192.168.2.219. The MAC/interface pinning of both profiles is done (the
    earlier worry that `mavis_viewpoint_arm` could attach to the unused USB RTL8153
    `enx00e04c683d97` at boot is closed); the two `nmcli` lines above are the verification.
 
@@ -460,6 +530,9 @@ WorkingDirectory=/opt/apollo-mavis-v2/apollo-mavis-v2-runtime
 Environment=MUJOCO_GL=egl
 Environment=APOLLO_CONFIG=/var/lib/apollo-mavis-v2/mavis_v2_lab.yaml
 Environment=PYTHONUNBUFFERED=1
+Environment=OPENBLAS_NUM_THREADS=1
+Environment=OMP_NUM_THREADS=1
+Environment=MKL_NUM_THREADS=1
 ExecStart=/opt/apollo-mavis-v2/apollo-mavis-v2-runtime/.venv/bin/python -m apollo_mavis_v2_runtime --config /var/lib/apollo-mavis-v2/mavis_v2_lab.yaml
 Restart=on-failure
 RestartSec=5
@@ -497,7 +570,8 @@ systemctl --user restart mavis-runtime
 systemctl --user stop    mavis-runtime
 journalctl --user -u mavis-runtime -f          # stderr of the runtime (INFO)
 tail -f /var/lib/apollo-mavis-v2/logs/runtime.log   # the same lines, rotating file (logging.dir); `grep 'loop:'` = the
-                                                    #   1 Hz control-loop health line (04-runtime §14 "Logging")
+                                                    #   1 Hz control-loop health line (04-runtime §14 "Logging") — the
+                                                    #   first thing to read after a bad session
 journalctl --user -u mavis-runtime -b --no-pager | tail -100
 ```
 
@@ -542,7 +616,9 @@ AND the runtime's read-only hardware monitor has samples from that arm's control
 hardware session owns the boxes — a box that is off leaves its overlay `false` while the real
 camera stays `true`. On the Hardware tab expect five tiles (two cameras, two pale-yellow
 overlays with the note `rail not homed · twin assumes 0.65 m` until the tracks are homed, the
-microphone) and, today, a red `C19` chip on the Perception Arm card; `/ws/telemetry`
+microphone) and no red `C<code>` chip (until 2026-09-05 the Perception Arm card carried a red
+`C19`; fixed for good that day in xArm Studio → Settings → Externals → End Effector → **None**,
+both boxes read `error_code` 0 since); `/ws/telemetry`
 `hardware_monitor.arms[].status` should read `running` for both arms.
 
 Phase-09b (2026-09-04) — controller maintenance without a session. These are **configuration
@@ -557,7 +633,7 @@ chip enables **Clear errors**, a mismatch enables **Apply safety settings**. The
 
 ```bash
 M=127.0.0.1:8765/api/hardware/arms
-curl -s -X POST -H 'content-type: application/json' -d '{"op":"clear_errors"}' $M/view/maintenance | python3 -m json.tool | grep -E '"ok"|"detail"|"error_code"'   # ok true, after.error_code 0 (C19 returns until Studio -> Settings -> Externals -> End Effector -> None)
+curl -s -X POST -H 'content-type: application/json' -d '{"op":"clear_errors"}' $M/view/maintenance | python3 -m json.tool | grep -E '"ok"|"detail"|"error_code"'   # ok true, after.error_code 0 (the Perception Arm's C19 returned after every clear until Studio -> Settings -> Externals -> End Effector -> None, done 2026-09-05)
 for a in grip view; do curl -s -X POST -H 'content-type: application/json' -d '{"op":"apply_backstops"}' $M/$a/maintenance | python3 -m json.tool | grep -E '"ok"|"detail"|collision_sensitivity|tcp_load_kg|backstops_match'; done   # ok true; after: collision_sensitivity 3, tcp_load_kg 0.95 / 0.55, backstops_match true
 ```
 
@@ -566,7 +642,10 @@ the card's read-back line is neutral and both toasts appeared (`<Arm> · errors 
 `<Arm> · safety settings applied (sensitivity 3, payload 0.95 kg)`). The settings are volatile
 (lost at a controller reboot); the driver re-applies them at every session connect.
 
-Phase-09c / 09d (2026-09-05) — hardware sessions; **not yet exercised live** (fakes only). Each
+Phase-09c / 09d (2026-09-05) — hardware sessions; **first exercised live on 2026-09-05**
+(`docs/design/02-hardware.md` §16: three false alarms of our own — controller `state 2` is
+healthy, servo-mode entry is not instantaneous, `clean_error` 1/2/9 is a status echo — fixed the
+same day; fakes only until then). Each
 Hardware-tab arm card shows the track read-back: the amber pill **`rail not homed`** plus a
 **Home rail** button while a track is present but unhomed (both lab tracks after every
 power-on: registers `on_zero 0 / is_enabled 0`), `rail 0.000 m` once homed and enabled.
@@ -595,21 +674,24 @@ moves (≤ 45 s) the arm reads `stale` with `maintenance_busy: true` (a job: `pa
 refused while either arm's track is unhomed (the carriage position is unknown, so the gate
 twin cannot be posed; both arms are always in a hardware session since phase-09d). **First
 live run — follow the 真机验收步骤 in `docs/prompts/phase-09c-hardware-session.md` as amended
-by its phase-09d header note** (user present, physical e-stop in hand, workspace clear; the
-driver's connect write sequence has never run on a real box): (1) both arms `running`, err 0
-(clear the Perception Arm's `C19` first — a latched error 409s the session and would LATCH its
-driver; the permanent fix is in Studio, S11), overlays normal; (2) Manipulation Arm → **Home
+by its phase-09d header note** (user present, physical e-stop in hand, workspace clear; done
+once on 2026-09-05 — 02-hardware §16 — and still the procedure after every runtime change):
+(1) both arms `running`, err 0 (a latched error 409s the session and would LATCH its driver;
+the Perception Arm's `C19` was fixed for good in Studio on 2026-09-05, S11), overlays normal;
+(2) Manipulation Arm → **Home
 rail** → dry-run (clear, or `pre-positioning planned`: read the plan, expect the ARM to move
 first) → confirm → card reads `rail 0.000 m` → look at the `*_align` overlay **immediately**:
 twin rail / base must coincide with the real ones; if the carriage sits at the wrong end set
 `hardware_session.rail_flip: true` (re-render S4, restart) and look again; (3) Perception Arm
 the same (judge its base from the Manipulation Arm's overlay — its own camera looks outward);
-(4) **Speed 10 %** → Teleop (both arms join; there is no per-arm switch) → bring-up rows until
+(4) **Speed 10 %** (pick it — the tab pre-selects 100 % since 2026-09-08) → Teleop (both arms
+join; there is no per-arm switch) → bring-up rows until
 `running`, Cockpit shows `speed 10%`, both arms stay still for 10 s without the clutch; (5)
 clutch + a slow 5 cm hand motion → the Manipulation Arm (the active arm) follows in the same
 direction at ~1/10 speed, the Perception Arm holds, releasing the clutch stops it; (6) end the
 session → both arms are handed back stopped with the brakes engaged (`state 4`,
-`motion_enable(False)`), the monitor resumes, the cards are normal. Only then 30 %, switching
+`motion_enable(False)`), the monitor resumes, the cards are normal. Only then 50 % (the picker's
+30 % step became 50 % on 2026-09-07), switching
 the active arm, rail following. The same over REST:
 
 ```bash
@@ -617,7 +699,7 @@ M=127.0.0.1:8765/api/hardware/arms
 curl -s -X POST -H 'content-type: application/json' -d '{"op":"home_rail","dry_run":true}' $M/grip/maintenance | python3 -m json.tool | grep -E '"ok"|"detail"|"clear"|"needed"|"waypoints"|first_blocked|min_clearance'   # ok true + rail_sweep.clear true = safe to home with the joints untouched; pre_position.needed true + clear true = a pre-positioning motion is planned (phase-09d; waypoints, duration_s); nothing written
 curl -s -m 60 -X POST -H 'content-type: application/json' -d '{"op":"home_rail"}' $M/grip/maintenance | python3 -m json.tool | grep -E '"ok"|"status"|"job_id"|"detail"|rail_homed|rail_enabled|rail_pos_m'   # MOVES THE CARRIAGE (<= 45 s): ok true, status done, after.rail_homed / rail_enabled true, rail_pos_m 0.0 -- OR HTTP 202 status accepted + job_id (phase-09d: the posture blocks the sweep; the ARM MOVES FIRST along the planned path at 10 %, then the carriage -- keep clear of the whole cell)
 curl -s $M/grip/maintenance/last | python3 -m json.tool | grep -E '"ok"|"status"|"job_id"|"detail"'   # phase-09d: the job's FINAL result (status done, same job_id; ok false on failure); 404 until any home_rail ran. Progress meanwhile: /ws/telemetry hardware_monitor.arms[].maintenance.phase
-curl -s 127.0.0.1:8765/api/session      # 404 without a session; "state":"bringup" while POST /api/session runs, then "running" with "kind":"hardware", both arm ids in "arms" (phase-09d), "speed_scale":0.1
+curl -s 127.0.0.1:8765/api/session      # 404 without a session; "state":"bringup" while POST /api/session runs, then "running" with "kind":"hardware", both arm ids in "arms" (phase-09d), "speed_scale":0.1 for the acceptance run's Speed 10 % (the tab's default is 1.0 = 100 % since 2026-09-08)
 ```
 
 From a mavis shell additionally (**verify on first deploy**): `pactl list short sources | grep NT-USB`
@@ -647,6 +729,30 @@ journalctl --user -u mavis-runtime -f
 
 It starts by itself at boot (linger + `WantedBy=default.target`) and restarts on failure.
 After power-cycling the arms, `reachable` goes `unreachable → refused → open` over ~1-2 min.
+
+### S8.1b The workcell's initial condition (2026-09-08)
+
+The `R` key and the Cockpit's "End session" both walk the arms back to the **designated
+initial-condition profile** of the running session's workcell kind, and both are no-ops
+(with a reason in the UI) when none is designated. Seed the operator's default posture
+once per machine, as `mavis`, with the runtime STOPPED or at least with no session
+running:
+
+```bash
+cd /opt/apollo-mavis-v2/apollo-mavis-v2-runtime
+uv run python -m apollo_mavis_v2_runtime.profiles.seed_initial     --config /var/lib/apollo-mavis-v2/mavis_v2_lab.yaml --dry-run   # look first
+uv run python -m apollo_mavis_v2_runtime.profiles.seed_initial     --config /var/lib/apollo-mavis-v2/mavis_v2_lab.yaml             # then write
+```
+
+It writes one profile per workcell kind into `profiles_dir` and designates it (idempotent
+— re-running rewrites the same two files). The postures are the operator's 2026-09-08
+numbers: Manipulation Arm `[-180, -12, -20, 30, -5, 35, -8.9]°`, Perception Arm
+`[0, 0.8, 0, 28.9, 0, 28.2, 0]°`, carriages left unset so a return never commands a
+track onto its end stop. Prefer the Cockpit's "save current state as profile" + "use as
+initial condition" when you want a posture measured on the real cell, carriages included
+— the return then moves the carriages as a separate, separately gated second phase.
+Designating an initial condition also changes what a collect session's per-episode
+return-to-start aims at when no `start_from` profile is chosen (04-runtime §10.5).
 
 ### S8.2 Who owns what — exactly one owner per device
 
@@ -703,6 +809,65 @@ $OPS start mavis-runtime
 Heavy option: `sudo systemctl stop user@$U.service` stops the whole mavis manager (also its
 PulseAudio). The root NM dispatcher keeps matching the arm NICs regardless of which instance runs.
 
+### S8.5 Online DAgger trainer — the policy-node process (2026-09-08, phase-14; rewritten the same evening from the PRO-DAgger v1.0 wording)
+
+Online DAgger (15-online-dagger v2.0) trains in **another process that the policy repo owns**:
+the `mavis-policy-node` dora node (package `mavis_policy_node`, repo
+`apollo-mavis-v2-policy-node` — on the developer machine at
+`~/projects/apollo-mavis-v2-ws-p12/apollo-mavis-v2-policy-node`, no remote yet). The runtime
+is an algorithm-agnostic shell: it creates the session directory, runs rollouts, exposes
+take-over / hand-back, labels every frame novice / expert, relays the trainer's status and
+serves the instructions — it knows nothing about iterations, reference gradients or
+hyper-parameters (those live in the trainer's own config). Sim only for now: the launcher
+refuses `dagger` on the Hardware tab (D7) until the operator says go after a sim session.
+Nothing here is a systemd service — the policy repo's operator starts the node by hand on the
+lab machine (the runtime's `policy` placeholder is deployed on machine `lab`; a remote policy
+node is not supported in v1).
+
+Steps, as they appear in the Welcome page's Online DAgger sheet ("1 Connect a trainer"):
+
+```bash
+# 0) the runtime must run with dora ON (S4: DORA_BIND_HOST) — check, then read the connection facts
+curl -s http://127.0.0.1:8765/api/dora        # {"enabled": true, "state": "attached", "bind_host": ..., "daemon_port": 53391, "zenoh_connect": "tcp/<bind_host>:7447", ...}
+
+# 1) in the POLICY repo's checkout: install the skill for its coding harness (the one-liner the sheet shows, with a Copy button)
+curl -s http://<lab-host>:8765/api/online_dagger/skill.tgz | tar xz -C ~/.claude/skills/   # -> ~/.claude/skills/mavis-online-dagger-trainer/{SKILL.md,references/{contract.md,pro-dagger-example.md}}
+curl -s http://<lab-host>:8765/api/online_dagger/skill                                      # the same SKILL.md as text/markdown
+# port 8765 = the runtime; 8000 on this machine is gohttpserver, not us
+
+# 2) install the node with the trainer extras into the policy repo's venv, implement Policy + the OnlineDaggerTrainer hooks (SKILL.md)
+pip install "mavis-policy-node[pro_dagger,torch]"       # the `pro_dagger` extra is just pyarrow (episode-directory reader); + [video] for image policies; or pip install -e <checkout>[pro_dagger,torch]
+
+# 3) test without the cell, then run the node against the runtime's daemon
+mavis-policy-node --online-dagger my_pkg.trainer:make_trainer --trainer-config trainer.yaml --selftest online-dagger   # exit 0, prints idle -> preparing -> ready -> training -> ready (+ a version bump); no dora needed
+export DORA_ZENOH_CONNECT=tcp/<bind_host>:7447 DORA_ZENOH_MULTICAST=off DORA_ZENOH_LISTEN=tcp/127.0.0.1:0
+mavis-policy-node --loader entrypoint --entrypoint my_pkg.policy:make_policy \
+    --online-dagger my_pkg.trainer:make_trainer --trainer-config trainer.yaml --path ckpt/ --device cuda:0 --daemon-port 53391
+
+# the PRO-DAgger reference implementation that ships with the node (its config owns the offline anchor: offline_dataset is REQUIRED,
+# resolved under datasets_home ~/data; defaults freeze_offline_gref: true, replay_buffer: true, max_demos: 0)
+mavis-policy-node --loader entrypoint --entrypoint my_pkg.policy:make_policy \
+    --online-dagger mavis_policy_node.pro_dagger:make_trainer --trainer-config pro_dagger.yaml --daemon-port 53391
+
+# dry run with no model at all (the same fake the runtime's e2e uses; from the policy-node checkout)
+mavis-policy-node --loader fake --online-dagger fake --daemon-port 53391
+```
+
+With `--online-dagger` the node's `spec.capabilities` lists `online_dagger`; the sheet's
+trainer pill turns green and **Start Online DAgger** is enabled (otherwise `409 no Online
+DAgger trainer attached (the policy node does not report the online_dagger capability)`). The
+session then lives in `~/data/online_dagger/<session>/` (S0 table): the runtime writes
+`session.json` and records `rollouts/` (one directory per episode, `actor` column 0 novice /
+1 expert); the trainer's own artefacts go wherever it puts them (the skill suggests
+`<session>/trainer/`). New rollouts are refused until the trainer has reported `ready` once for
+this session (`wait_for_trainer_ready`) and while it reports `training`
+(`pause_while_training`); a discarded rollout leaves nothing on disk. The trainer must echo the
+announced `session_id` in every `trainer_status` it publishes — a status without it counts as
+alive only and keeps the session in `WAITING FOR TRAINER` (15-online-dagger §3). Never run two
+dora control planes on this host at once, never `pkill -f dora` (use `pgrep -x dora`), never
+`dora up/down/destroy` without `--coordinator-addr/--coordinator-port` (CLAUDE.md "Dora
+external interface").
+
 ---
 
 ## S9. Upgrade
@@ -746,6 +911,16 @@ and bumping the pointers in the ws (intro item 1), then `UPDATE=1` here — afte
 Keep `--locked`: if it fails, the developer forgot to commit `uv.lock`. A pysurvive/Python bump needs a new wheel (S3). If `configs/mavis_v2.yaml`
 gained keys, re-rendering picks them up; if the wheel or dist path moved, re-render too.
 
+State on 2026-09-08: phase-12 (dora), phase-13 (episode-directory datasets, keyboard, return
+to start), the 2026-09-08 follow-ups and phase-14 (Online DAgger) are implemented in the
+developer's five working trees but **uncommitted and unpushed**, so an `UPDATE=1` run today
+still deploys the 2026-09-07 pins (no `dora:`, `datasets:`, `online_dagger:` keys, no
+`/api/online_dagger/*`, `translate_frame` absent). After they are pushed and pinned: `UPDATE=1`
+→ re-render (the new keys land; add `DORA_BIND_HOST=wlp38s0` if policy nodes should attach)
+→ restart. The UI is built with **npm** (`npm ci`; `package-lock.json` is the lockfile — pnpm's
+pre-run install fails on this machine, and `pnpm-lock.yaml` / `pnpm-workspace.yaml` are never
+committed).
+
 ---
 
 ## S10. Backup and restore
@@ -757,7 +932,7 @@ What matters (everything else is rebuildable from git + PyPI):
 | Lighthouse calibration (+ wizard backups) | `/var/lib/apollo-mavis-v2/libsurvive/config.json`, `config.json.bak-*` |
 | Tracker yaw + base-station install record | `/var/lib/apollo-mavis-v2/calibration/tracker_calibration.json`, `base_station-*.json` |
 | Teleop profiles | `/var/lib/apollo-mavis-v2/profiles/` |
-| Datasets (LeRobot v3), checkpoints | `/var/lib/apollo-mavis-v2/datasets/`, `/var/lib/apollo-mavis-v2/checkpoints/` (large) |
+| Datasets (episode directories since phase-13; `exports/lerobot_v3/` is a derived export), checkpoints | legacy / generic root `/var/lib/apollo-mavis-v2/datasets/`; **since 2026-09-08 the demonstrations live in `~mavis/data/bc_demo/<name>/` and Online DAgger sessions in `~mavis/data/online_dagger/<session>/` (`session.json`, `rollouts/`, plus whatever the trainer writes there)** — back those two trees up too; `/var/lib/apollo-mavis-v2/checkpoints/` (large) |
 | Lab config, netsetup state | `/var/lib/apollo-mavis-v2/mavis_v2_lab.yaml` (re-renderable, S4), `/etc/apollo-mavis-v2/nic_map.json` |
 | Developer-side originals | `/home/xiatao/.config/libsurvive/`, `/home/xiatao/apollo/{calib,calibration,profiles}` |
 
@@ -791,11 +966,11 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 | microphone `absent` / `error: pactl…` | mavis's PulseAudio does not see the card: (a) `XDG_RUNTIME_DIR` unset → service must run under the user manager (it does) — from shells export it; (b) mavis not in `audio` (`/dev/snd/* root:audio 0660`); (c) the developer's PA has a stream open on the RØDE (S8.3, set its card profile off); (d) `pactl info` fails → `systemctl --user status pulseaudio.socket pulseaudio.service` as mavis (**verify on first deploy**: module-udev-detect for a seatless user). Never open `hw:CARD=Mini` directly: EBUSY and it stalls every Pulse recorder. |
 | both wrist-cam tiles black after a reboot (`/api/cameras` `live: false`, log: `select() timeout` / `cannot open`) | cold-boot quirk of the D435i colour UVC stream: it delivers nothing until librealsense has opened the device once. The driver runs `rs-enumerate-devices -s` automatically before the first RealSense open — check `command -v rs-enumerate-devices` (librealsense2-utils, Intel apt repo) and the runtime log for `RealSense wake`; manual fallback: run `rs-enumerate-devices -s`, then restart the service. `rs-enumerate-devices` prints ASIC serials (243522071002 / 327122074467), not the USB serials in the config. |
 | sim previews black / `stream died` in the log, EGL errors | render node permission: mavis needs `render` (`/dev/dri/renderD* root:render 0660`); `/dev/nvidia*` are 0666. Check `MUJOCO_GL=egl` in `systemctl --user show mavis-runtime -p Environment`; `egl_device_id: 0` = PCI 41:00.0. An EGL failure kills only the preview streams, not the runtime. |
-| `POST /api/session` kind=hardware → 409 `<Arm>: rail not homed - home it from the Hardware tab (Home rail) before starting a session` | expected after every power-on (phase-09c): both tracks boot unhomed and a session needs the carriage position for the gate twin — and since phase-09d BOTH arms are always in a session, so both tracks must be homed. Card → **Home rail** → dry-run verdict → confirm (the carriage MOVES to the operator's left end, ≤ 45 s; or, phase-09d, the sheet says `pre-positioning planned` and the ARM MOVES FIRST along the planned path at 10 %, then the carriage — 202 job, watch the phases in the sheet) → `rail 0.000 m`; then check the `*_align` overlay before the session. Other 409s from the same matrix: `hardware sessions support teleop only` (use the Sim tab for collect / DAgger / inference), `hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing [...]` (a client posted a subset — the UI never does since phase-09d; both arms always join, so the Perception Arm must be homed / error-free too), `no monitor sample` (box off / monitor paused), `controller error N is latched - clear errors first` (**Clear errors**; the Perception Arm's `C19` blocks every session until fixed in Studio), `rail homing in progress` (wait for the carriage / the job), `control box … is unreachable`, `hardware bring-up failed: <Arm>: <stage> - …` (the drivers were torn down again, the monitor resumed — read the stage), `profile motion not collision-free: <failure> (<pair>) - …` (phase-09d: `start_from: profile:<id>` was planned on the gate twin inside bring-up and no collision-free path exists from the measured posture — use `keep_current` or another profile; the session was torn down). |
+| `POST /api/session` kind=hardware → 409 `<Arm>: rail not homed - home it from the Hardware tab (Home rail) before starting a session` | expected after every power-on (phase-09c): both tracks boot unhomed and a session needs the carriage position for the gate twin — and since phase-09d BOTH arms are always in a session, so both tracks must be homed. Card → **Home rail** → dry-run verdict → confirm (the carriage MOVES to the operator's left end, ≤ 45 s; or, phase-09d, the sheet says `pre-positioning planned` and the ARM MOVES FIRST along the planned path at 10 %, then the carriage — 202 job, watch the phases in the sheet) → `rail 0.000 m`; then check the `*_align` overlay before the session. Other 409s from the same matrix: `hardware sessions support teleop and data collection only (<mode> on hardware: not yet)` (collect is admitted on hardware since 2026-09-07 — 04-runtime §5 / §10.5; DAgger / Online DAgger and inference stay on the Sim tab, 15-online-dagger D7; the pre-2026-09-07 string was `hardware sessions support teleop only`), `hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing [...]` (a client posted a subset — the UI never does since phase-09d; both arms always join, so the Perception Arm must be homed / error-free too), `no monitor sample` (box off / monitor paused), `controller error N is latched - clear errors first` (**Clear errors**; the Perception Arm's `C19` blocked every session until it was fixed in Studio on 2026-09-05), `rail homing in progress` (wait for the carriage / the job), `control box … is unreachable`, `hardware bring-up failed: <Arm>: <stage> - …` (the drivers were torn down again, the monitor resumed — read the stage), `profile motion not collision-free: <failure> (<pair>) - …` (phase-09d: `start_from: profile:<id>` was planned on the gate twin inside bring-up and no collision-free path exists from the measured posture — use `keep_current` or another profile; the session was torn down). |
 | **Home rail** refused / failed (sheet shows a red verdict or an error, `ok: false`, 409) | `Sweep blocked — no safe pre-positioning path` (`status: refused`, phase-09d) = the twin sweep found a pair within 25 mm somewhere along the 0–0.65 m travel at the arm's current posture (`rail_sweep.first_blocked_m` / `first_blocked_pair`) AND no candidate posture (scene keyframe, `<arm>_home`) is reachable by a rail-position-agnostic path: fold the arm toward the factory-zero posture in xArm Studio (joints 2–7 near 0; or move the other arm) and re-open Home rail — nothing was written. (`Current posture blocks the sweep — pre-positioning planned` is NOT a refusal: confirm and the arm moves first; an older runtime shows `Sweep blocked — homing refused` instead.) 409 `clear errors first` → **Clear errors** first; 409 `end the session first` → end the hardware session; 409 `needs the digital twin` → the lab config lacks `digital_twin_scene` or the runtime venv lacks the sim extra. `ok: false … the arm moved since the sweep was checked` → keep the arm still between the dry run and the confirm. `ok: false … on_zero still 0` after the 30 s SDK wait → the track never reached its zero switch: check the track cable / `hardware_monitor.arms[].rail_*` registers, **Clear errors**, retry. UI `no answer after 60 s` → read the card's rail pill; the runtime may still have finished. While homing the arm reads `stale` + `maintenance_busy` and `POST /api/session` is 409. |
 | after a hardware session an arm is not back at `state 4` / brakes not engaged | `XArmDriver.disconnect()` ends with `set_mode(0)` → `set_state(4)` → `motion_enable(False)` (phase-09c D6) and the track keeps its homed flag. Check `hardware_monitor.arms[].state` once the monitor resumes; if the box still reports enabled, the disconnect writes failed (runtime log) — disable it from xArm Studio, never leave the cell enabled unattended. |
 | rail-homing job `failed` (phase-09d; the sheet marks a phase red, toast `<Arm> · rail homing job failed during <phase>: …`, `GET /api/hardware/arms/<id>/maintenance/last` → `ok: false`) | the runtime tore the job down (arm stopped + braked where it was, monitor resumed, `maintenance_busy` cleared — nothing half-connected). Read the detail: `arm moved since the sweep` (> 0.02 rad between dry run and confirm — keep it still), `session slipped in` / `rail homing in progress` (retry), a driver fault or the gate holding during `positioning` (30 s or 3× the estimate; the posture must land within 0.05 rad — an obstacle / the other arm is in the way: check the overlay, fold in Studio), `on_zero still 0` after `home_rail()` (track cable / registers, **Clear errors**, retry), register verification (`rail_homed` / `rail_enabled` not both true). The arm stays wherever the job stopped it — look before re-opening Home rail; the next dry run plans from that posture. |
-| red `C<code>` chip on a Hardware-tab arm card (Perception Arm `C19` today; `hardware_monitor.arms[].error_code != 0`) | a controller error is latched in the box. Click **Clear errors** on the card (phase-09b; `POST /api/hardware/arms/<id>/maintenance {"op":"clear_errors"}` = `clean_error` + `clean_warn` on the read-only monitor — no enable, no motion, no confirm dialog). Toast `<Arm> · errors cleared`; the chip clears with the next monitor sample. `C19` (End Effector Communication Error: the box expects an end effector on the tool RS-485 bus, the Perception Arm has none) returns until xArm Studio → Settings → Externals → End Effector → **None** (no SDK write for it). Inside a hardware session the card buttons are disabled (`Use the Cockpit`): use the Cockpit fault banner's **Clear errors & resume**, then re-grip the clutch. 409 `… needs the read-only monitor connected` = box off / monitor paused; `ok: false … re-latched right after clearing` = a persisting hardware fault (cable, e-stop). |
+| red `C<code>` chip on a Hardware-tab arm card (the Perception Arm's `C19` until 2026-09-05; `hardware_monitor.arms[].error_code != 0`) | a controller error is latched in the box. Click **Clear errors** on the card (phase-09b; `POST /api/hardware/arms/<id>/maintenance {"op":"clear_errors"}` = `clean_error` + `clean_warn` on the read-only monitor — no enable, no motion, no confirm dialog). Toast `<Arm> · errors cleared`; the chip clears with the next monitor sample. `C19` (End Effector Communication Error: the box expects an end effector on the tool RS-485 bus, the Perception Arm has none) returned after every clear until xArm Studio → Settings → Externals → End Effector → **None** (no SDK write for it) — done 2026-09-05, both boxes read `error_code` 0 since. Inside a hardware session the card buttons are disabled (`Use the Cockpit`): use the Cockpit fault banner's **Clear errors & resume**, then re-grip the clutch. 409 `… needs the read-only monitor connected` = box off / monitor paused; `ok: false … re-latched right after clearing` = a persisting hardware fault (cable, e-stop). |
 | amber `sensitivity 1 · payload 0.00 kg` with `differs from config` on an arm card (`hardware_monitor.arms[].backstops_match: false`) | the controller lost its volatile safety settings (reboot) or never had them written. Click **Apply safety settings** (`{"op":"apply_backstops"}`: payload, gravity, collision sensitivity, self-collision model, rebound off — configuration writes only, no motion) → toast `<Arm> · safety settings applied (sensitivity 3, payload 0.95 kg)` and `backstops_match: true`. The driver re-applies the same values at every session connect; the values live in the lab config per arm (`tcp_load_kg` / `tcp_load_cog_mm` / `collision_sensitivity`; PROVISIONAL payloads until the tools are weighed — change them in `configs/mavis_v2.yaml`, then S9 re-render). |
 | arms `unreachable` | boxes off (1-2 min after power-on), or the NIC lost its profile: `nmcli -t -f NAME,DEVICE con show --active \| grep mavis_`, `tail /var/log/mavis-netsetup.log` (dispatcher repairs on link events), `$PY -m apollo_mavis_v2_hardware.netsetup verify --arm grip=192.168.1.201 --arm view=192.168.2.219`, `… match --repair` (needs `netdev` + the `.pkla`, S5). Also `ip route get 192.168.2.219` must leave via `enp36s0f0`. |
 | landing-page warning "polkit grant missing / user not in netdev / dispatcher hook missing" | S5 not run for this venv/user; `sudo $PY -m apollo_mavis_v2_hardware.netsetup install --check --python $PY --user mavis --arm … --arm …` (same `--arm` order as the install). Without sudo the `.pkla` cannot be read (`/etc/polkit-1/localauthority` is root-only) and is reported as a `note:` only. |
@@ -808,6 +983,10 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 | `npm run gen:check` fails | UI generated types or `schemas/` out of date with core — a developer must run `npm run gen:sync && npm run gen:types` and commit; not an ops fix. |
 | UI shows the old title / stale bundle | `dist/` not rebuilt: `(cd apollo-mavis-v2-ui && npm run build)`, then `systemctl --user restart mavis-runtime` (StaticFiles is mounted at start). |
 | `survive-cli` (developer tooling) fails to load `libsurvive.so.0` | its RUNPATH points at the wiped `/tmp/libsurvive-build`; run with `LD_LIBRARY_PATH=~/opt/libsurvive/lib` and the `SURVIVE_PLUGINS` trick from `scripts/tracker/03-lh-consistency-check.sh`, or rebuild with `LIBSURVIVE_SRC=~/opt/src/libsurvive scripts/tracker/02-build-pysurvive.sh`. The runtime's wheel is unaffected. |
+| `GET /api/dora` → `enabled: false` / `external.state: disabled` although `DORA_BIND_HOST` was set | re-render and restart; `bind_host` was `0.0.0.0` or an arm-link address (the runtime refuses both), or the interface name is not up (`ip -4 addr show wlp38s0`). The token file is `<dora.var_dir>/.dora-token`. A dead remote daemon makes the coordinator answer 429 for ~50 s. |
+| Online DAgger sheet: Start disabled / `POST /api/session` 409 (phase-14) | read the reason: `no external policy attached (...)` = no node / no `spec` heartbeat within 3 s (start the policy node, S8.5); `no Online DAgger trainer attached (the policy node does not report the online_dagger capability)` = node started without `--online-dagger`; `Online DAgger session '<s>' already exists - resume it or pick another name` (the sheet offers Resume) / `... not found` (resume of a name that does not exist) / `session.json is unreadable - fix or remove it`; `dataset 'online_dagger/<s>' is being exported - retry in a moment`; `hardware sessions support teleop and data collection only` = Online DAgger is sim-only until the operator admits it (D7). A trainer whose OWN config needs an offline dataset (the PRO-DAgger reference: `offline_dataset` under `~/data/bc_demo/<name>`) reports that as `trainer_status.state: error` — record demonstrations first, the runtime does not check it. Once running: `episode_new` refused with `waiting for the trainer to report ready (...)` until the trainer's first `ready` for this session, `training in progress (...)` while it trains, `trainer error: ...`, `no Online DAgger trainer attached` when its status went stale — expected. |
+| Online DAgger session stuck in `WAITING FOR TRAINER` although the trainer says ready | the trainer's `trainer_status` does not echo the runtime's `session_id` (15-online-dagger §3; `null` counts as alive only) — fix the trainer (the shipped `OnlineDaggerLoop` / `FakeTrainer` do echo it); also check `spec` heartbeats are < 3 s apart (`telemetry.external.state`). |
+| Hardware session started from a profile but the arms are still at the measured posture; amber `SESSION — start_from refused: <Arm> faulted (controller state <n>, code C<k>) - use Clear errors & resume, then Go to profile` in the Cockpit | 2026-09-08 evening: a controller fault (or a RECOVERING arm whose inputs are still held) outlasted `hardware_session.start_from_fault_grace_s` (3.0 s) — nothing moved, the session is RUNNING. Do what the banner says: **Clear errors & resume**, then Cockpit → profile row → **Go to profile** (twin-planned, gated, any input cancels). Before the grace existed the one-tick RECOVERING right after enabling refused the plan silently (03:25 / 18:44 logs). |
 
 ---
 
@@ -863,3 +1042,11 @@ bash /opt/apollo-mavis-v2/scripts/deploy/healthcheck.sh     # 浏览器打开 ht
 `UPDATE=1 install-stack.sh` → `render-lab-config.sh` → 启动 → `healthcheck.sh`。备份：
 `/var/lib/apollo-mavis-v2/{libsurvive,calibration,profiles,mavis_v2_lab.yaml}` 与
 `/etc/apollo-mavis-v2/nic_map.json`（S10）。
+
+2026-09-08 起（phase-12 / 13 / 14，开发树中尚未提交、真机未跑）：示教数据在 `~/data/bc_demo/<name>`、Online DAgger session 在
+`~/data/online_dagger/<session>/{session.json,rollouts/}`（运行 runtime 的账号的 HOME，用户决定放在 `var/` 之外，渲染脚本不改它们，
+一并备份；trainer 自己的产物由它放在旁边，runtime 不读；上午的 `~/data/pro_dagger` 从未发布）；`DORA_BIND_HOST=wlp38s0` 渲染才打开
+dora 外部接口（端口 6113 / 53391 / 7447，绝不 `0.0.0.0`）；Online DAgger 的训练（任何 DAgger 变体，PRO-DAgger 只是 policy 仓的参考实现）
+在 policy 仓自己启动的 `mavis-policy-node --online-dagger <fake|pkg.mod:make_trainer> [--trainer-config …]` 进程里（S8.5），skill 用
+`curl -s http://<lab-host>:8765/api/online_dagger/skill.tgz | tar xz -C ~/.claude/skills/` 安装（→ `mavis-online-dagger-trainer/`）；
+改配置或升级后**必须重启** runtime。

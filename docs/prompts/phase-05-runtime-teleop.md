@@ -46,7 +46,9 @@ twist → 微分 IK → servo 的 teleop 管线、直接关节控制路径（`jo
 - **直接关节控制路径**（`control/joint_panel.py`，`ActionMsg{name:"joint_target",
   args:{arm_id, positions（完整 q 含 rail 槽）, mode:"jog"|"goto"}}`）：
   `jog` = 逐 tick 限斜率直趋目标（0.02 rad/tick、rail 2 mm/tick，关节空间不走 IK），
-  `max|Δq| > 0.15 rad`（goto_threshold）⇒ Ack `ok=false` 要求走 goto；`goto` = 组
+  `max|Δq| > 0.15 rad`（goto_threshold）⇒ Ack `ok=false` 要求走 goto
+  （**2026-09-07 修订：该门槛已取消** —— jog 目标是"终点"而非"步长"，任意 Δq 都接受并按
+  固定速率趋近，UI 面板也随之删掉了 "Go to" 按钮，见 05-ui §8.3 / 04-runtime §7）；`goto` = 组
   `PlanRequest` → `twin.plan` → waypoint 流经同一限斜率 gated 路径执行，Ack 立回
   `"accepted"`、完成/失败经 telemetry `session.plan_status`；plan 执行中按任何运动键
   或 takeover ⇒ 减速取消；录制中（`EpisodeStatus.state == "recording"`）一律 nack。
@@ -141,8 +143,9 @@ UI 本体（phase-06，本 phase 用 Python WS 客户端测试）；WebRTC / MuJ
       运动（AWAIT_EMPTY）；发一次空 held 后再按键 ⇒ 恢复。
 - [ ] 单 writer：第二个 `/ws/control` 连接收到 `role:"observer"`，其 keys/action 被
       忽略（`AckMsg{ok:false, detail:"observer"}`）。
-- [ ] joint panel e2e：`joint_target mode:"jog"`（小增量）逐 tick 限斜率到位
-      （0.02 rad/tick）；`max|Δq| > 0.15 rad` 的 jog 被 nack；同目标改 `mode:"goto"`
+- [ ] joint panel e2e：`joint_target mode:"jog"` 逐 tick 限斜率到位（0.02 rad/tick）；
+      **任意大小的增量都接受**（2026-09-07 起 `goto_threshold_rad` 已删除，原 `> 0.15 rad`
+      被 nack 的验收项作废）；`mode:"goto"`（profile `start_from` / 导轨归零路径仍用）
       ⇒ Ack `"accepted"`、经 twin planner 到位、`session.plan_status` 走完生命周期；
       plan 执行中按住 KeyW ⇒ plan 取消。
 - [ ] profile e2e：`save_profile` Ack 带 `profile_id`；无参 `set_initial_condition`

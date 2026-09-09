@@ -1,7 +1,28 @@
 # 12 — DAgger / Interactive Learning Protocol
 
-Status: v1.0 (2026-09-01). Cross-cutting spec, consistent with `00-overview.md`
-v0.3 (binding spine). Ground truth: `docs/research/dagger-online-training.md`,
+Status: **v1.3 (2026-09-08, evening — Online DAgger, the algorithm-agnostic shell of
+`15-online-dagger.md` v2.0, replaces the v1.2 PRO-DAgger wording; operator decision
+2026-09-08 evening: the runtime knows no DAgger algorithm; PRO-DAgger is a reference
+implementation in the policy repo). Sections touched: §4 the `actor` column's home
+(`episode.json.online_dagger`, the `online_dagger/<s>` rollouts dataset), §5 the update
+rule lives in the policy repo (PRO-DAgger / HG / DRIFT alike), §7 the generic trainer
+role (`trainer_status`, gate events, `takeover` / `handback` / `train_now`, pause
+semantics), §11 `DaggerStatus.online_dagger` + the `OnlineDaggerPanel` obligations, §12
+trainer stale / error rows, §14 cross-refs. History: v1.2 (2026-09-08 morning) described
+the PRO-DAgger v1.0 shell in the same places (`DaggerStatus.pro_dagger`, `ProDaggerPanel`,
+`events.iteration_complete`, `pro_dagger_train_now`); that text is superseded in-body and
+kept in `15-pro-dagger.md` (history only). The **docs pass 2026-09-08 (late)** note stands:
+the §7 `SPOOL_COLUMNS` listing is marked superseded — nine columns with `actor` last, as
+`dagger/recorder.py` spells them.**
+v1.1 (2026-09-07, phase-13). Cross-cutting spec, consistent with
+`00-overview.md` v0.3 (binding spine). **2026-09-07:** the recorder writes one
+directory per episode and LeRobot v3 is a derived export (10-frames §11,
+04-runtime §10); §1 / §3 / §4 / §7 / §8 / §12 below were rewritten by phase-13
+accordingly — a DAgger dataset is the same episode-directory store, the spool is
+keyed by `episode_id` (`trainer_spool/ep_<episode_id>.parquet`), `EpisodeSummary`
+carries both the capture-order `episode_index` (the trainer's watermark) and the
+`episode_id`, and the trainer reads ONLY the spool parquet, never a video or a
+`LeRobotDataset`. Ground truth: `docs/research/dagger-online-training.md`,
 `docs/research/lerobot-data.md`. HG-DAgger with continuous async training;
 knobs mirror source-verified hil-serl / lerobot values.
 
@@ -21,7 +42,8 @@ apollo_mavis_v2_core/dagger/interfaces.py   # TakeoverGate, InterventionRecorder
 apollo_mavis_v2_runtime/dagger/gate.py      # TakeoverGateImpl (per-arm state machines)
 apollo_mavis_v2_runtime/dagger/loop.py      # GatedPolicyExecutor (shared), DaggerSession,
                                          # InferenceSession
-apollo_mavis_v2_runtime/dagger/recorder.py  # DaggerRecorder (LeRobotDataset wrapper)
+apollo_mavis_v2_runtime/dagger/recorder.py  # DaggerRecorderThread (RecorderThread + DAgger
+                                         #   columns, spool, summary; episode-directory store)
 apollo_mavis_v2_runtime/dagger/reloader.py  # PolicyReloaderImpl
 apollo_mavis_v2_runtime/dagger/trainer/     # AsyncTrainer process (python -m ...runtime.dagger.trainer)
     trainer.py                           #   TrainerMain, BCFineTuner
@@ -128,24 +150,29 @@ class GatedPolicyExecutor:
         None: recorder.add_frame(obs, FrameAnnotations(...))."""
 ```
 
-- `DaggerSession` passes `recorder=DaggerRecorder(...)`; `InferenceSession`
+- `DaggerSession` passes `recorder=DaggerRecorderThread(...)`; `InferenceSession`
   passes `recorder=None`. **No dataset object exists in inference mode** — no
-  `LeRobotDataset.create`, no trainer process — so escape frames structurally
-  cannot enter aggregation (nothing to write to; not a flag that could drift).
+  `EpisodeDirRecorder`, no dataset directory, no trainer process — so escape
+  frames structurally cannot enter aggregation (nothing to write to; not a flag
+  that could drift).
 - Purpose (overview §4.4): takeover is a **safety escape** — the human steers
   back to a safe configuration and then **ends the session** (UI "End session"
   → `DELETE /api/session`) instead of letting a native reset / "return to
   initial" wreck a bad scene. A second toggle (handback to policy) is
   permitted; the UI labels the state "SAFETY ESCAPE (not recorded)" (05-ui.md).
-- Episode keys (N/Enter/Backspace) are unbound (no episodes); `gate.reset()`
+- Episode keys (N/Enter/Backspace) stay in the served keymap but are nacked
+  (no recorder, no episodes; 01-core §13); `gate.reset()`
   runs only at session teardown. Optional eval logging (success tallies,
   takeover timestamps, policy_version) goes to plain JSONL, never a dataset.
 
 ## 4. Per-frame recording schema (DAgger datasets)
 
-DAgger datasets are ordinary LeRobot v3 datasets (real `lerobot` library,
-`streaming_encoding=True`, NVENC; base schema in `10-frames-and-data.md`),
-recorded at 20–30 fps while the 100 Hz servo loop interpolates. Every
+DAgger datasets are recorded like every other dataset — the episode-directory
+store of 10-frames §11 (`episodes/<episode_id>/{frames.parquet, video/<cam>.mp4,
+episode.json}`, lerobot's `StreamingVideoEncoder` with NVENC, base schema in
+`10-frames-and-data.md`), exported to LeRobot v3 on demand (`POST
+/api/datasets/{ns}/{name}/export`, 10-frames §11.8) — at 20–30 fps while the
+100 Hz servo loop interpolates. Every
 recording mode already carries `intervention`, `action_source`, `wallclock_ns`
 (overview §4.2) so plain-teleop and DAgger datasets stay merge-compatible.
 DAgger adds three features:
@@ -191,11 +218,56 @@ Per-frame semantics (assembled in `GatedPolicyExecutor.step` → `DaggerRecorder
 - Multi-arm: vectors concatenate per-arm blocks in `WorkcellConfig` arm order;
   `control_mode`/`intervention` describe the engaged arm's gate state; per-arm
   mode is recoverable because at most one arm is ever non-`policy` (§2) and
-  `GateEvent`s (arm_id + seq) are stored in `episode_meta["gate_events"]`.
+  `GateEvent`s (arm_id + seq) are stored in `episode.json["gate_events"]`
+  (next to `episode_summary`, 10-frames §9).
+
+**`actor` column (additive, phase-14, 2026-09-08; 15-online-dagger §4 / D4 — v1.2
+cited 15-pro-dagger §5 D5, superseded the same evening, rule unchanged).** Every
+DAgger recording carries a fourth DAgger-only feature next to `control_mode` /
+`intervention` (which stay for merge-compatibility):
+
+```python
+features["actor"] = {"dtype": "int8", "shape": (1,), "names": None,
+    "info": {"labels": {"0": "novice", "1": "expert"},
+             "derived_from": "control_mode != 0"}}   # actor = 1 iff control_mode != policy
+```
+
+Why it exists next to `intervention` (the same predicate as a bool): it is the
+operator's readable per-step key "novice inference vs. expert demonstration"
+(operator decision 2026-09-08, 15-online-dagger §0 item 3) and the name the
+Online DAgger trainer contract and its dataset reader use (`expert_mask`,
+`actor_counts`); `intervention` keeps its LeRobot / hil-serl spelling for merges
+with plain-teleop datasets. It is NOT a change of the label rule (§5): training
+labels remain `control_mode == 1` (transition frames excluded); `actor == 1`
+counts transition frames too. `SPOOL_COLUMNS` gains `actor` (appended last);
+`EpisodeSummary` gains `n_expert_frames` / `n_novice_frames` (core §9);
+`episode.json` gains `online_dagger: {session_name, rollouts_saved, policy_version,
+actor_counts: {novice, expert}}` when an `OnlineDaggerCoordinator` is attached
+(10-frames §9; `rollouts_saved` counts this rollout too). Superseded (2026-09-08
+evening) — v1.2's `pro_dagger: {session_name, iteration, rollout_index,
+policy_version, actor_counts, offline_dataset}` block: the shell counts no
+iterations and knows no offline anchor. Present in DAgger repos only;
+`apollo_schema` is not bumped (10-frames §7.4).
 
 One DAgger run appends to a **dedicated dataset repo**
 `apollo/xarm7_{task}_{n}arm_{conv}_dagger_{run_id}` (grammar: 10-frames §8.1);
-the seed/BC dataset is never mutated.
+the seed/BC dataset is never mutated. An Online DAgger session records into
+`online_dagger/<session_name>` (`~/data/online_dagger/<session_name>/rollouts/`,
+15-online-dagger D5 / 10-frames §11.10) instead (v1.2: `pro_dagger/<s>`, never
+shipped).
+
+**Idle-frame filter in DAgger (2026-09-07 addendum; 04-runtime §10.5,
+10-frames §11.4).** `SessionSpec.action_filter` (default ON) applies to
+HUMAN-controlled frames only — `action_source ∈ {teleop, takeover}`, pro-dagger's
+corrective-only spirit: a human frame whose commanded TCP / gripper / rail did not
+move past the epsilons since the LAST KEPT frame and that has no gripper change
+within ±`gripper_context_s` is not recorded (not in `frames.parquet`, not fed to
+the encoder, not in the trainer spool). Policy-driven frames (`action_source
+policy`) are never filtered, so the counterfactual stream and `control_mode`
+runs stay complete; the transition frames (`takeover_transition`) are human
+frames for the filter (`action_source takeover`). `episode.json.filter` records
+the parameters, `frames_seen` / `frames_skipped` and every gap; `EpisodeSummary`
+counts are over the KEPT frames.
 
 ## 5. Label extraction
 
@@ -217,7 +289,33 @@ simply `control_mode == 1` (`1 = human`) over an episode's int8 column.
   of `control_mode != 0`; segment count + takeover-instant doubt
   (policy_action variance) go into `EpisodeSummary` → UI + doubt logfile.
 
+**The update rule lives in the policy repo (phase-14, 2026-09-08 evening;
+15-online-dagger §0 item 2, §9–§10).** The runtime is the algorithm-agnostic
+shell: it records every step with `control_mode` / `actor`, counts the actor
+split, saves the kept rollouts and announces them (`events.episode_saved` with
+the `online_dagger` block, `events.episode_discarded`, `events.gate`,
+`events.train_now`). WHICH update the trainer runs on those labels — the
+PRO-DAgger projected reference-gradient step `g ← g − (g·g_ref / ‖g_ref‖²) g_ref`
+when `g·g_ref < 0` (`g_ref` an EMA of the offline anchor's gradient;
+`mavis_policy_node.pro_dagger.pgrad`, the shipped reference implementation),
+plain HG-DAgger fine-tuning on the expert frames (the skill's five-line
+example), DRIFT-DAgger or anything else — is the trainer node's own code and
+configuration (`mavis-policy-node --online-dagger pkg.mod:make_trainer
+--trainer-config <yaml|json>`); the runtime forwards no hyper-parameter and
+stores no training artefact. Superseded (2026-09-08 evening) — v1.2's "the
+runtime … hands the kept episodes over (`events.iteration_complete`)": there is
+no iteration event; the trainer counts rollouts itself.
+
 ## 6. Action-space contract: jump-free switching
+
+**External policy (phase-12, 2026-09-08; 14-dora §5–§6).** `policy_source:
+external` replaces `PolicyRunner` with `ExternalPolicySource`: actions arrive as
+`policy_action` chunks (K × D, `observation_id`, `chunk_dt_s`), rows advance per
+`chunk_dt_s`, a chunk older than `dora.policy.max_obs_age_s` (0.5 s) or below
+the reset watermark is dropped, `policy_reset` is published on session start /
+hand-back / episode boundary, and a spec heartbeat older than `spec_stale_s`
+marks `policy_stale` (the loop holds). The recorded frame / action layout stays
+the runtime's; the node must declare a matching `PolicySpec`.
 
 What makes human↔policy switches discontinuity-free (hil-serl mechanism,
 research §3.1/§4.3); implemented by `ActionAnchor` in `runtime/dagger/loop.py`:
@@ -268,6 +366,29 @@ runtime-local; 10-frames §5.3).
 
 ## 7. AsyncTrainer process
 
+**Scope note (2026-09-08, phase-14; reworded the same evening for the Online DAgger
+shell, 15-online-dagger §3 / §6 / §9).** Everything below applies to `policy_source:
+checkpoint` (the in-process MLP policy). For `policy_source: external` the runtime
+spawns NO AsyncTrainer and no `PolicyReloaderImpl` (14-dora §11.3): training and the
+weight swap belong to the policy node's generic **trainer role** — the node lists the
+`online_dagger` capability, consumes the `session` announce (with its
+`online_dagger {session_name, session_dir, rollouts_dir}` block) and the `events`
+stream (`gate`, `episode_saved` + `online_dagger` block, `episode_discarded`,
+`train_now`), decides itself when to train, swaps its weights, bumps `spec.version`
+and heartbeats `trainer_status` (`idle | preparing | training | ready | error`,
+`progress`, free-form finite `metrics`, `session_id` echo) at 1 Hz + on change. The
+runtime's `OnlineDaggerCoordinator` only gates `episode_new` on that status
+(`pause_while_training`: refused `"training in progress (<detail>)"` while the trainer
+says `training`; `wait_for_trainer_ready`: refused until the trainer has said `ready`
+once for THIS session), publishes the operator's **Train now** (`ActionMsg train_now`
+→ `events.train_now {rollouts_saved, requested_by: "operator"}`; the trainer may ignore
+it) and the explicit **`takeover` / `handback`** actions (idempotent; the same
+`TakeoverGate` transitions as Space, `GateEvent.source: "action"`), and records what
+the trainer reports. Superseded (2026-09-08 evening) — v1.2: "`events.iteration_complete`
+→ the node trains → … the runtime's `ProDaggerCoordinator` opens the next iteration"
+(no iteration machine exists in the runtime). The `episode_saved` trigger, the spool
+parquet and the `EpisodeSummary` spelling below are shared by both paths.
+
 Separate OS process on **GPU 1**, crash-isolated from the servo loop.
 **Spawn / monitor** (`runtime/dagger/client.py::AsyncTrainerClientImpl`):
 `Popen([sys.executable, "-m", "apollo_mavis_v2_runtime.dagger.trainer",
@@ -279,10 +400,14 @@ Teardown: `{"cmd": "stop"}` → graceful (finish burst, final checkpoint,
 exit 0); SIGTERM after 30 s; SIGKILL after 45 s.
 
 **Trigger (both conditions required):** an **episode boundary** — runtime
-sends `{"cmd": "submit_episode", "summary": EpisodeSummary}` after every
-`save_episode`, where `EpisodeSummary = {episode_index, n_frames,
-n_intervention_frames, n_label_frames, takeover_segments, segment_doubts,
-success}` (core §9, binding spelling) —
+sends `{"cmd": "submit_episode", "episode_path": <spool>, "summary":
+EpisodeSummary}` after every saved episode, where `EpisodeSummary =
+{episode_index, n_frames, n_intervention_frames, n_label_frames,
+takeover_segments, segment_doubts, success, episode_id}` (core §9, binding
+spelling; `episode_index` is the capture-order ordinal — the trainer's
+`trained_on_episodes` watermark keeps using it — and `episode_id` the 10-frames
+§11.3 directory id the spool file is named after; phase-13 decision: keep the
+integer watermark AND carry both, `LabelIndex.episode_ids` mirrors the ids) —
 **and** `new_label_frames >= min_new_labels` (default **100**, cf. lerobot
 `online_step_before_learning=100`). Then run one burst of
 `K = clip(4 * new_label_frames, 200, 1000)` gradient steps (research §4.1)
@@ -292,13 +417,19 @@ and reset the new-label counter by the frames consumed.
 each batch is half labels added since the last checkpoint ("new"), half from
 the full aggregate = seed BC dataset ∪ all DAgger human-labeled frames
 (lerobot `OnlineOfflineMixer`, `online_ratio=0.5`). Never train on only the
-newest slice (forgetting; HG-DAgger trains on all of D). Data path: the live
-dataset's parquet shard has **no footer until finalize** (lerobot research
-§3.1), so after each `save_episode` the recorder also spools that episode's
-non-video rows to `trainer_spool/ep_{index:06d}.parquet` (hil-serl
-`demo_buffer/*.pkl` precedent); the trainer reads spool files + episode mp4s
-(valid post-concatenation) read-only and keeps an in-RAM `LabelIndex`. It
-never touches the LeRobot writer API.
+newest slice (forgetting; HG-DAgger trains on all of D). Data path: after
+each saved episode the recorder spools that episode's non-video rows to
+`trainer_spool/ep_<episode_id>.parquet` (hil-serl `demo_buffer/*.pkl`
+precedent; `SPOOL_COLUMNS` = action, observation.state, control_mode,
+policy_action, policy_version, intervention, action_source, wallclock_ns,
+**actor** — nine columns since phase-14, `actor` appended last so readers by
+name are unaffected (§4; `dagger/recorder.py`). Superseded (2026-09-08) — the
+phase-13 eight-column listing without `actor`); the
+trainer reads ONLY these spool files read-only (`sampling.py::read_spool`) and
+keeps an in-RAM `LabelIndex` — it never opens a video, an episode directory or
+a `LeRobotDataset`, and phase-13 does NOT rebuild the LeRobot export for it.
+Deleting an episode over REST removes its spool row too (10-frames §11.7); a
+trainer that already consumed it keeps the labels until the next run.
 
 **BC fine-tune loop sketch** (`trainer.py::BCFineTuner`):
 
@@ -396,8 +527,9 @@ Rules (source-verified pattern, research §3.2/§4.2):
 - **Staging** may happen any time; stale staged versions are dropped
   (drain-latest, like lerobot's `get_last_item_from_queue`).
 - **Swap only at episode boundaries** — `DaggerSession` calls
-  `maybe_swap(True, mode)` after `save_episode`/`clear_episode_buffer`, before
-  arming the next episode; never mid-episode, never mid-chunk. The policy
+  `maybe_swap(True, mode)` after an episode was saved (directory published) or
+  discarded, before arming the next episode; never mid-episode, never
+  mid-chunk. The policy
   object is instantiated once; only `state_dict` bytes move
   (`torch.load(..., map_location="cuda:0")` + `load_state_dict`); no process
   restart, ever. After a swap, telemetry's `policy_version` becomes
@@ -496,6 +628,35 @@ UI obligations (`05-ui.md` DaggerPanel): control-mode chip, policy version +
 100-frame trigger, trainer state + loss, red banner on
 `trainer.state == "dead"` or `PolicyAnomalyEvent`.
 
+**`DaggerStatus.online_dagger: OnlineDaggerStatus | None = None` (additive, phase-14,
+2026-09-08 evening; core §11, 15-online-dagger §5).** Non-null iff the session's
+`SessionSpec.online_dagger` is set (`policy_stale: bool = False` is the phase-12
+addition, 14-dora §6.3). `OnlineDaggerStatus{session_name, phase: waiting_trainer |
+rollout | training | error, rollouts_saved, detail, trainer_alive, trainer_age_s,
+trainer: TrainerStatusAnnounce | None, policy_version_acting, expert_frames_session,
+novice_frames_session, session_dir}` — rebuilt every `OD_STATUS_EVERY_N = 4` ticks
+(25 Hz); `detail` is the exact `episode_new` refusal (or the trainer's detail);
+`SessionTelemetry.trainer_alive` mirrors `trainer_alive` (fresh within
+`dora.policy.spec_stale_s`). Superseded (2026-09-08 evening) — v1.2's
+`DaggerStatus.pro_dagger: ProDaggerStatus` (phases `preparing | … | swapping`,
+`iteration`, `rollout_index`, per-iteration counts, a `history` list): the shell
+counts kept rollouts and the session's actor split, never iterations. UI obligations
+for an Online DAgger session (15-online-dagger §8 / §12, 05-ui §8.2
+`OnlineDaggerPanel`, replacing the `DaggerPanel` body): title "Online DAgger ·
+<session_name>"; "<n> rollouts saved"; the phase pill (WAITING FOR TRAINER /
+ROLLOUT / TRAINING with the trainer's `progress` bar / TRAINER ERROR — <detail>;
+colour always with a word); the control-mode and external-policy chips; the
+trainer's state + detail and its `metrics` as a key / value list (a `loss` key gets
+the 60-point sparkline); expert / novice frames this session (shown once, in the
+panel); acting policy version with a "swapped" note; **Take over** / **Hand back**
+(`takeover` / `handback`, gated by `control_mode` + observer / link down only, one
+shared reason line) and **Train now** (`train_now`, disabled with its reason:
+observer, link down, an open episode, the return in flight, trainer missing,
+training); the `N` hint and the New-episode button disabled whenever the runtime
+would refuse `episode_new` (`newRolloutReason`: trainer dead FIRST, then the phase);
+a red banner when the trainer is missing / lost (`trainer_alive` false — the UI
+keeps no stale window of its own) or reports `error`.
+
 ## 12. Failure handling & recovery
 
 | Failure | Detection | Response |
@@ -505,9 +666,11 @@ UI obligations (`05-ui.md` DaggerPanel): control-mode chip, policy version +
 | NaN/Inf policy action | Per-tick guard in `GatedPolicyExecutor.step` before IK | Tick 1: hold arm (re-send current targets), record frame with `policy_action=NaN`. 3 NaN ticks in one episode: pause policy output (all arms hold), raise `PolicyAnomalyEvent`, UI prompts takeover; `reloader.rollback()` to `LAST_KNOWN_GOOD`; episode may be saved (human frames remain valid labels). |
 | Anomaly streak (§10 block streak) | 30 consecutive twin-gate blocks in AUTONOMOUS | `PolicyAnomalyEvent` + suggest takeover; rollback only on operator action or NaN co-occurrence. |
 | `LAST_KNOWN_GOOD` pointer maintenance | — | Advanced by `mark_good()` after each episode that completes on a version with zero NaN ticks and no anomaly event; initialized to the session seed checkpoint (v0). Rollback target therefore always exists. |
-| Dataset writer failure (`save_episode` raises) | exception in recorder | Keep the episode buffer (do NOT `clear_episode_buffer`); retry once; on second failure mark session degraded (recording off), keep teleop/safety alive, surface error. `finalize()` is guarded by `VideoEncodingManager` + session-teardown `finally`. |
+| Episode save failure (`EpisodeDirRecorder.save` raises) | exception in recorder | Keep the episode buffer (the temp directory stays); retry once — the retry resumes after the encoder step; on second failure mark session degraded (recording off), keep teleop/safety alive, surface error (`EpisodeStatus.detail`). Teardown / SIGTERM / the run-loop `finally` call `discard()` + `finalize()` exactly once (04-runtime §10.4). |
 | Control-channel timeout but process alive | status timeout, `poll() is None` | Treat as trainer-busy (long burst); only 3 consecutive timeouts escalate to the crash path. |
-| Runtime crash | — | Trainer detects the dead REQ peer only on next command; it keeps training to a final checkpoint, then exits after `orphan_timeout_s=120` without a status poll. Dataset is recoverable: LeRobot finalize-on-resume (`LeRobotDataset.resume`) after the parquet footers are rewritten by the recovery CLI (`apollo-dagger-fsck <dataset>` re-finalizes). |
+| **Online DAgger trainer stale** (phase-14, 2026-09-08 evening; `policy_source: external` + `online_dagger`; v1.2 row "PRO-DAgger trainer stale" superseded) | no `trainer_status` echoing this session within `dora.policy.spec_stale_s` (3 s) — `OnlineDaggerStatus.trainer_alive: false`, `trainer_age_s` growing, `session.trainer_alive: false` | The phase keeps its value; `episode_new` and Train now are nacked `"no Online DAgger trainer attached"` (aliveness is checked before the phase); the Cockpit shows the red banner (`OnlineDaggerBanner`: TRAINER LOST — no status from <id> for <age>). The arms are untouched — a rollout in progress continues under the takeover gate; the external POLICY's own staleness (§6.3, `policy_stale`) holds the policy arms independently. A status from ANOTHER session id never refreshes it; one with `session_id: null` refreshes aliveness only (15-online-dagger §3). |
+| **Online DAgger trainer `state: "error"`** (any hook of the trainer raised; v1.2 row superseded) | `trainer_status.state == "error"` for this session | Coordinator phase → `error` (no phase event — the shell publishes none; the UI reads telemetry); rollouts refused `"trainer error: <detail>"` (`unknown` without a detail); a rollout already open finishes normally and its save counts as a kept rollout (`events.episode_saved` still fires — the trainer decides what to do with it); the trainer recovering (a non-error status for this session) moves the phase per the pure phase rule (`ready` → `rollout`, else `waiting_trainer` / `rollout` per the latch); **End session** clears it. Node side (15-online-dagger §12): a failed `on_session` is sticky until a NEW session id, an event / poll error clears on the next successful training + swap. No `LAST_KNOWN_GOOD` rollback exists for an external policy (14-dora §11.3) — the acting weights are whatever the node last swapped in. |
+| Runtime crash | — | Trainer detects the dead REQ peer only on next command; it keeps training to a final checkpoint, then exits after `orphan_timeout_s=120` without a status poll. The dataset needs no repair: every saved episode is a complete directory (one rename published it), the episode being recorded is at most one `episodes/.tmp-*` directory that the next open sweeps (`sweep_incomplete_episodes`, 10-frames §11.6); there is no finalize step and no fsck. |
 
 ## 13. Test strategy (hardware-free)
 
@@ -556,4 +719,12 @@ Binding spine: `00-overview.md` §4–§6. Base schema + frames:
 `10-frames-and-data.md`. Twin gate: `11-safety-collision.md`. Session engine:
 `04-runtime.md`. UI panels: `05-ui.md` §8 (`DaggerStatus` shape per §11).
 Research ground truth: `docs/research/dagger-online-training.md`,
-`docs/research/lerobot-data.md`.
+`docs/research/lerobot-data.md`. External policies and the dora bus:
+`14-dora-interface.md` §6 / §11.3. Online DAgger (the algorithm-agnostic shell for
+interactive learning over that bus; the `actor` column, the coordinator, the generic
+trainer role, gate events, `takeover` / `handback` / `train_now`, the rollouts
+dataset): `15-online-dagger.md` §3–§10 (§12 implementation record) — its v1.0
+predecessor `15-pro-dagger.md` is history only; the PRO-DAgger reference
+implementation lives in the policy-node repo (`mavis_policy_node.pro_dagger`) on top
+of the shell; recording schema of `actor`: `10-frames-and-data.md` §7.4 / §9 / §11.10;
+session engine side: `04-runtime.md` §10.7.

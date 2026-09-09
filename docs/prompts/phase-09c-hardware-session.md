@@ -193,7 +193,7 @@
 
 ## 真机验收步骤（用户在场；每一步都可停）
 
-> **2026-09-05 首次真机 session 的结果（已修，见 `docs/design/02-hardware.md` §14.4）**：两臂
+> **2026-09-05 首次真机 session 的结果（已修，见 `docs/design/02-hardware.md` §16）**：两臂
 > 归零 + bring-up 都成功，但随后两臂每 ~0.5 s 反复被latch成
 > `CONTROLLER FAULT — external mode/state conflict persisted (UFACTORY Studio?)`，而**当时并没有开
 > Studio**（18333 无人监听，两个控制箱的 502/30003 只有 runtime 一个客户端）。三个都是我们自己读错

@@ -24,7 +24,21 @@ additive; amended 2026-09-05 — phase-09d rail homing with twin planning:
 `ArmMaintenanceResult.status` / `.job_id`, `MaintenancePhase` /
 `MaintenanceProgress` / `ArmMonitorTelemetry.maintenance` (the shared names
 defined in the `hardware_monitor` leaf, re-exported by `maintenance`); §11,
-§12, §14, §18 — all additive).
+§12, §14, §18 — all additive; amended 2026-09-08 — phase-12 dora boundary
+(`protocol/external.py`, §20) and phase-14 **Online DAgger** (`15-online-dagger.md`
+v2.0; the same evening's operator decision replaced the morning's PRO-DAgger v1.0
+models — `ProDaggerConfig` / `ProDaggerStatus` / `ProDaggerIterationSummary` /
+`ProDaggerSessionInfo` / `ProDaggerAnnounce` / `RefGradStatus` / `pro_dagger_train_now`
+were DELETED, not aliased; superseded in-body with dated notes, kept in
+`15-pro-dagger.md` as history): §9 `EpisodeSummary.n_expert_frames` /
+`.n_novice_frames`, `GateEvent.source` `"action"`, §10 `ActionName` `takeover`,
+`handback`, `train_now` (+ `goto_profile`, appended last the same evening), §11
+`DaggerStatus.online_dagger` + `OnlineDaggerStatus`, §12 `OnlineDaggerConfig`,
+`SessionSpec.online_dagger`, `SLUG_RE`, `DatasetLayoutInfo` / `DatasetNamespaceInfo`,
+`OnlineDaggerSessionInfo`, `DatasetInfo.namespace` / `.path`, `SessionInfo.online_dagger`,
+§14 the exported models, §19 ledger rows 11–14, §20 the external additions
+(`OnlineDaggerAnnounce`, the 10-field `TrainerStatusAnnounce`, `EVENT_KINDS` + `train_now`)
+— all additive, `mavis_schema` stays 1).
 Conforms to `00-overview.md` v0.3 (binding spine).
 Research ground truth: `docs/research/{dagger-online-training, lerobot-data,
 xarm-python-sdk, xarm7-ik}.md`. Message shapes mirror `05-ui.md` §2 exactly.
@@ -251,8 +265,9 @@ class DigitalTwinInterface(Protocol):
     def check(self, q_by_arm: Mapping[str, np.ndarray]) -> CollisionReport: ...
         # COMMANDED config, all arms jointly; kinematic-only; 0.24-0.75 ms / 3 arms
     def check_config(self, q_full: np.ndarray) -> bool: ...        # planner fast path
-    def clearance(self, distmax: float = 0.05) -> list[PairClearance]: ...
+    def clearance(self, distmax: float = 0.10) -> list[PairClearance]: ...
         # measured config, ascending; ~1 µs/pair; telemetry rate, not gate rate
+        #   (distmax was 0.05; 0.10 since 2026-09-07 = SafetyConfig.clearance_sweep_m)
     def plan(self, req: PlanRequest) -> PlanResult: ...            # RRT-Connect (§6)
     def render(self, view: str) -> CameraFrame | None: ...         # render thread only
     def set_grasp_whitelist(self, arm_id: str, body_names: list[str]) -> None: ...
@@ -286,14 +301,23 @@ class Policy(Protocol):
     def load_weights(self, path: str) -> None: ...   # state_dict hot-swap;
                                                      #   episode boundaries only
 
-# interfaces/recorder.py — runtime implements over LeRobotDataset v3
+# interfaces/recorder.py — runtime implements the episode-directory store
+# (10-frames §11; until 2026-09-07 it wrapped LeRobotDataset v3 directly)
 class EpisodeRecorder(ABC):
-    def start(self, meta: dict[str, object]) -> None       # open episode buffer
-    def add_frame(self, frame: dict[str, object]) -> None  # -> LeRobotDataset.add_frame
-    def save(self) -> int                # episode_index (save_episode)
-    def discard(self) -> None            # clear_episode_buffer
-    def finalize(self) -> None           # MANDATORY (parquet footers)
+    def start(self, meta: dict[str, object]) -> None       # open an episode (mint episode_id)
+    def add_frame(self, frame: dict[str, object]) -> None  # buffer rows + feed the video encoder
+    def save(self, sidecar: dict[str, object],
+             audio: object | None = None) -> tuple[int, str]
+                                         # publish episodes/<episode_id>/ atomically:
+                                         #   videos, frames.parquet, stats, audio.wav,
+                                         #   episode.json (sidecar + video/audio/stats
+                                         #   blocks) LAST, then rename; returns
+                                         #   (ordinal in capture order, episode_id)
+    def discard(self) -> None            # cancel the encoder, rmtree the temp dir
+    def finalize(self) -> None           # idempotent close: discard an open episode,
+                                         #   close the encoder, sweep .tmp-*
     recording: bool                      # property
+    episode_id: str | None               # property: the open episode's id
 
 # interfaces/teleop.py — held-key provider (runtime's WS bridge implements)
 @dataclass(frozen=True)
@@ -341,6 +365,9 @@ class SafetyConfig(BaseModel):           # WorkcellConfig.safety
     geom_inflation_m: float = 0.008      # TOTAL pair inflation δ (per-geom δ/2)
     min_clearance_m: float = 0.0         # extra block threshold above inflation
     warn_clearance_m: float = 0.025      # UI amber
+    clearance_sweep_m: float = 0.10      # pairs farther apart than this are not published
+                                         #   in `clearances` (raised from 0.05 on 2026-09-07
+                                         #   for the Cockpit ProximityFrame, 05-ui §8.2)
     hysteresis_m: float = 0.002          # unblock needs dist >= δ + this
     max_active_constraint_rows: int = 12 # IK CollisionAvoidanceLimit row cap
     twin_staleness_s: float = 0.15; rail_staleness_s: float = 0.5   # gate fails closed
@@ -353,12 +380,17 @@ class PlanRequest(BaseModel):
     arm_order: list[str] | None = None   # None -> planner heuristic
     timeout_s: float = 5.0               # per arm
     max_step_rad: float = 0.05           # edge-check resolution (rail 0.01 m)
+    speed_scale: float = 0.1             # the SessionSpec.speed_scale the plan runs at
+                                         #   (2026-09-09): a pinched start's escape is judged
+                                         #   per executor tick at it; default = the slowest
+                                         #   speed offered (valid at any faster one)
 
 class PlanResult(BaseModel):
     ok: bool
     waypoints: dict[str, list[list[float]]] = {}
-    failure: Literal["goal_in_collision", "start_in_collision", "timeout"] | None = None
+    failure: Literal["goal_in_collision", "start_in_collision", "no_escape", "timeout"] | None = None
     failing_pair: tuple[str, str] | None = None
+    arm_order: list[str] = []            # the ONLY order the arms may execute in; [] on failure
 ```
 
 Validators: `blocked ⇔ severity == "blocked"`; `geom_inflation_m > 0`;
@@ -437,9 +469,11 @@ hardware driver applies at connect (`backstops.apply_backstops`, 02-hardware
 Reduced boundary → rebound off), the UI re-applies session-less
 (`ArmMaintenanceOp` `apply_backstops`, §12) and the monitor reads back
 (`ArmMonitorTelemetry.backstops_match`, §11). They are volatile on the
-controller (lost at reboot), never `save_conf()`ed. Provisional MAVIS values
-(2026-09-04, payloads to be weighed): Manipulation Arm 0.95 kg @ (0, 0, 60) mm,
-Perception Arm 0.55 kg @ (0, 0, 90) mm, sensitivity 3 on both (04-runtime §14).
+controller (lost at reboot), never `save_conf()`ed. MAVIS values are estimates
+the user accepted on 2026-09-05 without weighing (whole-arm collision detection
+is the goal; provisional since 2026-09-04): Manipulation Arm 0.95 kg @ (0, 0,
+60) mm, Perception Arm 0.55 kg @ (0, 0, 90) mm, collision sensitivity 3 on both
+(04-runtime §14).
 Config files (`configs/hardware.yaml`, `configs/sim.yaml`) live in the runtime
 deployment dir; `POST /api/session` honors requested `kind` iff that config
 exists and validates (binding; else 409).
@@ -524,13 +558,23 @@ class CheckpointInfo:                    # manifest.json payload (12-dagger §7)
     created_wallclock_ns: int
 
 @dataclass(frozen=True)
-class EpisodeSummary:                    # runtime -> trainer at every save_episode
+class EpisodeSummary:                    # runtime -> trainer at every episode save
     episode_index: int; n_frames: int
     n_intervention_frames: int           # control_mode != POLICY
     n_label_frames: int                  # control_mode == HUMAN (HG-DAgger Eq. 2)
     takeover_segments: int               # maximal runs of control_mode != POLICY
     segment_doubts: list[float]          # policy-action variance at takeover instants
     success: bool | None
+    episode_id: str = ""                 # 10-frames §11.3 directory id (2026-09-07); the spool is
+                                         #   trainer_spool/ep_<episode_id>.parquet; episode_index
+                                         #   stays the capture-order watermark (12-dagger §7)
+    n_expert_frames: int = 0             # phase-14 (2026-09-08; 15-online-dagger §4, additive): frames
+    n_novice_frames: int = 0             #   with actor == 1 (control_mode != POLICY — transition
+                                         #   frames too, unlike n_label_frames) / actor == 0.
+                                         #   GateEvent.source (dagger/types.py) is a plain str spelled
+                                         #   "keyboard" | "auto_advance" | "episode_reset" and, since
+                                         #   2026-09-08 evening, "action" (the explicit takeover /
+                                         #   handback actions; additive — the comment lists three)
 
 class TrainerStatus(BaseModel):          # pydantic — rides telemetry (§11)
     state: Literal["starting", "idle", "training", "dead"]
@@ -578,8 +622,28 @@ discriminators let one `TypeAdapter` parse the channel.
 ActionName = Literal[
     "switch_arm", "switch_arm_prev", "takeover_toggle",
     "episode_new", "episode_save", "episode_discard",
+    "reset_to_initial",                  # 2026-09-08 (key R): walk the workcell back to
+                                         #   the designated initial condition; no args.
+                                         #   04-runtime §10.5
     "save_profile", "set_initial_condition", "joint_target",
     "tracker_settings",
+    "takeover", "handback", "train_now", # phase-14 (2026-09-08 evening; 15-online-dagger D3 / §3):
+                                         #   the Online DAgger shell's three Cockpit buttons —
+                                         #   explicit take-over of the active arm (idempotent: a
+                                         #   no-op ack "already taken over" in HUMAN / TRANSITION),
+                                         #   hand control back to the policy (idempotent: "policy
+                                         #   already driving"), ask the trainer to train on the
+                                         #   rollouts saved so far (events.train_now; the trainer
+                                         #   may ignore it). No args, NO key binding (Space keeps
+                                         #   takeover_toggle; the KEYMAP stays 24 rows); nacked
+                                         #   "takeover not available in teleop" / "not an Online
+                                         #   DAgger session" elsewhere. Superseded (2026-09-08
+                                         #   evening): the morning's "pro_dagger_train_now"
+    "goto_profile",                      # 2026-09-08 (later the same evening): drive the arms to a
+                                         #   SAVED profile — args GotoProfileArgs{profile_id}
+                                         #   (extra="forbid", ProfileStore id charset, REQUIRED);
+                                         #   twin-planned, gated, cancellable execute_plan path
+                                         #   (04-runtime §10.5); no key. Appended LAST (additive)
 ]
 
 class HelloMsg(BaseModel):               # server -> client, immediately after accept
@@ -627,7 +691,8 @@ class TrackerSettingsArgs(BaseModel):    # name == "tracker_settings" (13-tracke
     follow_rotation: bool | None = None
     filter_enabled: bool | None = None   # One Euro pose filter (13-tracker §4 "Pose filter")
     filter_min_cutoff_hz: float | None = None   # 0.05 <= x <= 50 (0 would freeze the filter)
-    filter_beta: float | None = None     # 0 <= x <= 5 (speed coefficient)
+    filter_beta: float | None = None     # 0 <= x <= 200 (speed coefficient, Hz per (m/s);
+                                         #   ceiling raised from 5 on 2026-09-07, 13-tracker §4)
 
 ControlClientMsg = Annotated[KeysMsg | ActionMsg, Field(discriminator="t")]
 ControlServerMsg = Annotated[HelloMsg | AckMsg, Field(discriminator="t")]
@@ -644,10 +709,10 @@ requires `args == {}` for every action without an args model.
 means "unchanged", so the UI settings form can send only the field it
 committed (Enter/blur). The `filter_*` fields tune the runtime's One Euro pose
 filter live (devices/debug page); the bounds are wire-level guards only — the
-runtime owns the defaults (`min_cutoff_hz 1.0`, `beta 0.05`) via
-`TrackerConfig.filter`. A settings change while the clutch is engaged makes
-the runtime re-anchor (13-tracker §4 "Anchor and re-seed rules"); it never
-moves the arm.
+runtime owns the defaults (`min_cutoff_hz 1.0`, `beta 5.0` since 2026-09-07 —
+was 0.05, 13-tracker §4) via `TrackerConfig.filter`. A settings change while
+the clutch is engaged makes the runtime re-anchor (13-tracker §4 "Anchor and
+re-seed rules"); it never moves the arm.
 
 Tracker calibration (phase-10; 13-tracker §3/§4) adds **no** `ActionName`: the
 Devices page has no session and `/ws/control` nacks actions without one, and
@@ -686,8 +751,43 @@ class ClearanceItem(BaseModel):
     pair: tuple[str, str]; dist_m: float
 
 class EpisodeStatus(BaseModel):
-    state: Literal["idle", "recording", "saving"]
+    state: Literal["idle", "recording", "saving", "returning"]
+                                         # returning (2026-09-07): a return_to_start motion
+                                         #   is running (04-runtime §10.5); episode_new nacked
     index: int | None; frames: int; duration_s: float
+    repo_id: str | None = None           # additive (2026-09-07): the session's dataset
+    total_episodes: int = 0; total_frames: int = 0   # manifest counters (saved episodes)
+    detail: str = ""                     # "returning to profile 'ready'", "return
+                                         #   cancelled: movement key", "recorder degraded …"
+    frames_skipped: int = 0              # additive (2026-09-07): idle frames the action filter
+                                         #   dropped in the open episode (04-runtime §10.5)
+
+class DatasetExportTelemetry(BaseModel): # TelemetryMsg.datasets.export (additive, 2026-09-07)
+    repo_id: str; format: str
+    phase: Literal["scanning", "videos", "data", "meta", "validating", "done", "failed"]
+    done: int = 0; total: int = 0; detail: str = ""
+
+class DatasetsTelemetry(BaseModel):      # TelemetryMsg.datasets (additive, 2026-09-07; session-less
+    export: DatasetExportTelemetry | None = None   #   like microphone): the running / last export
+
+class OnlineDaggerStatus(BaseModel):     # DaggerStatus.online_dagger (phase-14, 2026-09-08 evening;
+    session_name: str                    #   15-online-dagger §3/§5): the runtime's ROLLOUT-LEVEL shell
+    phase: Literal["waiting_trainer", "rollout", "training", "error"]   # a pure function of the last
+                                         #   trainer status echoing THIS session + the ready latch
+    rollouts_saved: int                  # kept rollouts of the session (a resume continues the count)
+    detail: str = ""                     # the exact episode_new refusal, or the trainer's detail
+    trainer_alive: bool = False          # a fresh trainer_status (<= dora.policy.spec_stale_s)
+    trainer_age_s: float | None = None
+    trainer: TrainerStatusAnnounce | None = None   # verbatim last status (protocol.external, §20)
+    policy_version_acting: int | None = None       # follows the announced spec / action version
+    expert_frames_session: int = 0; novice_frames_session: int = 0   # kept frames this SESSION (actor)
+    session_dir: str = ""                # ~/data/online_dagger/<session_name>
+# Superseded (2026-09-08 evening): the morning's ProDaggerIterationSummary (a finished iteration's
+# loss / proj_rate / n_proj / train_steps / wall_s / versions / timestamps) and ProDaggerStatus
+# (phases preparing | rollout | training | swapping | error, iteration, rollout_index,
+# rollouts_per_iteration, per-iteration frame counts, history[12]) — the shell counts kept
+# rollouts and the session's actor split, never iterations; every metric is the trainer's
+# free-form TrainerStatusAnnounce.metrics. Deleted, not aliased (never shipped).
 
 class DaggerStatus(BaseModel):           # full shape per 12-dagger §11 (canonical)
     control_mode: ControlMode; engaged_arm: str | None
@@ -699,6 +799,11 @@ class DaggerStatus(BaseModel):           # full shape per 12-dagger §11 (canoni
     takeover_rate_run: float = 0.0       # rolling mean, last 10 episodes
     new_label_frames: int = 0
     trainer: TrainerStatus | None = None
+    policy_stale: bool = False           # additive (phase-12; §20): the policy output is past its
+                                         #   staleness window -> policy arms hold (12-dagger §6.3)
+    online_dagger: OnlineDaggerStatus | None = None   # additive (phase-14; 15-online-dagger §5):
+                                         #   non-null iff the session's SessionSpec.online_dagger is
+                                         #   set; last (the morning's pro_dagger field superseded)
 
 class InferenceStatus(BaseModel):        # same gate machinery; takeover = SAFETY ESCAPE
     control_mode: ControlMode
@@ -721,12 +826,23 @@ class SessionTelemetry(BaseModel):       # additive block (04-runtime §13.3)
                                          # hardware bring-up progress fed from the workcell's
                                          #   status_cb while state == "bringup"; None for sim
                                          #   sessions / once running (additive, phase-09c)
+    translate_frame: Literal["camera", "world", "base"] | None = None
+                                         # additive 2026-09-08: the frame this session's
+                                         #   keyboard TRANSLATE keys act in (runtime
+                                         #   control.translate_frame; rotations are always
+                                         #   about the TCP axes). The keymap labels the KEY
+                                         #   axes ("forward", "up"), never a frame, so the
+                                         #   overlay needs this to say what they mean.
+                                         #   None = no session. 04-runtime §6
 
 class TrackerSettingsMsg(BaseModel):     # live tracker settings (13-tracker §3.5, §4)
     yaw_deg: float; pos_scale: float; follow_rotation: bool
     filter_enabled: bool = True          # effective One Euro pose-filter settings; defaults
     filter_min_cutoff_hz: float = 1.0    #   = the runtime's TrackerConfig.filter defaults
-    filter_beta: float = 0.05            #   (additive; pre-filter producers still parse)
+    filter_beta: float = 5.0            #   (additive; pre-filter producers still parse;
+                                         #   the runtime's effective default is 5.0 since
+                                         #   2026-09-07 — the protocol echo default still
+                                         #   reads 0.05 in code, to be aligned)
 
 class ControllerTelemetry(BaseModel):    # raw Vive-controller inputs (13-tracker §1.1)
     trigger: float = 0.0                 # analog pull 0..1
@@ -761,6 +877,15 @@ class TrackerTelemetry(BaseModel):       # additive block (13-tracker §3.5)
                                          # phase-10 calibration snapshot (protocol.tracker,
                                          #   §12) — same object as GET /api/tracker/calibration
                                          #   (additive; sub-models ride TelemetryMsg $defs)
+    controller_age_s: float | None = None
+                                         # now − ControllerState.rx_mono of the newest
+                                         #   button/axis event (independent of age_s, the
+                                         #   POSE age); 2026-09-07, 13-tracker §3 item 7b
+    objects: list[str] = []              # libsurvive OBJECT-type codenames, e.g. ["WM0"];
+                                         #   [] = nothing paired / interface not openable
+    dongle_present: bool | None = None   # USB 28de:2101 in sysfs; None = not checked
+                                         #   (all three additive; UI reads None/undefined as
+                                         #   UNKNOWN, never as unplugged / unpaired)
 
 class MicrophoneTelemetry(BaseModel):    # additive block (phase-11; 04-runtime §13.3);
     mic_id: str = "mic_view"             #   EVERY field defaults (no-mic producers validate)
@@ -896,6 +1021,8 @@ class TelemetryMsg(BaseModel):
     hardware_monitor: HardwareMonitorTelemetry | None = None
                                                 # additive (phase-09a); session-less like
                                                 #   tracker / microphone
+    datasets: DatasetsTelemetry | None = None   # additive (2026-09-07); the export job's
+                                                #   progress (§11 DatasetsTelemetry)
 ```
 
 **Hardware monitor / twin overlay (`protocol/hardware_monitor.py`; phase-09a,
@@ -970,6 +1097,28 @@ phase-09b/09c/09d arm-maintenance request / result / plan models in
 ```python
 Mode = Literal["teleop", "collect", "dagger", "inference"]
 START_FROM_RE = r"^(keep_current|profile:[A-Za-z0-9_\-]+)$"
+DATASET_RE = r"^(?:[A-Za-z0-9][A-Za-z0-9_\-]*/)?[A-Za-z0-9][A-Za-z0-9_\-]*$"   # <ns>/<name> | <name>
+SLUG_RE = r"^[A-Za-z0-9][A-Za-z0-9_\-]*$"     # 2026-09-08 (15-online-dagger §5): one bare slug — the name
+                                         #   half of DATASET_RE; an Online DAgger session name is a
+                                         #   directory under the online_dagger root, so the UI slugs
+                                         #   against it too (it rides the schema `pattern`)
+
+class OnlineDaggerConfig(BaseModel):     # SessionSpec.online_dagger (phase-14, 2026-09-08 evening;
+    model_config = ConfigDict(extra="forbid")   #   15-online-dagger §5). An unknown key is a 422, never
+                                         #   silent — a hyper-parameter typed here by mistake would
+                                         #   otherwise vanish (the runtime forwards NONE; the trainer
+                                         #   configures itself)
+    session_name: str = Field(pattern=SLUG_RE, max_length=64)      # ~/data/online_dagger/<session_name>/
+    resume: bool = False                 # an existing session dir: continue it (else 409 "already exists")
+    pause_while_training: bool = True    # refuse episode_new while the trainer reports `training` (D2)
+    wait_for_trainer_ready: bool = True  # refuse episode_new until the trainer has reported `ready`
+                                         #   once for THIS session (D2)
+# Superseded (2026-09-08 evening): the morning's ProDaggerConfig (offline_dataset, rollouts_per_
+# iteration, train_mode, n_epochs, steps_*, lr, batch_size, replay_buffer, max_demos, use_pgrad,
+# gref_ema_beta, max_ref_batches, grad_clip, freeze_offline_gref, offline_stride, chunk_stride,
+# chunk_horizon, seed, require_ref_grad) — every algorithm setting belongs to the trainer node
+# (operator decision 2026-09-08 §0 item 2; the PRO-DAgger reference implementation keeps its OWN
+# `ProDaggerConfig` in mavis_policy_node/pro_dagger/config.py, fed by --trainer-config). Deleted.
 
 class SessionSpec(BaseModel):            # POST /api/session body
     mode: Mode
@@ -992,10 +1141,112 @@ class SessionSpec(BaseModel):            # POST /api/session body
                                          #   jog.slew_rad_per_tick/rail_m_per_tick AND the
                                          #   driver-side servo.max_joint_vel /
                                          #   max_cart_step_m / rail_speed_mm_s; 0 and > 1
-                                         #   are 422. Hardware tab offers 10 / 30 / 100 %,
-                                         #   default 0.1; additive (runtime applies it when
+                                         #   are 422. Hardware tab offers 10 / 50 / 100 %,
+                                         #   default 1.0 (`hardware_session.default_speed_scale`;
+                                         #   operator's call 2026-09-08 evening — 0.5 from
+                                         #   2026-09-07, 10 / 30 / 100 % default 0.1 before);
+                                         #   additive (runtime applies it when
                                          #   building the session's control config, 04-runtime
                                          #   §5; pre-09c bodies parse at 1.0)
+    dataset: str | None = None           # collect only (2026-09-07; 04-runtime §10.5):
+                                         #   repo id to record into — DATASET_RE
+                                         #   ^(?:[A-Za-z0-9][A-Za-z0-9_\-]*/)?[A-Za-z0-9][A-Za-z0-9_\-]*$,
+                                         #   a bare name is prefixed "apollo/"; None = the
+                                         #   task-derived phase-07 grammar (10-frames §8.1);
+                                         #   set on a non-collect mode → validation error
+    dataset_resume: bool = False         # False = must NOT exist yet; True = must exist
+                                         #   and match (fps / robot_type / features) — 409
+    action_filter: ActionFilterConfig = ActionFilterConfig()
+                                         # collect / dagger (2026-09-07; 04-runtime §10.5): skip
+                                         #   idle / small-motion frames at record time; the
+                                         #   pro-dagger heuristic and defaults (enabled True,
+                                         #   pos_eps_m 0.001, rot_eps_rad 0.001, gripper_eps_frac
+                                         #   0.01, rail_eps_m 0.001, gripper_context_s 1.6)
+    return_to_start: bool = True         # collect only (DEFAULT ON, operator 2026-09-07; a
+                                         #   NON-default value on a non-collect mode is a
+                                         #   validation error, the default is inert there):
+                                         #   twin-planned, gated, cancellable return to the
+                                         #   start_from / initial-condition profile after
+                                         #   every save / discard (04-runtime §10.5); 409 at
+                                         #   POST when no such profile exists and it is on.
+                                         #   Superseded (2026-09-08, 15-online-dagger D6): collect
+                                         #   OR dagger — "return_to_start is a collect /
+                                         #   dagger-mode field" elsewhere
+    policy_source: Literal["checkpoint", "external"] = "checkpoint"
+                                         # additive (phase-12, 14-dora §6.1; sits right after
+                                         #   speed_scale in the model): external = the policy
+                                         #   drives through the dora bus; dagger / inference only,
+                                         #   policy must be None
+    online_dagger: OnlineDaggerConfig | None = None
+                                         # additive (phase-14, 2026-09-08 evening; 15-online-dagger
+                                         #   §5): non-null = an Online DAgger session against an
+                                         #   external trainer node. Rules (evaluated BEFORE the
+                                         #   dataset rule, in order): "online_dagger requires mode
+                                         #   dagger", "online_dagger requires policy_source
+                                         #   'external'", "online_dagger derives the rollouts
+                                         #   dataset - leave dataset unset" (the repo id is
+                                         #   online_dagger/<session_name>, resumed iff .resume).
+                                         #   Superseded: the morning's pro_dagger field
+
+class ActionFilterConfig(BaseModel):     # idle-frame filter parameters (10-frames §11.4)
+    enabled: bool = True
+    pos_eps_m: float = Field(0.001, ge=0)        # Chebyshev over the commanded TCP xyz, vs LAST KEPT frame
+    rot_eps_rad: float = Field(0.001, ge=0)      # geodesic angle of the commanded TCP orientation
+    gripper_eps_frac: float = Field(0.01, ge=0)  # open fraction (≈ 1 mm of the G2's 86 mm stroke)
+    rail_eps_m: float = Field(0.001, ge=0)
+    gripper_context_s: float = Field(1.6, ge=0)  # keep idle frames within ± this of a gripper change
+
+class DatasetInfo(BaseModel):            # GET /api/datasets row (2026-09-07; 04-runtime §10.6)
+    repo_id: str; root: str              # "<ns>/<name>", absolute directory
+    layout: Literal["episode_dirs", "lerobot_v3"] = "episode_dirs"
+                                         #   lerobot_v3 = a legacy phase-07 tree, read-only
+    total_episodes: int; total_frames: int; fps: int
+    robot_type: str | None = None; kind: Literal["hardware", "sim"] | None = None
+    task: str | None = None; cameras: list[str] = []; arms: list[str] = []
+    modified_at: str                     # ISO-8601 UTC
+    in_use: bool = False                 # the running session records into it
+    export: DatasetExportInfo | None = None
+    namespace: str = ""                  # additive (2026-09-08; 15-online-dagger D5): the <ns> half
+    path: str = ""                       #   of repo_id / the folder the operator sees (== root);
+                                         #   "" on an older runtime
+
+class DatasetNamespaceInfo(BaseModel):   # DatasetLayoutInfo.namespaces[ns] (2026-09-08; 15-online-dagger §7)
+    root: str                            # absolute directory the namespace's datasets live under
+    subdir: str | None = None            # per-dataset sub-folder holding the dataset (online_dagger: "rollouts")
+
+class DatasetLayoutInfo(BaseModel):      # GET /api/datasets/layout (2026-09-08; 04-runtime §13.1)
+    default_namespace: str               # a bare `dataset: "<name>"` resolves here (bc_demo on the lab)
+    generic_root: str                    # datasets_root: <generic_root>/<ns>/<name> for unmapped namespaces
+    namespaces: dict[str, DatasetNamespaceInfo]
+
+class OnlineDaggerSessionInfo(BaseModel): # GET /api/online_dagger/sessions row (2026-09-08 evening;
+    session_name: str; path: str         #   15-online-dagger §3/§5); absolute session directory
+                                         #   (~/data/online_dagger/<session_name>)
+    created_at: str                      # ISO-8601 UTC
+    task: str | None
+    rollouts: int                        # kept rollouts of the session (session.json current.rollouts_saved)
+    last_used_at: str | None = None      # ISO-8601 UTC of the last session that ran it
+# Superseded (2026-09-08 evening): the morning's ProDaggerSessionInfo (offline_dataset, iteration,
+# ref_grad_ready) — the shell knows no anchor, iteration or reference gradient. Deleted.
+
+class DatasetExportInfo(BaseModel):      # manifest.last_export (10-frames §11.5)
+    state: Literal["none", "stale", "fresh", "running", "failed"]
+    format: str = "lerobot_v3"; path: str | None = None
+    at: str | None = None; episodes: int = 0; detail: str = ""
+
+class EpisodeInfo(BaseModel):            # GET /api/datasets/{ns}/{name}/episodes row
+    episode_id: str                      # directory name (10-frames §11.3); the API key
+    index: int                           # position in capture order (UI label only)
+    frames: int; duration_s: float
+    task: str | None = None; session_id: str | None = None
+    recorded_at: str | None = None       # ISO-8601 UTC
+    frames_dropped: int = 0; audio: bool = False
+    export_ok: bool = True; export_note: str | None = None
+    open: bool = False                   # currently being recorded (delete → 409)
+
+class DatasetExportRequest(BaseModel):   # POST /api/datasets/{ns}/{name}/export body
+    format: Literal["lerobot_v3"] = "lerobot_v3"
+    out: str | None = None               # None = <root>/exports/lerobot_v3
 
 class SessionInfo(BaseModel):            # POST/GET /api/session response
     session_id: str; epoch: str; mode: Mode; arms: list[str]
@@ -1009,6 +1260,17 @@ class SessionInfo(BaseModel):            # POST/GET /api/session response
                                          #   phase-09c
     speed_scale: float = Field(1.0, gt=0, le=1)   # echo of SessionSpec.speed_scale
                                          #   (additive, phase-09c; the Cockpit header shows it)
+    policy_source: Literal["checkpoint", "external"] = "checkpoint"   # additive (phase-12): echo
+    fault_detail: str = ""               # additive (2026-09-08 evening; 04-runtime §13.3): the same
+                                         #   session-level notice as SessionTelemetry.fault_detail (a
+                                         #   refused / unplannable start_from, a Go to profile / R
+                                         #   return that did not arrive); "" = nothing to say
+    online_dagger: OnlineDaggerConfig | None = None   # additive (phase-14, 2026-09-08 evening): echo
+                                         #   of SessionSpec.online_dagger (the operator's raw body);
+                                         #   None for every other session; LAST. SessionInfo echoes
+                                         #   neither dataset nor return_to_start (they ride
+                                         #   telemetry.episode / session). Superseded: the
+                                         #   morning's pro_dagger echo
 
 class ArmStatusInfo(BaseModel):          # landing-page card
     arm_id: str; ip: str | None
@@ -1056,6 +1318,9 @@ class ProfileInfo(BaseModel):            # GET /api/profiles rows (full posture 
     profile_id: str; name: str           #   GET /api/profiles/{id} -> StateProfile)
     arms: list[str]; notes: str; created_at: str
     is_initial_condition: bool
+    workcell_kind: Literal["hardware", "sim"] = "sim"
+                                         # additive (2026-09-07): lets the Welcome page gate
+                                         #   return_to_start per tab kind (05-ui §8.1 item 6)
 
 class PolicyInfo(BaseModel):             # GET /api/policies rows (04-runtime §13.1)
     policy_id: str                       # "{run_id}/v{n:06d}" | "{run_id}/deploy/v{k:03d}"
@@ -1194,7 +1459,9 @@ track from the UI. Three of the four ops produce **no motion** — measured
 2026-09-04 on the Perception Arm: `clean_error` cleared C19 and moved no joint
 by more than 5e-5 rad; the full recovery sequence (`clean_error → clean_warn →
 motion_enable(True) → set_mode → set_state(0)`) only puts the arm in ready /
-servo state. **`home_rail` is the ONE motion op: operator-triggered,
+servo state — C19 did not recur for 6 s after the clear; `motion_enable(True)`
+releases the brakes so the motors hold the posture actively, and motion comes
+only from explicit motion commands. **`home_rail` is the ONE motion op: operator-triggered,
 twin-gated, session-less** (phase-09c, user rule 1 — no implicit motion; the
 driver's connect never homes). The carriage drives to the homing end (the
 operator's LEFT, +X) at the track's own homing speed (no SDK setter; the
@@ -1382,10 +1649,16 @@ class KeymapEntry(BaseModel):
     gamepad: str | None = None           # XInput control mirrored on this row:
                                          #   DpadLeft/DpadRight/A/B/LB/RB/RT (additive)
 
-KEYMAP: tuple[KeymapEntry, ...]          # exactly these 23 entries:
-# held/translate: KeyW translate_x_pos "+x (forward)" | KeyS translate_x_neg "-x (back)"
+KEYMAP: tuple[KeymapEntry, ...]          # exactly these 24 entries:
+# held/translate: KeyW translate_x_pos "forward"
+#                 KeyS translate_x_neg "back"
 #                 KeyA translate_y_pos "left" | KeyD translate_y_neg "right"
 #                 KeyE translate_z_pos "up"   | KeyQ translate_z_neg "down"
+#                 (the axis names and labels are the KEY axes — x forward, y left,
+#                  z up — and never name a frame; the physical frame is the runtime's
+#                  control.translate_frame: default the operator-fixed world frame
+#                  since 2026-09-08 evening, `camera` = the active arm's wrist camera
+#                  (that morning's default), `base` = pre-2026-09-08 — 04-runtime §6)
 # held/rotate:    KeyI roll_pos  | KeyK roll_neg      (about TCP axes; spine §5:
 #                 KeyJ pitch_pos | KeyL pitch_neg      I/K roll, J/L pitch, U/O yaw)
 #                 KeyU yaw_pos   | KeyO yaw_neg
@@ -1398,6 +1671,10 @@ KEYMAP: tuple[KeymapEntry, ...]          # exactly these 23 entries:
 #                 | Tab switch_arm (gamepad RB) | Space takeover_toggle
 #                 (label: "takeover toggle (DAgger: recorded; inference: safety
 #                  escape, never recorded)")
+#                 | KeyR reset_to_initial "return to the initial condition"
+#                   (2026-09-08; twin-planned, gated, cancelled by any movement
+#                    input — a no-op with a reason when no initial condition is
+#                    designated for the workcell kind. 04-runtime §10.5)
 # discrete/episode: KeyN episode_new | Enter episode_save | Backspace episode_discard
 
 HELD_CODES: frozenset[str]; DISCRETE_CODES: dict[str, str]   # derived views
@@ -1409,14 +1686,20 @@ def axis_map() -> dict[str, tuple[str, float]]
     # single source of signs for runtime's held_to_twist
 ```
 
-Invariants (tested §18): 23 entries (6 translate + 6 rotate + 2 gripper +
-2 rail + 1 tracker + 3 session + 3 episode — matches spine §5), unique codes;
+Invariants (tested §18): 24 entries (6 translate + 6 rotate + 2 gripper +
+2 rail + 1 tracker + 4 session + 3 episode — matches spine §5), unique codes;
 every discrete `action` is a valid `ActionName`; exactly the rail entries have
 `requires_rail=True`; every held action is either an axis (in `axis_map()`,
 with a ± partner on the same axis) or a member of `HELD_MODIFIER_ACTIONS`,
 never both; exactly the seven 13-tracker §1 rows carry a `gamepad` label; no
 browser-owned chords. Episode keys are always listed; runtime nacks them in
-modes without a recorder.
+modes without a recorder. Re-affirmed 2026-09-07: whole-table code uniqueness
+is what keeps a key from being both a held and a discrete row — a short-lived
+uncommitted change that flagged every held row `keyboard=False` ("teleop is
+the Vive only") and put episode save / discard on `KeyS` / `KeyF` (colliding
+with translate −x / gripper close) is reverted by phase-13; `KeymapEntry` has
+no `keyboard` field and the keyboard is a full teleop interface (overview §5
+"Input interfaces").
 
 ## 14. JSON-schema export for TS generation (`protocol/export_schemas.py`)
 
@@ -1436,7 +1719,17 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   # tracker:  TrackerCalibrationStatus, TrackerCalibrationCommand (REST
   #           /api/tracker/calibration; the other protocol.tracker models ride $defs only)
   # session:  SessionSpec, SessionInfo, WorkcellStatus, ArmStatusInfo,
-  #           CameraInfo, SceneInfo, ProfileInfo, PolicyInfo
+  #           CameraInfo, SceneInfo, ProfileInfo, PolicyInfo,
+  #           ReturnHomeResult (REST POST /api/session/return_home, 2026-09-08),
+  #           DatasetInfo, EpisodeInfo, DatasetExportInfo, DatasetExportRequest, SwitchArmArgs
+  #           (2026-09-07), OnlineDaggerConfig, OnlineDaggerSessionInfo, DatasetLayoutInfo,
+  #           DatasetNamespaceInfo (phase-14, 2026-09-08 evening — OnlineDaggerStatus rides
+  #           TelemetryMsg $defs; the morning's ProDaggerConfig / ProDaggerSessionInfo /
+  #           ProDaggerStatus / ProDaggerIterationSummary files are deleted)
+  # control:  + GotoProfileArgs (2026-09-08 evening)
+  # external: SessionAnnounce, PolicySpecAnnounce, DoraInfo (phase-12, §20), TrainerStatusAnnounce,
+  #           OnlineDaggerAnnounce (phase-14; RefGradStatus / ProDaggerAnnounce deleted) — 43 schema
+  #           files in total on 2026-09-08 evening (`export_schemas --check` clean)
   # microphone: MicrophoneInfo (REST /api/microphones; phase-11 — MicrophoneTelemetry
   #           rides TelemetryMsg $defs only)
   # maintenance: ArmMaintenanceRequest, ArmMaintenanceResult (REST POST
@@ -1678,5 +1971,51 @@ sibling docs, resolved here — siblings adopt these on next edit:
 | 8 | research-note `EpisodeSummary` fields vs 12-dagger §5 doubt additions | §9 shape (episode_index, label/intervention counts, segments, `segment_doubts`) |
 | 9 | 05-ui `InferenceStatus` lacks `engaged_arm`; 12-dagger telemetry includes it | included, additive (§11) |
 | 10 | 11-safety `SafetyConfig` listing omits `safety_debug`; spine §6 requires the flag | `safety_debug: bool = False` on `SafetyConfig` (§6), sim-only semantics |
+| 11 | 15-pro-dagger v1.0 (2026-09-08 morning) — `ProDaggerConfig`, `ProDaggerStatus`, `ProDaggerIterationSummary`, `ProDaggerSessionInfo`, `ProDaggerAnnounce`, `RefGradStatus`, `pro_dagger_train_now`, `EventKind iteration_complete` / `pro_dagger_phase` | DELETED the same evening (operator decision: the runtime is the algorithm-agnostic Online DAgger shell, `15-online-dagger.md` v2.0) — replaced by `OnlineDaggerConfig` / `OnlineDaggerStatus` / `OnlineDaggerSessionInfo` / `OnlineDaggerAnnounce` / the 10-field `TrainerStatusAnnounce` / `takeover`, `handback`, `train_now` / `EventKind train_now` (§10–§12, §20). Superseded: the previous rows 11–12 recorded the v1.0 model hardening (`iteration` + `last_used_at`, the flat six-field announce, `seed` bounds) — none of it shipped |
+| 12 | 15-online-dagger v2.0 §5 `OnlineDaggerConfig` / `OnlineDaggerStatus` / `OnlineDaggerSessionInfo` / §6 `TrainerStatusAnnounce`, `OnlineDaggerAnnounce` | spelled exactly as designed (`extra="forbid"`, `session_name` `max_length` 64, `allow_inf_nan=False` on every float incl. `metrics` values, `progress` in [0, 1], `uptime_s ≥ 0`) — no deviation (15-online-dagger §12) |
+| 13 | 12-dagger §4 / 05-ui: `DaggerStatus` without `policy_stale` | `policy_stale: bool = False` (phase-12, promised by 04-runtime §15) and `online_dagger` (phase-14) on `DaggerStatus`, `policy_stale` on `InferenceStatus` (§11) |
+| 14 | 15-online-dagger v2.0 §5 `ActionName` ends `takeover, handback, train_now`; `SessionInfo` ends `online_dagger` | `goto_profile` (`GotoProfileArgs{profile_id}`) appended after `train_now` later the same evening; `SessionInfo.fault_detail` inserted before `online_dagger` (which stays last) — both additive, both outside the Online DAgger shell (§10, §12; 04-runtime §10.5 / §13.3) |
 
 No spine concerns: this document implements `00-overview.md` v0.3 as written.
+
+## 20. dora boundary spellings (`protocol/external.py`, phase-12, 2026-09-08)
+
+`protocol/external.py` is the spelling authority for the dora boundary (node /
+stream / command ids, metadata keys, `ARM_STATE_LAYOUT` = 32 names, the JSON
+payload models `SessionAnnounce`, `CameraAnnounce`, `PolicySpecAnnounce`,
+`PolicyResetMsg`, `EventEnvelope`, `ExternalStatus`, `DoraMachineInfo`,
+`DoraInfo`); `SessionAnnounce`, `PolicySpecAnnounce` and `DoraInfo` are exported
+as schemas. Additive fields elsewhere: `SessionSpec.policy_source`
+(`checkpoint | external`; external ⇒ dagger / inference with `policy: null`),
+`SessionInfo.policy_source`, `DaggerStatus.policy_stale`,
+`InferenceStatus.policy_stale`, `TelemetryMsg.external: ExternalStatus | None`
+(after `microphone`, before `hardware_monitor`), `CameraFrame.depth` (H×W
+uint16 mm) + `depth_scale_m`, `CameraConfig.depth` / `align_depth_to_color`,
+`Command.source` may be `"dora"`. core stays free of dora and pyarrow (ruff
+`banned-api` + `tests/test_import_guard.py`). Details: 14-dora §3–§5, §13.
+
+**Phase-14 additions (2026-09-08; as shipped the same evening — 15-online-dagger §6 / §12;
+all additive, appended last, `MAVIS_SCHEMA` stays 1, the order is the contract goldens'):**
+`IN_POLICY_TRAINER_STATUS = "policy_trainer_status"` appended to `RUNTIME_INPUTS`
+(source `policy/trainer_status`, queue 8); `POLICY_OUT_TRAINER_STATUS =
+"trainer_status"` appended to `POLICY_OUTPUTS`; `EventKind` / `EVENT_KINDS` +=
+`"train_now"` (10 kinds; payload keys documented in the module: `gate {arm_id, mode, seq,
+source, episode_id}`, `episode_saved.online_dagger {episode_id, rollouts_saved,
+actor_counts: {novice, expert}, policy_version, spool_path}`, `episode_discarded
+{episode_index, episode_id, reason}`, `train_now {rollouts_saved, requested_by}`);
+`PolicyResetReason` unchanged but `"episode_boundary"` is now what the runtime spells at
+episode boundaries (`"handback"` only inside an episode); `PolicySpecAnnounce.capabilities:
+list[str] = []` (a trainer-capable node lists `"online_dagger"`);
+`OnlineDaggerAnnounce{session_name, session_dir, rollouts_dir}` + `SessionAnnounce.
+online_dagger: OnlineDaggerAnnounce | None` (last); `TrainerStatusAnnounce{mavis_schema,
+trainer_id, node_version, state: idle | preparing | training | ready | error, session_id,
+policy_version, progress, metrics: dict[str, float], detail, uptime_s}` — ten fields, every
+float `allow_inf_nan=False`, `progress` in [0, 1], `uptime_s ≥ 0`, `metrics` free-form finite
+scalars; `ExternalStatus.capabilities: list[str] = []` and `.trainer_status:
+TrainerStatusAnnounce | None` (session-less, for the launcher). Exported as schemas:
+`TrainerStatusAnnounce`, `OnlineDaggerAnnounce` (§14). `protocol/__init__.py` re-exports the
+new names plus `SLUG_RE`, `POLICY_OUTPUTS`, `EVENT_KINDS`. Superseded (2026-09-08 evening) —
+the morning's `EventKind iteration_complete` / `pro_dagger_phase`, the six-field
+`ProDaggerAnnounce`, `RefGradStatus` and the 23-field `TrainerStatusAnnounce`: deleted, not
+aliased (never shipped; the one permitted history note is the module docstring's "v1.0
+PRO-DAgger shell superseded 2026-09-08").

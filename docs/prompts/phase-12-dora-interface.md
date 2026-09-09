@@ -1,8 +1,10 @@
 # Phase-12 — Dora 外部接口（进程级观测流输出 / 策略动作输入 / 外部策略节点仓 / 固定视角）
 
-状态：设计草案 2026-09-03（`docs/design/14-dora-interface.md` **draft v0.2 —— 用户 2026-09-03 的决定已落入文档，
-待最终审阅**；批准后本文件与 14-dora 一起成为 core / hardware / sim / runtime / policy-node / ui / docs 七处实现的
-唯一契约，冲突时以修订后的设计文档为准）。决策依据：用户 2026-09-03 的决定——dora-rs 1.0 只作 runtime 的**外部**
+状态：**设计定稿 2026-09-07**（`docs/design/14-dora-interface.md` **v0.3** —— 用户 2026-09-03 的决定 + 2026-09-07
+追加的"局域网订阅"要求已落入文档并经本机双 daemon 实验核实；本文件与 14-dora 一起是 core / hardware / sim /
+runtime / policy-node / ui / docs 七处实现的唯一契约，冲突时以 14-dora 为准）。实现在隔离 worktree
+`~/projects/apollo-mavis-v2-ws-p12/`（各子仓 `phase-12` 分支，自 2026-09-07 的 HEAD）中进行，与主工作树上的
+phase-13 并行；合并由编排者完成。决策依据：用户 2026-09-03 的决定——dora-rs 1.0 只作 runtime 的**外部**
 集成总线，runtime 内部架构不变；控制面由 runtime 独占拥有（唯一模式）；策略节点由策略仓自行启动（动态占位节点）；
 参考包为独立 GitHub 仓 `apollo-mavis-v2-policy-node`（Apollo-Lab-Yale org，含 LeRobot adapter 与 CI fake 节点）；
 **取消"三脚架模式"及全部外部视角命令面**（14-dora 附录 A 为 v2 候选），改为"进程级发布 + 操作员停好 Perception Arm
@@ -32,6 +34,19 @@ RØDE NT-USB Mini）控制箱 `192.168.2.219`；**Manipulation Arm**（arm id `g
    GPU-1 子进程（ZMQ REQ/REP）。
 5. **无真机可测**：fake 节点 + 私有端口的 dora 控制面测试夹具 + sim e2e；CI 在"装/不装 `[dora]` extra"两种
    配置下全绿。
+
+## 用户决定（2026-09-07 追加，binding）
+
+1. **发布无条件、无模式**：只要 runtime 进程在跑，就通过 dora 对外发布两个机械臂的观测（两路腕相机含每帧位姿、
+   两臂状态、麦克风、telemetry、session 契约消息）；没有任何"三脚架模式"之类需要开启的东西。"停好视角再结束
+   会话"只是这个模型的一种用法。
+2. **订阅方可以在本机（另一个仓的程序）也可以在同一网络的另一台机器上**。跨机器是 v1 范围，不是 v2。
+   机制 = dora 原生多 daemon（14-dora §9，2026-09-07 实验核实）：runtime 的私有控制面绑到配置的局域网地址
+   `dora.bind_host`（实验室 Wi-Fi `wlp38s0`；**永不**绑主机在两条机械臂链路上的地址 192.168.1.11 / 192.168.2.12——
+   与控制箱的 SDK 连接照旧走那两块网卡，这条规则只管 dora 在哪监听；不用 0.0.0.0，多播关），远端机器跑自己的
+   `dora daemon --machine-id <id>` 加入同一 coordinator，数据流为每台已注册的远端机器渲染 `viewer_<id>` /
+   `observer_<id>` 占位节点（`deploy: {machine: <id>}`），远端进程以 `Node("viewer_<id>")` 挂到自己的 daemon。
+3. 保存 / 丢弃 episode 后默认回初始位（phase-13 范围，与本 phase 无关，此处只为对齐语境）。
 
 ## 前置条件
 
@@ -69,7 +84,9 @@ RØDE NT-USB Mini）控制箱 `192.168.2.219`；**Manipulation Arm**（arm id `g
 - 新模块 `protocol/external.py`（14-dora §4/§5/§13 是拼写权威）：`MAVIS_SCHEMA = 1`、
   `EXTERNAL_NODE_ID = "mavis_runtime"`、全部 stream/command id 常量、`ARM_STATE_LAYOUT`（32 个名字）、
   `PolicySpecModel`、`SessionAnnounce`、`CameraAnnounce`、`PolicySpecAnnounce`、`PolicyResetMsg`、
-  `EventEnvelope`、`ExternalStatus`、`DoraInfo`。**没有** `View*` 模型。
+  `EventEnvelope`、`ExternalStatus`（含 `dataflow_restarts: int`）、`DoraMachineInfo{id, registered, placeholders}`、
+  `DoraInfo`（v0.3 字段：`bind_host`、`machine_id`、`auth`、`coordinator_addr`、`machines`、`dataflow_restarts`）。
+  **没有** `View*` 模型。
 - `protocol/telemetry.py`：`DaggerStatus.policy_stale: bool = False`、`InferenceStatus.policy_stale: bool = False`
   （修正 04-runtime §15 已承诺但 core 缺失的漂移）、`TelemetryMsg.external: ExternalStatus | None = None`
   （位于 `microphone` 之后）。`ArmTelemetry` 不变。
@@ -111,13 +128,27 @@ RØDE NT-USB Mini）控制箱 `192.168.2.219`；**Manipulation Arm**（arm id `g
 
 **新包 `apollo_mavis_v2_runtime/dora_bridge/`**（唯一的 dora / pyarrow 导入点，全部 lazy import；**不叫 `dora/`**）
 - `control_plane.py::DoraControlPlane`：版本一致性检查（`dora.__version__ == dora --version`，否则 `disabled`）；
-  以 `setsid` 拉起 `dora coordinator --port <P> --store memory` 与 `dora daemon --coordinator-port <P>
-  --local-listen-port <Q> --zenoh-no-multicast --zenoh-listen 127.0.0.1:<Z>`（cwd = `var_dir`），等 `dora status`
-  ≤ 5 s，`dora start <yaml> --name mavis_v2 --detach`；关闭：`dora stop mavis_v2 --grace-duration 2s` →
+  校验 `dora.bind_host`（`0.0.0.0` 或落在 `workcells.hardware` 任一臂子网 → `disabled` + detail）；以 `setsid` 拉起
+  `dora coordinator --interface <bind_host> --port <P> --store memory [--auth]` 与 `dora daemon --machine-id
+  <machine_id> --coordinator-addr <bind_host> --coordinator-port <P> --local-listen-port <Q> --zenoh-no-multicast
+  --zenoh-listen <bind_host>:<Z>`（cwd = `var_dir`），等 `dora status --coordinator-addr <bind_host>
+  --coordinator-port <P>` ≤ 5 s（**`--interface` 非 loopback 时 coordinator 不再监听 127.0.0.1，runtime 的每一次
+  dora CLI 调用都必须带 `--coordinator-addr`**），`dora start <yaml> --name mavis_v2 --detach --coordinator-addr …`；
+  `auth` 为真时读 `<var_dir>/.dora-token`（coordinator 写在 cwd）供日志 INFO 一行与 `nodes/env.py` 打印，**绝不**进
+  `GET /api/dora`；**机器注册表**：每 `dora.rescan_s` 查询已注册 daemon 集合（先找 CLI / coordinator 控制 API 里能列
+  daemon 的方式——`dora status`/`dora list`/控制 WebSocket，写清依据；找不到就只靠下面的 REST 触发），与
+  `dora.machines` 的交集变化时重新渲染 YAML → `dora stop mavis_v2 --grace-duration 2s` → `dora start` → 重新
+  attach，`ExternalStatus.dataflow_restarts += 1`；`POST /api/dora/machines/{id}/join`（远端操作员起好 daemon 后
+  显式触发同一流程，404 = 不在 `dora.machines`）；关闭：`dora stop mavis_v2 --grace-duration 2s` →
   `dora down --coordinator-port <P>` → SIGTERM/SIGKILL 自己拉起的两个 PID（`dora down` 会假成功）；**永不**对不是
   自己拉起的端口执行 `dora down`/`destroy`。这是**唯一**模式（用户 2026-09-03 决定）：没有
-  `control_plane`/`zenoh_connect` 配置项，不支持共享/systemd 控制面。attach 后用 `node.node_config()` 校验 id 集合。
-- `dataflow.py::render_dataflow(cfg, camera_ids, mic_id, python) -> str`：按 14-dora §2.3 生成 YAML
+  `control_plane`/`zenoh_connect` 配置项，不支持共享/systemd 控制面。attach 前设
+  `DORA_ZENOH_CONNECT=tcp/<bind_host>:<Z>`、`DORA_ZENOH_MULTICAST=off`、`DORA_ZENOH_LISTEN=tcp/127.0.0.1:0`（缺后两者时
+  动态节点会开多播、在包括控制箱网卡的每个 NIC 上开 UDP、开通配 TCP 监听——2026-09-07 实测）；attach 后用
+  `node.node_config()` 校验 id 集合。
+- `dataflow.py::render_dataflow(cfg, camera_ids, mic_id, python, registered_machines) -> str`：按 14-dora §2.3 生成 YAML
+  （每个本地节点 `deploy: {machine: <machine_id>}`；`dora.machines` 中**已注册**的每台远端机器加 `viewer_<id>` /
+  `observer_<id>` 占位节点 `deploy: {machine: <id>}`，未注册的不渲染——`dora start` 会拒绝命名了缺席机器的数据流）
   （`mavis_runtime` 动态节点——inputs 恰为 `tick`/`probe_heartbeat`/`policy_action`/`policy_spec`/`policy_status`；
   `policy`/`viewer`/`observer` 占位动态节点，`viewer` 只有输入；唯一的 spawned `probe` 节点，解释器钉
   `sys.executable`）；所有输入 `queue_size: 1, drop_oldest`（`policy_status` 8、`events` 64 除外）；**不**写
@@ -163,9 +194,15 @@ RØDE NT-USB Mini）控制箱 `192.168.2.219`；**Manipulation Arm**（arm id `g
   `arm_action_names` 拼接完全一致、`state_names` 为子集；**不**构造 `resolve_policy`/`MLPPolicy`/`PolicyReloaderImpl`/
   `AsyncTrainerClientImpl`（`trainer_alive: null`）；DAgger 仍建 recorder，每次 save 发 `events.episode_saved`
   （summary + spool parquet 路径 + dataset root + run_id）；`policy_version` 按动作 metadata 记录，episode 内变化计数。
-- `server/rest.py`：`GET /api/dora -> DoraInfo`（14-dora §2.6；无 `control_plane` 字段）。`ws_telemetry.build_telemetry`
+- `server/rest.py`：`GET /api/dora -> DoraInfo`（14-dora §2.6 v0.3：`bind_host`、`machine_id`、`auth`、`coordinator_addr`、
+  `coordinator_port`、`daemon_port`、`zenoh_connect`、`machines: [{id, registered, placeholders}]`、`dataflow_restarts`…；
+  无 `control_plane` 字段、**无 token**）；`POST /api/dora/machines/{id}/join -> DoraInfo`（202 触发 rescan/重启；404）。`ws_telemetry.build_telemetry`
   填 `external` 块（含 `idle_reader` 状态）、`policy_stale`。
-- `config.py`：`RuntimeConfig.dora: DoraConfig`（14-dora §12 全部字段与默认值；`enabled: false`）；
+- `config.py`：`RuntimeConfig.dora: DoraConfig`（14-dora §12 全部字段与默认值：`enabled: false`、`bind_host: 127.0.0.1`、
+  `machine_id: lab`、`machines: []`、`rescan_s: 5.0`、`auth: null`（= bind_host 非 loopback 时 true）…）；
+  `bind_host` 接受 IPv4 地址**或网卡名**（启动时解析为该网卡当前 IPv4，数据流重启前重解析——实验室 Wi-Fi 是 DHCP）；
+  `scripts/deploy/render-lab-config.sh` 加 `DORA_BIND_HOST` 旋钮（默认空 = 不渲染 dora 块；lab 用 `wlp38s0`，即
+  SSID "APOLLO Lab" 的 Wi-Fi，2026-09-07 地址 192.168.0.88/24；此前实验室在 YaleSecure/10.66.241.33 上）；
   `configs/mavis_v2.yaml` 加注释掉/默认关闭的 `dora:` 示例块。
 - 日志：`quiet_node_diagnostics` 先试 `RUST_LOG=error`（在 `import dora` 之前设置）；若 60 s 双相机发布时 stdout 仍
   > 1 行/s 诊断，则 attach 期间 `dup2` fd 1 到 `<var_dir>/node-stdout.log`（轮转），detach 时恢复；两种结果都写进
@@ -178,8 +215,9 @@ RØDE NT-USB Mini）控制箱 `192.168.2.219`；**Manipulation Arm**（arm id `g
 
 ### 5. 参考策略节点仓（独立 GitHub 仓 `Apollo-Lab-Yale/apollo-mavis-v2-policy-node`，phase-12 创建；用户 2026-09-03 决定）
 
-新目录 `apollo-mavis-v2-policy-node/`（ws 里与五个子仓并列、同样被 ws 仓 gitignore）：`git init` + `gh repo create
-Apollo-Lab-Yale/apollo-mavis-v2-policy-node --private`（远端建好即可，**首次 push 待用户指令**）。包 `mavis_policy_node/`：
+新目录 `apollo-mavis-v2-policy-node/`（ws 里与五个子仓并列、同样被 ws 仓 gitignore；本 phase 先建在
+`~/projects/apollo-mavis-v2-ws-p12/apollo-mavis-v2-policy-node/`）：仅 `git init` + 本地提交结构；**`gh repo create` 与
+首次 push 都等用户指令**（对外动作）。包 `mavis_policy_node/`：
 `contract.py`（与 core `protocol/external.py` 相同拼写的常量 + `validate_action_metadata()`/`validate_spec()`，两仓各有
 一份 golden 测试）、`types.py`（core `interfaces/policy.py` 的逐字段**复制**，加 `depth`、`observation_id`）、
 `protocol.py`（duck-type `Policy`）、`messages.py`、`node.py::PolicyNode`（14-dora §6.2 事件循环：`obs_state` 为 lead、
@@ -190,8 +228,9 @@ Apollo-Lab-Yale/apollo-mavis-v2-policy-node --private`（远端建好即可，**
 `predict_action_chunk`；extra `lerobot`）、`fake.py::FakePolicy`（CI fake 节点：deterministic deltas、`FAKE_NAN_AT`、
 `FAKE_CHUNK`、`FAKE_DELAY_MS`、echo 模式）、`__main__.py`（`mavis-policy-node --loader {fake,mlp_bundle,lerobot,entrypoint}
 --path ... --entrypoint pkg.mod:make_policy --device cuda:0 --daemon-port ... --rate-hz ...`）。
-包本体只依赖 `dora-rs>=1.0.1,<1.1`（自带 `pyarrow`）与 `numpy`；`torch`/`lerobot` 只是 adapter 的可选 extra；**绝不**
-import `apollo_mavis_v2_*`。该仓自己的 CI：私有端口控制面 + `fake.py` 对 `contract.py` golden 测试、`ruff`、`pytest`。
+`node.py` 在创建 `Node` 前默认设 `DORA_ZENOH_MULTICAST=off`、`DORA_ZENOH_LISTEN=tcp/127.0.0.1:0`（可用环境变量覆盖），
+README 给出本机与远端两种接入配方（14-dora §9）。包本体只依赖 `dora-rs>=1.0.1,<1.1`（自带 `pyarrow`）与 `numpy`；
+`torch`/`lerobot` 只是 adapter 的可选 extra；**绝不** import `apollo_mavis_v2_*`。该仓自己的 CI：私有端口控制面 + `fake.py` 对 `contract.py` golden 测试、`ruff`、`pytest`。
 
 ### 6. ui（最小）
 
@@ -200,8 +239,9 @@ attached / stale"）；无布局改动；vitest 覆盖 attached / stale / disabl
 
 ### 7. docs
 
-按 14-dora §13 的清单修订：`00-overview.md` → v0.4（§1/§2/§4/§6/§8/§10）、`docs/research/dora-middleware.md`
-状态更新框、`04-runtime.md`（§1/§2/§3/§4/§5/§11/§12/§13.1/§13.3/§14/§15/§16）、`12-dagger-protocol.md` → v1.1、
+**本 phase 的实现 agent 只改** `14-dora-interface.md`（Status 改 v1.0 + 实现偏差记录）、`docs/research/dora-middleware.md`
+（状态更新框）与 `docs/prompts/README.md` 状态行；下列其余文档的修订内容写进报告由编排者合并（主工作树上另有
+phase-13 在改同一批文件）：按 14-dora §13 的清单：`00-overview.md` → v0.4（§1/§2/§4/§6/§8/§10）、`04-runtime.md`（§1/§2/§3/§4/§5/§11/§12/§13.1/§13.3/§14/§15/§16）、`12-dagger-protocol.md` → v1.1、
 `01-core.md`（§5.2/§6/§11/§12/§14/§15/§19）、`02-hardware.md` §4/§8、`03-sim.md` §7、`05-ui.md` §12、`CLAUDE.md`
 一行（两台控制箱及 IP；dora 只在边界）、ws `README.md` 拓扑一行（含 policy-node 仓）、`docs/prompts/README.md`
 状态表 + 依赖图。**不改** `10-frames-and-data.md` §7.3/§9 与 `11-safety-collision.md` §4（无标签 5、无 `owners`、无
@@ -211,7 +251,7 @@ attached / stale"）；无布局改动；vitest 覆盖 attached / stale / disabl
 
 **任何外部视角命令面**（`view_lookat`/`view_goto`/`view_hold`/`view_rail`、所有权/租约、`CommandSource.EXTERNAL`、
 标签 5、`ViewStatus`——14-dora 附录 A，v2 候选）；共享/systemd 控制面（不计划）；runtime 拉起策略节点（不计划）；
-跨机器 zenoh（`--zenoh-peer`/`dora cluster`）与 `--auth`；session/episode 操作走 dora（保留 `cmd_request`/
+`dora cluster`（SSH 驱动的集群工具）、zenoh TLS / ACL（`--zenoh-config-overlay`）、多 coordinator；session/episode 操作走 dora（保留 `cmd_request`/
 `cmd_response` id）；`weights_reload`/`weights_ack`（保留 id）；把 `MLPPolicy`/AsyncTrainer 迁出 runtime
 （14-dora §11.2 Phase B）；音频入数据集；Welcome 页暴露 `policy_source`；`dora record/replay` 作为验收工具；
 真机深度相机验证与真机只读连接验证（phase-09 / 用户在场）；policy-node 仓的首次 push。
@@ -300,6 +340,24 @@ attached / stale"）；无布局改动；vitest 覆盖 attached / stale / disabl
 - [ ] 双相机 + 深度发布 60 s，runtime **stdout** 上 dora 诊断行 **≤ 60 行**（≤ 1 行/s）；记录采用的手段
   （`RUST_LOG=error` 或 fd 重定向）。
 
+**局域网订阅（v0.3；本机模拟第二台机器）**
+- [ ] `dora.bind_host: wlp38s0`（解析为本机 Wi-Fi 地址，2026-09-07 为 192.168.0.88；或本机任一非 loopback、非控制箱
+      子网的地址）、`machines: [{id: remote,
+      placeholders: [viewer]}]`：runtime 起来后 `ss -ltnp` 中 coordinator 与 zenoh 只监听该地址，daemon 节点端口与
+      runtime 节点只监听 127.0.0.1，**没有任何** socket 在 192.168.1.11 / 192.168.2.12 上；`ss -lunp` 中 runtime /
+      dora / 节点 PID 无 UDP、无 224.0.0.224。
+- [ ] 起一个 `dora daemon --machine-id remote --coordinator-addr <bind_host> --coordinator-port <P>
+      --local-listen-port <Q2> --zenoh-no-multicast --zenoh-listen <bind_host>:<Z2>`（同机模拟）：≤ `rescan_s` + 5 s 内
+      `GET /api/dora` 的 `machines[0].registered == true`、`dataflow_restarts == 1`，渲染的 YAML 含 `viewer_remote`
+      （`deploy: {machine: remote}`）；`viewer_probe` 以 `Node("viewer_remote", daemon_port=<Q2>)` 挂上并在 60 s 内收到
+      `cam_view_wrist_cam` 无 seq 缺口，单跳延迟 **p99 ≤ 10 ms**（实测跨 daemon TCP 6.8 ms）；本机 `observer` 在重启
+      窗口内最多 1 次 gap。`POST /api/dora/machines/remote/join` 在 daemon 已注册时幂等（202，不再重启）。
+- [ ] `dora.auth` 生效：不带 token 的 `dora daemon --machine-id x` 被 coordinator 拒（日志 401），`GET /api/dora` 响应体
+      不含 token；`nodes/env.py` 在本机能打印 `export DORA_AUTH_TOKEN=…`。
+- [ ] `bind_host: 0.0.0.0` 或 `192.168.1.11` → `external.state == "disabled"`，`detail` 说明原因，runtime 其余功能正常。
+- [ ] 远端 daemon 被 kill 后：数据流仍 `Running`，本机流不受影响；`machines[0].registered` 变 false（下一次 rescan），
+      重新拉起 daemon 后再 attach 成功（`dataflow_restarts` 递增）。
+
 **麦克风**
 - [ ] `microphone.backend: fake` 下 `mic_mic_view` 25 Hz `Float32[1920]`，60 s 内 `block_seq` 连续，
   metadata `sample_rate == 48000`、`channels == 1`、`rms_dbfs` 与 telemetry `microphone.rms_dbfs` 同帧一致。
@@ -311,6 +369,17 @@ attached / stale"）；无布局改动；vitest 覆盖 attached / stale / disabl
   `apollo-mavis-v2-policy-node` 仓。
 
 ## 注意事项
+
+- **2026-09-07 双 daemon 实验的硬事实**（`/tmp/dora-lan-exp/`，14-dora §9）：多机部署键是 `deploy: {machine: <id>}`
+  （`_unstable_deploy` / 顶层 `machine:` 被 validate 拒绝）；`dora start` 时被点名的机器 daemon **必须已注册**，否则
+  `no matching daemon for machine id`；占位符不会迁移到后来注册的 daemon；`dora node add --from-yaml` 会忽略
+  `deploy.machine` 落在本地 daemon 上——所以只能重渲染 + 重启数据流；`dora start` 对每个占位符固定打一行
+  `ERROR … daemon failed to receive finished signal`，不是失败判据；coordinator `--interface <LAN IP>` 后不监听
+  loopback；daemon 的 `--local-listen-port` 永远绑 127.0.0.1；auth 只覆盖 coordinator WebSocket，zenoh 数据面与
+  daemon 节点端口零认证；`~/.config/dora/.dora-token` 会被同用户任何进程读到；`pgrep -f/pkill -f dora` 会匹配到
+  自己的 shell（用 `pgrep -x dora` + `ps -o args=` 过滤）。
+- **真机相机今天是纯 UVC 彩色**（`kind: v4l2`，pyrealsense2 未装）：§2 的 RealSense 深度路径只在 FakeSDK 与 sim 渲染
+  上验证，lab 配置不发真机深度流；`CameraAnnounce.depth` 如实为 false。
 
 - **控制线程永不调用 dora**：`ControlLoop`/`GatedPolicyExecutor` 只读 `ExternalPolicySource` 这个普通 Python 对象；
   发布全在 `dora-bus`/`dora-publisher`/EncoderWorker tap 线程。任何把 `send_output` 写进 tick 的实现直接判不合格；

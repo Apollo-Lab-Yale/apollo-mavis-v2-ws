@@ -17,7 +17,7 @@
 代码/注释/仓库文档用英文；依赖方向严格单向（core 不依赖栈内任何东西；
 hardware/sim 只依赖 core；runtime 依赖 core，hardware/sim 为可选 extras；
 ui 只通过 HTTP/WebSocket 与 runtime 通信）。版本锁定：MuJoCo 3.12.0、
-mink 1.3.0、xArm-Python-SDK 1.18.5、lerobot ≥0.6（锁定小版本）、Node ≥20 + pnpm。
+mink 1.3.0、xArm-Python-SDK 1.18.5、lerobot ≥0.6（锁定小版本）、Node ≥20 + pnpm（2026-09-08 起 UI 实际以 **npm** 管理：`package-lock.json` 是唯一 lockfile，本机 pnpm 11 的 pre-run 安装因未批准的 esbuild 构建脚本失败，`pnpm-lock.yaml` / `pnpm-workspace.yaml` 不得提交；见 CLAUDE.md "Machine"）。
 
 ## 阶段顺序与依赖图
 
@@ -68,6 +68,63 @@ phase-01-core ──┬─→ phase-02-sim-workcell ─→ phase-03-ik-twin ─�
   规划**（失败 409 "profile motion not collision-free"）；Welcome 页右上 "Devices" 改名 **Debug**（路由 `#/devices`
   不变）。
 
+- phase-13（2026-09-07 插入）：**键盘遥操回归**（与 Vive controller 平级，00-overview §5 原表；撤销同日
+  core 里把 held 行标成 `keyboard=False`、episode 键改 S/F 的未提交改动）、**episode 三键**
+  N / Enter / Backspace、**数据集改为每个 episode 一个目录**（`episodes/<episode_id>/{episode.json,
+  frames.parquet, video/<cam>.mp4, audio.wav}`，10-frames §11），**LeRobot v3 变为派生导出**（流拷贝
+  remux，不重编码；`POST /api/datasets/{ns}/{name}/export` + CLI），删除 = 删一个目录（`DELETE …/
+  episodes/{episode_id}`），`/api/datasets*` REST 与 Welcome 页 `DatasetsPanel`，麦克风音频 sidecar 接通，
+  保存/丢弃后回初始位（用户 2026-09-07 确认：默认开，按 session 可取消）。前置：修复上会话未提交的数采代码
+  （collect session 曾 500，已修）。契约见 `phase-13-keyboard-episode-datasets.md`。
+
+- **2026-09-08 用户三项追加需求（已在 phase-13 工作树实现，未提交）**：
+  1. **键盘平移坐标系可配置**（`control.translate_frame`：`world` / `camera` / `base`；旋转键仍绕 TCP 轴）。
+     上午先把默认改到腕相机系 `camera`：旧的基座系相对操作者视角 yaw 了 180°，且末端一转键就与画面错位。
+     相机姿态**按臂**从模型取（夹爪底座相对 link7 绕工具轴转了 180°，用一个常量矩阵会把默认臂的 A/D、E/Q
+     反过来）。**2026-09-08 晚用户决定：默认改为世界系 `world`**（W 远离操作者 = −Y，A 操作者左手 = +X，
+     E 向上；`camera` 仍可选）。04-runtime §6、`tests/test_camera_frame.py`、`tests/test_configs.py`。
+  2. **`R` 键回初始条件**（`reset_to_initial`，01-core §13 / 00-overview §5）：孪生规划 + 门禁 + 任意运动输入
+     可打断；没有指定初始条件时按键只报原因、不动。
+  3. **退出主页面前自动回位**：Cockpit "End session" / "Terminate session" 先同步调
+     `POST /api/session/return_home`（先关节、后导轨，两段各自规划与门禁），到位才拆 session；回不去就弹窗
+     （"Arms did not return home"，正文含 twin 给的原因 + 先结束 session 再用 UFACTORY Studio 手调），
+     可选 "End session anyway"。04-runtime §10.5、05-ui §8.2。
+  用户给的默认姿态（度）由 `python -m apollo_mavis_v2_runtime.profiles.seed_initial` 写成每种 workcell 一份
+  initial-condition profile：Manipulation Arm `[-180, -12, -20, 30, -5, 35, -8.9]`、Perception Arm
+  `[0, 0.8, 0, 28.9, 0, 28.2, 0]`，导轨不写（回位时保持当前位置）。孪生已验证该姿态在两端导轨位置、
+  麦克风开关两种情况下都无碰撞（最近监控对 107 mm）且可从 keyframe 规划到达。
+
+- **phase-12（dora 外部接口）——2026-09-08 合并进主工作树**：曾在隔离 worktree `~/projects/apollo-mavis-v2-ws-p12/`
+  （各子仓 `phase-12` 分支）实现；2026-09-08 05:52 三方合并到主树的 phase-13 未提交改动之上（core / runtime / ui / sim /
+  hardware 五仓，冲突 13 处手工合并，生成物——core `schemas/`、ui `schemas/` + `src/gen/protocol.ts`、sim
+  `ASSET_MANIFEST.json`、runtime `dataflows/*.yml`——一律重生成；两边的 patch + untracked tgz 备份在
+  `~/projects/.merge-backup-20260908/{main,p12}/`）。合并后五仓全绿（core 423 → 现 470、runtime 632 passed / 2 skipped 含全部
+  dora live 测试、ui 355、sim 155、hardware 293）。**该 worktree 现在只剩 policy-node 仓的家**：
+  `~/projects/apollo-mavis-v2-ws-p12/apollo-mavis-v2-policy-node/`（独立 git 仓，尚无 remote）；其余五个 `phase-12` 子仓 worktree
+  已无用途。`~/projects/apollo-mavis-v2-ws-merge/`（分支 `merge-13-12`）是更早一次合并的过期半成品，未使用，删除由用户决定。
+  合并阶段发现并修好的两条 phase-12 测试（import-confinement 放行 `recorder/` 的 pyarrow；external-DAgger e2e 改读
+  `episodes/*/frames.parquet`）与遗留问题见 `phase-14-online-dagger.md` "实施记录"。
+- **phase-14（Online DAgger，2026-09-08 插入；同日晚由 PRO-DAgger 改为算法无关外壳）**：landing 第三张卡片叫 **Online DAgger**
+  （wire `mode` 仍 `dagger`）。runtime 只保留 **rollout 级外壳**：执行 rollout、`takeover` / `handback` 动作（幂等，Space 之外）+
+  `events.gate`、每帧 `actor` 标签（0 novice / 1 expert）、保存 rollout 并发 `events.episode_saved`（含 `online_dagger` 块）、丢弃**不落盘**
+  只发 `events.episode_discarded`、操作员 **Train now** → `events.train_now`、trainer 报 `training` 时暂停新 rollout、`wait_for_trainer_ready`；
+  **不数 iteration、不存任何算法产物、UI 不配超参也没有离线数据集选择器**。训练在**外部 policy 节点**（`apollo-mavis-v2-policy-node`，
+  `mavis-policy-node --online-dagger <fake|pkg.mod:make_trainer> [--trainer-config …]`，`--selftest online-dagger`），经**一条**通用输入
+  `trainer_status`（`idle | preparing | training | ready | error` + 自由 `metrics`，必须回显 `session_id`）回报。session 目录
+  `~/data/online_dagger/<s>/{session.json, rollouts/}`（trainer 的产物放哪由它定，runtime 不读）；数据集根按 namespace 映射
+  （`bc_demo/<name>` → `~/data/bc_demo/<name>`；`GET /api/datasets/layout`）；回初始位对 rollout 默认开（D6）；真机仍 409（D7）；skill
+  `mavis-online-dagger-trainer` 由 runtime 打包（`GET /api/online_dagger/skill(.tgz)`）并逐字节镜像到 policy-node 仓（D8）。
+  **PRO-DAgger 降为 policy 仓的参考实现**（`mavis_policy_node.pro_dagger` 架在通用 `mavis_policy_node.online_dagger` loop 上；默认
+  offline pool 只供 reference gradient、online buffer 累积每次干预并每个 iteration 都训练）。UI：两视图 `OnlineDaggerSheet` + `OnlineDaggerPanel`
+  （Take over / Hand back / Train now）。同日附带：**键盘平移系默认改为 `world`**。上午的 PRO-DAgger 版（`15-pro-dagger.md` v1.0、
+  `ProDaggerCoordinator`、`~/data/pro_dagger`、`/api/pro_dagger/*`、`iteration_complete`）从未提交、已删除不留别名。
+  契约 `docs/design/15-online-dagger.md` v2.0；实现记录见 `phase-14-online-dagger.md`。依赖 phase-12 + phase-13（同一棵树上）。
+- **2026-09-08 晚追加两项操作员问题（已在同一棵树实现，未提交）**：Welcome 的 profile 列表**按页签 kind 过滤**（两种 workcell 各有
+  initial condition 后预选不再落到不可见的另一 kind）；真机 `start_from=profile` 因使能后一个 tick 的瞬时 RECOVERING 被 `execute_plan`
+  拒绝并无声丢弃 → `hardware_session.start_from_fault_grace_s`（3.0 s）内等臂清空再提交、被拒后重试一次、最终拒绝文案上 wire
+  （`session.fault_detail`，Cockpit `SESSION —` 横幅）+ 新动作 **`goto_profile`**（Cockpit "Go to profile"，与 R 同一条孪生规划 + 门禁 +
+  可中断路径）。见 `phase-14-online-dagger.md` "同晚追加"。
+
 > 多 agent 自主开发的编排方案（波次 DAG、验证门、故障恢复）见
 > [ORCHESTRATION.md](ORCHESTRATION.md)。
 
@@ -89,7 +146,10 @@ phase-01-core ──┬─→ phase-02-sim-workcell ─→ phase-03-ik-twin ─�
 | 09c | `phase-09c-hardware-session.md` | 全部五层（core / hardware / runtime / ui / docs）；phase-09"代码部分"的落地 | 01–08, 09a, 09b；fake 全链路，真机步骤需用户在场（急停在手） | [ ] 2026-09-05 设计定稿并五层实现完成（core `home_rail` / `dry_run` / `RailSweepVerdict` / `speed_scale` / `SessionInfo.kind` / `ArmBringupTelemetry` / `RailNotHomedError`，schemas 重生成；hardware `require_homed()`（connect 永不归零）+ 监视器 `home_rail` op（写集合精确、姿态校验、`auto_enable=False`、只按寄存器判定、归零中不断开）+ D2 上限 + D6 `disconnect()` 停止抱闸，241 tests；runtime `_bringup_hardware` + `RailSweepChecker`（131 步 ≈ 32 ms）+ 拒绝矩阵 + 相机接管 + 冻结臂 + 限速，`tests/test_hardware_session.py` 含真 `HardwareWorkcell + XArmDriver` 过 FakeXArmAPI 的 unhomed → 409 → home_rail → running 全链路；ui 臂卡片 `rail not homed` 药丸 + **Home rail** → `HomeRailSheet`、**Include in session**（09d 移除）、**Speed**、`BringupProgress`、冻结臂提示，257 tests；01/02/03/04/05/11 设计文档、CLAUDE.md、DEPLOYMENT.md 同步）；**真机验收步骤（该文件末尾，步骤 4 按 09d 头注修订）待用户在场执行——真机上从未跑过驱动连接与归零** |
 | 09d | `phase-09d-rail-homing-planning.md` | 全部五层（core / hardware / runtime / ui / docs）；修订 09c 的三个决定 | 01–08, 09a, 09b, 09c；fake 全链路，真机步骤需用户在场（急停在手） | [ ] 2026-09-05 设计定稿并五层实现完成（core `PrePositionPlan` / `RailSweepVerdict.pre_position` / `MaintenanceStatus` + `ArmMaintenanceResult.status / job_id` / `MaintenancePhase` + `MaintenanceProgress` / `ArmMonitorTelemetry.maintenance`（共享名定义在 `hardware_monitor` 叶模块、`maintenance` 再导出），schemas 重生成、`EXPORTED_MODELS` 不变；hardware `XArmDriverConfig.rail_homing: allow_unhomed`（未归零也能连：位置未知，`q[7]` 0.0 占位 + `rail_position_known`，`command_rail` 拒绝）+ `XArmDriver.home_rail()`（已连接驱动、调用方线程、发流保持关节、只按寄存器判定）；runtime 删 `default_arms`、`spec.arms` 必须等于全部臂（409）、`RailSweepChecker.plan_path / check_path`（位置无关：致密化到 0.05 rad 的每个配置 × 131 个导轨位置，起始姿态滞回）、`RailHomingJob` + `RailHomingService`（202 + `job_id`，七个阶段进 telemetry，`GET …/maintenance/last`，job 期间一切 op 与 `POST /api/session` 409）、`RailHoldArm` 适配器、真机 `start_from=profile` 在 bring-up 内规划（失败 409）、`PlanExecutor` 改为沿直线段比例插补（修正门禁永久 hold）；ui Devices → **Debug**、去掉 Include 开关与 `DEFAULT_HARDWARE_ARMS`、启动器原因点名臂、`HomeRailSheet` 预定位说明 + 202 进度视图 + `/maintenance/last`；01/02/04/05/11 设计文档、CLAUDE.md、DEPLOYMENT.md、09c 头注同步）；真机验收（Home rail 面板会先说明是否需要预先移动机械臂）待用户在场 |
 | 10 | `phase-10-tracker-calibration.md` | apollo-mavis-v2-core / -runtime / -ui | 05, 06（13-tracker v0.1 真机路径可用） | [ ] 2026-09-03 设计定稿（基站标定 + 航向对齐向导，REST + telemetry），三层并行实现中；真机验收待用户在场 |
-| 11 | `phase-11-mavis-ui.md` | 全部五层（core / sim / runtime / ui / docs） | 06, 07, 08, 10 | [ ] 2026-09-03 设计定稿（Welcome 页 APOLLO MAVIS V2、Hardware 与 Sim 两页签、RØDE 麦克风实时声波、单场景 `mavis_v2`、页内 `<dialog>` 启动弹窗、§6 视觉与动效规范），五层并行实现中；真机验收（仅麦克风、无机械臂）待用户在场 |
+| 11 | `phase-11-mavis-ui.md` | 全部五层（core / sim / runtime / ui / docs） | 06, 07, 08, 10 | [x] 2026-09-03 设计定稿，2026-09-04 五层实现并提交（core 5fd7cfd、sim 5c58840、runtime 3a4fe90/f7e9868、ui 6e8cead，ws 22313d4 钉住）：Welcome 页 APOLLO MAVIS V2、Hardware 与 Sim 两页签、RØDE 麦克风实时声波、单场景 `mavis_v2`、页内 `<dialog>` 启动弹窗；真机侧 2026-09-04 已在 Hardware 页签看到麦克风波形与两路腕相机画面（相机↔臂映射据此确认）。后续在其上叠加了 09a–09d、Setting 页签（2026-09-07） |
+| 12 | `phase-12-dora-interface.md` | runtime（+ 外部 policy 仓 `apollo-mavis-v2-policy-node`） | 07, 08, 11 | [x] 设计定稿 2026-09-07（v0.3），2026-09-08 七处实现完成（14-dora v1.0 §16 为实现记录；局域网订阅端到端通过）；**2026-09-08 05:52 已三方合并进主工作树的 phase-13 改动之上，与 phase-13 / phase-14 同在一棵未提交的树里**（隔离 worktree `~/projects/apollo-mavis-v2-ws-p12/` 现只是 policy-node 仓的所在地；`~/projects/apollo-mavis-v2-ws-merge/` 为过期半成品）。合并后 runtime 全量 632 passed / 2 skipped（含 dora live / perf），后随 phase-14 一起验证。**真机只读连接与深度、实验室 Wi-Fi 上的 dora 控制面均未在真机验证**；policy-node 仓仍无 remote |
+| 13 | `phase-13-keyboard-episode-datasets.md` | core / runtime / ui（+ sim 字串、docs） | 05, 06, 07, 10, 11；上会话未提交的数采改动 | [ ] 2026-09-07 设计定稿（docs 已按契约改写：10-frames §9/§11、04-runtime §10/§13.1、00-overview §5、13-tracker §1.1、05-ui §8.1/§8.2/§12、01-core §12/§13）；2026-09-07 三层实现完成、待审阅提交（core：keymap 还原 23 行 / N·Enter·Backspace、`SessionSpec.dataset`（schema 带 pattern）/ `dataset_resume` / `return_to_start`（默认开）、`DatasetInfo.layout/export`、`DatasetExportInfo/Request`、`EpisodeInfo` 按 episode_id、`EpisodeStatus.returning`、`TelemetryMsg.datasets`、`EpisodeRecorder` ABC、schemas 重导出；runtime：`EpisodeDirRecorder` + `manifest.py` + `stats.py`（torch-free）、`DatasetStore` 只读 manifest/episode.json、`export_lerobot.py`（av remux + numpy aggregate_stats + `LeRobotDataset` 校验）+ CLI、`/api/datasets*` 六条路由、`telemetry.datasets`、`return_to_start` 三方法（可中断的 execute_plan）、麦克风接线、DAgger spool 按 `episode_id`；ui：`EpisodeControls` 提示随 served keymap、LaunchSheet Dataset 双面板 + Return-to-start、`DatasetsPanel`、真机页签放开 collect、类型重生成；12-dagger §1/§3/§4/§7/§8/§12 同步）；**Round 2（同日晚）**：补充需求"录制时过滤静止 / 停顿 / 小幅动作"落地（core `ActionFilterConfig` / `SessionSpec.action_filter` / `EpisodeStatus.frames_skipped` / `ProfileInfo.workcell_kind`；runtime `recorder/action_filter.py`（对上一保留帧判静止 + ±gripper_context_s 前视缓冲、DAgger 只滤人控帧、`episode.json.filter`）、编码器在 N 时于录制线程打开、控制环进程停顿检测 + deadman 不误判、可中断回位的取消规则（任一来源的运动码 / 手柄断开 / jog / 切臂）、回位预算与 `cancel_plan`、夹爪到位再动、manifest 锁 + 计数重建、导出先校验再切换、`DatasetStore` 导出中 409 / 坏 manifest 跳过；ui LaunchSheet 过滤复选框 + 5 个参数输入、EpisodeControls "skipped N"、按页签 kind 判初始条件）；**2026-09-08 用户三项追加**（键盘平移系可配置、`R` 回初始条件、退出前回位 + 失败弹窗，见上文依赖节）同树实现；**2026-09-08 晚 `control.translate_frame` 默认从上午的 `camera` 翻到 `world`**（`ControlConfig` 默认 + `mavis_v2.yaml`，`sim.yaml` 继承，`tests/test_configs.py` 钉住；`camera` / `base` 仍可选）。**状态：已实现、未提交，2026-09-08 起与 phase-12 / phase-14 合在同一棵主工作树里**；真机验收（两臂 50 %、两路腕相机 + audio.wav、D435 内参、session 中删前一集、回位、`world` 键位手感）待用户在场——**真机尚未跑过任何 phase-13 代码；开发机上的 dev runtime（PID 2144376，18:00:02 启动）跑的是 18:00 快照——合并后、18:38 v2.0 重构前的代码，配置里已是 `translate_frame: world`，但晚间追加（grace / `goto_profile` / `session.fault_detail`）未生效，需重启（2026-09-08 深夜更正：此前误记为"01:27 启动、合并前代码"，该进程已不存在）** |
+| 14 | `phase-14-online-dagger.md`（原 `phase-14-pro-dagger.md`，2026-09-08 晚改名） | core / runtime / ui / docs + 外部 policy 仓 `apollo-mavis-v2-policy-node`（sim / hardware 未改） | 12, 13（同一棵树） | [ ] 2026-09-08 上午按 `15-pro-dagger.md` v1.0 实现 PRO-DAgger 外壳（四份审查 11 major + 38 minor 全修，含 `streams/hub.py` 编码器相位 bug），**同日 18:38 用户改口 → `15-online-dagger.md` v2.0 定稿并当晚重构完成、未提交**：core `OnlineDaggerConfig` / `SessionSpec.online_dagger` / `OnlineDaggerStatus` / `OnlineDaggerAnnounce` / 10 字段 `TrainerStatusAnnounce` / `EVENT_KINDS` 十种（+`train_now`）/ `ActionName += takeover, handback, train_now`，`ProDagger*` / `RefGradStatus` 删除，schemas 43 个（**464 tests**，含追加需求）；runtime `dagger/online_dagger.py::OnlineDaggerCoordinator`（`waiting_trainer | rollout | training | error`，四条拒绝文案，只认回显本 `session_id` 的状态）、`takeover` / `handback` 幂等 op + `events.gate`、discard 只发事件不落盘、`train_now`、`_check_online_dagger` 409 矩阵、`datasets.namespaces.online_dagger`（`~/data/online_dagger/<s>/rollouts`）+ `online_dagger:` 块、`GET /api/online_dagger/{skill,skill.tgz,sessions}`、skill `mavis-online-dagger-trainer` 作为包数据（与 policy-node 镜像逐字节一致）、fake 节点通用 trainer 角色、`test_e2e_online_dagger.py` 3 条 ~31 s；三份审查（ui 1 major + 10 minor、policy-node 2 major + 6 minor、runtime 1 major + 8 minor）全部修复（**全量 713 passed / 1 flake / 2 skipped；追加需求后非 dora 715 passed，共 737 条**）；ui `OnlineDaggerSheet` 两视图（无数据集选择器、无超参）+ `OnlineDaggerPanel`（Take over / Hand back / Train now、`metrics` 表 + `loss` sparkline）+ `DatasetsPanel` 分组（**44 files / 436 tests**，含追加需求）；policy-node 通用 `mavis_policy_node/online_dagger/`（`OnlineDaggerTrainer` 八个 hook、`OnlineDaggerLoop`、`FakeTrainer`）+ 参考实现 `mavis_policy_node/pro_dagger/`（`freeze_offline_gref: true`、`replay_buffer: true`）+ `--online-dagger` / `--trainer-config` / `--selftest online-dagger` + skill 镜像（**141 tests** 非 dora + 2 dora e2e）。**同晚追加**：profile 列表按 kind、`start_from_fault_grace_s` + `goto_profile` + `session.fault_detail` 上 wire（1 份审查 2 major + 7 minor 全修）。**仿真 + 两个 fake trainer 已跑通；真机仍 409（D7），真 policy 仓的 trainer 尚未接过外壳；设计文档的 PRO-DAgger → Online DAgger 措辞改写已于同日深夜完成（12-dagger v1.3 / 14-dora v1.2 / 04-runtime / 05-ui / 10-frames / 01-core / 00-overview v0.4；PRO-DAgger 只剩带日期的历史注、policy 仓参考实现与 skill 示例）；一切需重启 runtime 才生效** |
 
 ## 每个 phase 文件的固定结构
 

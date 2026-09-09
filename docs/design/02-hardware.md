@@ -89,7 +89,8 @@ instance owns its 502 socket, report socket, lock).
 # config.py
 class ServoLimits(BaseModel):              # defaults = HARDWARE CAPS at speed_scale 1.0 (09c D2)
     rate_hz: float = 100.0
-    max_joint_vel: NDArray7 = [0.3]*7      # rad/s cap (per-tick slew = vel*dt)
+    max_joint_vel: NDArray7 = [0.6]*7      # rad/s cap (per-tick slew = vel*dt);
+                                           #   0.3 / 0.002 (cart) before 2026-09-07
     max_joint_acc: NDArray7 = [20.0]*7     # rad/s^2 (prevents C24 on step changes)
     lever_arm_m: NDArray7 = [1.20, 1.20, 1.00, 0.75, 0.44, 0.30, 0.10]
     max_cart_step_m: float = 0.004         # 0.4 m/s TCP cap (2026-09-07; was 0.002); half the
@@ -141,9 +142,15 @@ class RecoveryResult:           # set at the end of every recovery sequence
 100 % "still very slow"; 4 mm is deliberately HALF the gate's 8 mm inflation so
 one tick can never cross the inflated shell the gate checks once per tick) and
 `rail_speed_mm_s` (50) are the hardware caps at `SessionSpec.speed_scale == 1.0`;
-the runtime multiplies all three by the session's `speed_scale` (default 0.1 on
-the Hardware tab) inside its `driver_factory` closure before constructing the
-driver, so the first live runs stream at 0.03 rad/s / 0.2 mm per tick / 5 mm/s.
+the runtime multiplies all three by the session's `speed_scale` (Hardware-tab
+segments 10 / 50 / 100 %, default 100 % = `hardware_session.default_speed_scale`
+1.0 since 2026-09-08 evening — the operator's call after the first
+`reset_to_initial` runs; it was 0.5 = 50 % from 2026-09-07 and the earlier
+10 % / 30 % / 100 % picker with its 10 % default was meant for the very first
+runs only; the lab config rendered from `configs/mavis_v2.yaml` keeps whatever
+value it was rendered with until re-rendered and the runtime restarted) inside
+its `driver_factory` closure before constructing the
+driver, so the first live runs streamed at 0.03 rad/s / 0.2 mm per tick / 5 mm/s.
 `ServoLimits` values are per-driver constants for the life of a connection
 (`_ServoStreamer.set_scale` is internal to the C24 back-off).
 
@@ -254,7 +261,7 @@ carry the "not ready to move" bit (0x10), which the SDK turns into APIState
 **9** (`_check_code(is_move_cmd=True)` → `STATE_NOT_READY`; the reported state
 code is NOT what gates the move). A blind `sleep(0.1)` raced it on the real
 boxes — the FIRST servo tick of the first live hardware session returned 9 and
-faulted the arm mid-bring-up (2026-09-05, §14.4). Two guards, both bounded:
+faulted the arm mid-bring-up (2026-09-05, §16). Two guards, both bounded:
 
 1. `XArmDriver._enter_servo_mode()` is the single place the driver enters mode
    1 (connect step 6, `_recover`, `_handle_external`): `set_mode(1)`,
@@ -346,7 +353,7 @@ Classification (controller error codes):
   because a paused arm silently ignores servo ticks. Accepting only `{0, 1}`
   latched BOTH arms with "external mode/state conflict persisted (UFACTORY
   Studio?)" ~0.5 s after every connect and every recovery, with no Studio
-  running, on the first live session (2026-09-05, §14.4). The latch text now
+  running, on the first live session (2026-09-05, §16). The latch text now
   reports the MEASURED mode/state instead of asserting a cause.
 
 `LATCHED`: streamer paused, gripper/rail queues cleared, every `command_*`
@@ -473,7 +480,9 @@ on_zero: 0}` — the tracks are NOT homed and NOT enabled, so `pos` is
 meaningless (the Manipulation Arm's carriage is physically at the operator's
 right end ≈ sim q 0.65 while its register reads 0). `pos` becomes a position
 only after `on_zero == 1` AND `is_enabled == 1`; the read-only monitor (§8.5)
-reports `rail_pos_m = None` until then and `rail_raw_mm` always.
+reports `rail_pos_m = None` until then and `rail_raw_mm` always. Both tracks
+were homed for the first time on 2026-09-05 (operator-triggered `home_rail`,
+phase-09c).
 
 **Homing is MOTION and the driver never issues it (phase-09c).**
 `set_linear_track_back_origin` drives the carriage to the track's zero end
@@ -572,10 +581,14 @@ Layer 3 of overview §6 — controller-enforced limits under the twin gate
 `reduced_tcp_boundary_mm` (optional `[x_max, x_min, y_max, y_min, z_max,
 z_min]`, None = reduced mode off) and `expected_sn`, mapped field-for-field
 into `XArmDriverConfig` by `workcell._driver_cfg` (an older core without the
-three new fields keeps the driver defaults). The lab values are in the runtime's
+three new fields keeps the driver defaults). `expected_sn` stays None in the
+lab: `arm.sn` reads the model code `XS1305` on BOTH boxes (2026-09-04), so the
+NIC ↔ profile mapping (§7) is the check against swapped cables, since `arm.sn`
+cannot be. The lab values are in the runtime's
 `configs/mavis_v2.yaml` and are estimates the user accepted on 2026-09-05 without weighing (whole-arm collision detection is what matters to the lab):
-Manipulation Arm (G2 + D435i + mount) ≈ 0.95 kg at (0, 0, 60) mm, Perception
-Arm (D435i + RØDE NT-USB Mini + mount) ≈ 0.55 kg at (0, 0, 90) mm, sensitivity
+Manipulation Arm (G2 + D435i 0.072 kg + mount) ≈ 0.95 kg at (0, 0, 60) mm,
+Perception Arm (D435i 0.072 kg + RØDE NT-USB Mini ≈ 0.35 kg + mount) ≈ 0.55 kg
+at (0, 0, 90) mm, sensitivity
 3 on both. As found on 2026-09-04 both boxes reported `tcp_load` 0 kg and
 sensitivity 3 (grip) / 1 (view) — wrong for torque-estimate collision detection,
 hence the operator-facing `apply_backstops` maintenance op (§8.6).
@@ -646,6 +659,12 @@ class NetSetup:
     install_problems: list[str]   # verify(): polkit/dispatcher/permissions warnings
     warnings: list[str]; notes: list[str]            # match()/repair() decision trail
 ```
+
+Live profiles (2026-09-04): `mavis_manipulation_arm` = 192.168.1.11/24 on
+`enp36s0f1` → Manipulation Arm box 192.168.1.201; `mavis_viewpoint_arm` =
+192.168.2.12/24 on `enp36s0f0` → Perception Arm box 192.168.2.219. The `.12`
+default above applies only to profiles netsetup creates itself; the
+manipulation profile was created by hand at `.11`.
 
 State file (`state.py`): `USER_STATE_PATH = ~/.config/apollo-mavis-v2/nic_map.json`,
 `SYSTEM_STATE_PATH = /etc/apollo-mavis-v2/nic_map.json` (root-written by the
@@ -831,9 +850,13 @@ the requested format). The serial route exists because a RealSense D435i
 exposes its depth (interface 0) and colour (interface 3) sensors as separate
 UVC interfaces that BOTH claim `...-video-index0`, so udev keeps one by-id
 symlink per name and the winner changes between plugs (observed 2026-09-04 on
-the MAVIS cell — never address the wrist cameras by by-id). **Cold-boot wake**: after a
+the MAVIS cell — never address the wrist cameras by by-id). The D435i enumerates as USB
+`8086:0b3a` (`lsusb -d 8086:0b3a` shows both units); on the lab host the two units hang
+off different USB host controllers — 349643062582 on PCI 29:00.3 (USB bus 6),
+322143060792 on PCI 29:00.1 (USB bus 4). **Cold-boot wake**: after a
 reboot a D435i's colour UVC interface delivers no frames at all (`select() timeout` on
-every read; observed 2026-09-04, kernel 7.0.11, firmware 5.15.1 / 5.17.0.10) until
+every read; observed 2026-09-04, kernel 7.0.11, firmware 5.15.1 / 5.17.0.10 — ASIC
+243522071002 = fw 5.15.1 (`view_wrist`), 327122074467 = fw 5.17.0.10 (`grip_wrist`)) until
 librealsense has opened the device once. Before the first RealSense node (USB
 `idVendor` 8086, read from sysfs) is opened, `OpenCVCamera` calls `wake_realsense()`,
 which runs `rs-enumerate-devices -s` (librealsense2-utils) once per process — the tool
@@ -1028,7 +1051,7 @@ class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtim
   STATE_NOT_READY}` — the very codes `_check_code` maps to 0 for every non-move
   call. Those are not failures: judging on them reported "FAILED - clean_error
   returned 2" for the operator's **Clear errors** click on 2026-09-05 while the
-  error HAD been cleared (the after-sample read `error_code` 0, §14.4). Like
+  error HAD been cleared (the after-sample read `error_code` 0, §16). Like
   `home_rail`, the verdict comes from the READ-BACK; the codes stay in
   `sdk_codes` for diagnosis. Any other nonzero code (3 timeout, -1 not
   connected, …) still fails the op;
@@ -1107,6 +1130,21 @@ class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtim
   executing (telemetry `maintenance_busy`). `ArmMonitorSample.rail_error`
   (track error register, phase-09c) feeds both the `home_rail` pre-check and
   its judge.
+
+### 8.7 Read-only connect and RealSense depth (phase-12, 2026-09-08)
+
+`XArmDriver.connect(readonly=True)` enters `DriverPhase.READONLY`: one SDK
+client, the report callback plus a `_ReadonlyPoller` restricted to
+`READONLY_ALLOWED_SDK_METHODS` (`get_err_warn_code`,
+`get_linear_track_registers`, gripper position reads,
+`register_report_callback`, `disconnect`) — no enable, no mode / state writes,
+no motion. It feeds the runtime's idle `arm_state` publisher between sessions
+(`dora.publish.idle_source: driver`; the default `monitor` reuses the read-only
+hardware monitor). Verified against the FakeSDK only, never on the boxes.
+RealSense: `CameraConfig.depth` opens the depth stream and
+`align_depth_to_color` aligns it; the runtime publishes it as
+`cam_<id>_depth` (uint16 mm). The lab cameras are plain UVC colour (`kind:
+v4l2`), so hardware depth is unverified on the real D435i (14-dora §16).
 
 ## 9. HardwareWorkcell assembly & bring-up (`workcell.py`)
 
@@ -1190,7 +1228,7 @@ so this is a HINT, never a diagnosis: the fault text states the measured
 `mode`/`state` and only *suggests* closing Studio. The predicate is "left
 servo mode" (§3.5), NOT `state not in {0, 1}` — a held healthy arm reports
 state 2 and the strict form produced a permanent false-positive latch on both
-arms (2026-09-05, §14.4). Studio's real grabs still trip it: Live control
+arms (2026-09-05, §16). Studio's real grabs still trip it: Live control
 switches the box to mode 0 (position) or 2 (teach), and its stop button leaves
 state 4.
 
@@ -1235,7 +1273,7 @@ into those properties like the controller's report frame does); records
 the SDK gotchas as behavior: errors reset mode to 0; `set_servo_angle_j`
 returns 1 latched / 9 not-ready / -8 joint-limit; `clean_error()` alone ≠
 readiness; unhomed rail → 82; absent rail → code 3. **`set_state(0)` settles the
-box in `state 2` (standby), never 0** (2026-09-05, §14.4): readiness is the
+box in `state 2` (standby), never 0** (2026-09-05, §16): readiness is the
 separate `ready_to_move` flag standing in for the reply's 0x10 bit — exactly the
 split the real SDK has (the `state` enum vs `UxbusCmd.state_is_ready`) — so no
 test can pass by assuming a held arm reports state 0, and `set_mode` still
@@ -1347,9 +1385,16 @@ mirrors the SDK (§11), and each has a regression test:
    while the arm moves. Now `wait_motion=False` — also applied to the classic
    `set_gripper_position`, whose SDK path has the same default (§4).
 
-Also learned: the Perception Arm (`view`, 192.168.2.219) reports controller
+Also learned: the Perception Arm (`view`, 192.168.2.219) reported controller
 error **C19** (SDK title "End Effector Communication Error"; Studio says "End
-Module Communication Error") persistently; both arms `state 4`, `mode 0`; both
+Module Communication Error") persistently (as found 2026-09-04; gone since
+2026-09-05 after the Studio fix, §16). Cause: the controller polls the
+tool-port RS-485 bus for an end effector and the Perception Arm has none
+(`get_tgpio_modbus_baudrate` → `(1, -1)`), so the error re-latched after every
+`clean_error` until the controller was told there is no end effector — xArm
+Studio → Settings → Externals → End Effector → None; SDK 1.18.5 exposes no
+write API for that setting, so it cannot be scripted. Both arms `state 4`,
+`mode 0`; both
 tracks unhomed/unenabled (§5). The joint convention is an identity mapping to
 the `mavis_v2` twin (no +π on joint 1; see `docs/prompts/phase-09a-*.md`).
 
@@ -1457,12 +1502,15 @@ the `mavis_v2` twin (no +π on joint 1; see `docs/prompts/phase-09a-*.md`).
 > `apply_backstops` both controllers reported state 5 instead of 4 (both "stopped / not
 > ready" for the SDK; no joint moved).
 
-## 14.4 Fixed 2026-09-05 — first live hardware session: three false alarms
+## 16. Fixed 2026-09-05 — first live hardware session: three false alarms
 
 The first real teleop session (both arms, 10 %, after both tracks homed) came up
 and then latched BOTH arms within a second, repeatedly, with
 `CONTROLLER FAULT — <Arm> external mode/state conflict persisted (UFACTORY
-Studio?)`. **No UFACTORY Studio was running** (nothing on port 18333; `ss`
+Studio?)`. Before this session the Perception Arm's C19 was cleared for good —
+xArm Studio → Settings → Externals → End Effector → None stuck; the monitor has
+read `error_code` 0 on both arms since 2026-09-05. **No UFACTORY Studio was
+running** (nothing on port 18333; `ss`
 showed the runtime process as the only client on 502/30003 of either box). Three
 independent defects, all "our code misreading a healthy controller":
 
@@ -1485,7 +1533,8 @@ independent defects, all "our code misreading a healthy controller":
    Perception Arm reported `FAILED - clean_error returned 2` while the error was
    in fact cleared (`error_code` 0 in the very next sample). 2 = `WAR_CODE`, a
    status echo; `clean_error`/`clean_warn` are the only writes that skip
-   `_check_code`. Fix: `STATUS_ECHO_CODES` are tolerated and the verdict comes
+   `_check_code`. Fix: `STATUS_ECHO_CODES = {1, 2, 9}` (the SDK status echoes of
+   those two writes) are tolerated and the verdict comes
    from the read-back.
 
 Regression coverage (hardware-free) in `tests/test_driver_recovery.py`

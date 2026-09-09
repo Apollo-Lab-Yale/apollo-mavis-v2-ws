@@ -1,5 +1,10 @@
 # Phase 07 — apollo-mavis-v2-runtime（二）：LeRobot v3 录制器、collection 模式、episode 端到端
 
+> **2026-09-07 注**：本 phase 已完成并落地，但其中“录制器直接写 LeRobot v3”的部分被
+> `phase-13-keyboard-episode-datasets.md` 取代——录制器改为**每个 episode 一个目录**，
+> LeRobot v3 变成派生导出（10-frames §11、04-runtime §10）。schema（10-frames §7）、
+> episode 三键、sidecar 内容与 UI EpisodeControls 的行为矩阵保持不变。
+
 ## 目标
 
 实现数据采集：基于真实 `lerobot` 库的 LeRobot dataset v3 `EpisodeRecorder`、

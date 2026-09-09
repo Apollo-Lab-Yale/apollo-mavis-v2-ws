@@ -24,6 +24,14 @@
 #                       maps the two RealSense USB serials to the arms; swap here as a
 #                       stop-gap if the Hardware-tab tiles are crossed). Unknown id = error.
 #   TRAINER_PORT=5758   dagger.trainer.port for a second (developer) instance
+#   DORA_BIND_HOST=wlp38s0  phase-12 (14-dora §9/§12): render `dora.enabled: true` bound to this
+#                       IPv4 or INTERFACE NAME (the APOLLO Lab Wi-Fi is DHCP: 192.168.0.88/24 on
+#                       2026-09-07, so the interface name is what the lab uses; `tailscale0` also
+#                       works). Empty/unset = leave the repo's `dora.enabled: false` block alone.
+#                       Never 0.0.0.0, never the arm-link addresses 192.168.1.11 / 192.168.2.12
+#                       (the runtime refuses them and reports `external.state: disabled`).
+#   DORA_MACHINES="gpubox,laptop"  optional comma list of remote consumer machine ids allowed to
+#                       join (`dora.machines`, each with the default viewer + observer placeholders)
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_common.sh
@@ -48,6 +56,8 @@ export EGL_DEVICE_ID="${EGL_DEVICE_ID:-0}"
 export LIBSURVIVE_CONFIG="${LIBSURVIVE_CONFIG:-$DATA_ROOT/libsurvive/config.json}"
 export CAMERA_SERIALS="${CAMERA_SERIALS:-}"
 export TRAINER_PORT="${TRAINER_PORT:-}"
+export DORA_BIND_HOST="${DORA_BIND_HOST:-}"
+export DORA_MACHINES="${DORA_MACHINES:-}"
 # KEEP_REPO_PATHS=1: leave the source config's workspace-relative ${APOLLO_HOME}/var/...
 # data + libsurvive paths untouched (self-contained dev render, scripts/dev/mavis-dev.sh);
 # unset/0 pins the absolute DATA_ROOT paths the FHS ops deploy needs.
@@ -117,6 +127,17 @@ setv(("microphone", "enabled"), flag("MIC_ENABLED"))
 setv(("egl_device_id",), int(env["EGL_DEVICE_ID"]))
 if env["TRAINER_PORT"]:
     setv(("dagger", "trainer", "port"), int(env["TRAINER_PORT"]))
+# phase-12: the dora external interface is OFF in the repo config; the lab render turns it on
+# and binds the private control plane to the lab Wi-Fi (14-dora §9). The token lands in
+# <var_dir>/.dora-token (never in this file); var_dir follows DATA_ROOT like the other paths.
+if env["DORA_BIND_HOST"].strip():
+    setv(("dora", "enabled"), True)
+    setv(("dora", "bind_host"), env["DORA_BIND_HOST"].strip())
+    if not flag("KEEP_REPO_PATHS"):
+        setv(("dora", "var_dir"), f"{env['DATA_ROOT']}/dora")
+    machines = [m.strip() for m in env["DORA_MACHINES"].split(",") if m.strip()]
+    if machines:
+        setv(("dora", "machines"), [{"id": m, "placeholders": ["viewer", "observer"]} for m in machines])
 
 hw = data.get("workcells", {}).get("hardware")
 if not hw:
@@ -165,6 +186,9 @@ print(f"    ok: host={cfg.host}:{cfg.port} ui_dist={cfg.ui_dist} tracker={cfg.tr
       f"yaw={cfg.tracker.yaw_deg} args={' '.join(cfg.tracker.libsurvive_args)}")
 print(f"    arms: {', '.join(f'{a.id}@{a.ip}' for a in hw.arms)}; profiles_dir={cfg.profiles_dir}")
 print(f"    cameras: {', '.join(f'{c.id}={c.kind}:{c.serial or c.device_path}:{c.fourcc}' for c in hw.cameras) or 'none'}")
+print(f"    dora: enabled={cfg.dora.enabled} bind_host={cfg.dora.bind_host} auth={cfg.dora.auth_effective} "
+      f"ports={cfg.dora.coordinator_port}/{cfg.dora.daemon_port}/{cfg.dora.zenoh_port} "
+      f"machines={[m.id for m in cfg.dora.machines]} var_dir={cfg.dora.var_dir}")
 for p in (cfg.ui_dist, cfg.tracker.libsurvive_config_path):
     if p is not None and not p.exists():
         print(f"    note: {p} does not exist yet")
