@@ -357,7 +357,8 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
 - `~/projects/apollo-mavis-v2-ws-merge/` (branch `merge-13-12`) and
   `~/projects/apollo-mavis-v2-ws-p12/apollo-mavis-v2-policy-node` (the GELLO
   viewpoint node lives there) are leftovers — deleting them is the operator's call.
-- **C31 re-fault under load (2026-09-09 late evening, uncommitted in hardware + ui + docs).**
+- **C31 re-fault under load (2026-09-09 late evening; COMMITTED + PUSHED 2026-09-10 as
+  hardware `bf1217a`, ui `1a958c1`, ws `1d33bb0`, and deployed to the shared account).**
   Opening the fridge door tripped `C31 Collision Caused Abnormal Current` on the
   Manipulation Arm, and every burst ended in `recovery budget exhausted (3 in 30 s)` —
   self-inflicted: each 20 ms auto-recovery re-enabled the servos with the door still
@@ -372,7 +373,8 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   `collision_sensitivity` to 2 (then 1), weighing the payload, pulling along the door's
   arc at 10–50 % speed are the operator's calls, not yet made. Same evening, UI:
   **Continue existing prefills Task from `DatasetInfo.task`** (05-ui §8.1 item 6) so a
-  resume is one click. The dev runtime (PID 3869832) does NOT have the driver fix.
+  resume is one click. A long-running dev runtime started before that does NOT have the
+  driver fix — restart it to pick it up (the shared account's copy has it).
 - Known follow-ups: lerobot's `StreamingVideoEncoder` start / finish hold the
   GIL 160–330 ms at `start_episode` and up to 324 ms at `finish_episode` with
   `h264_nvenc` (04-runtime §10.5 "GIL stall"; an encoder subprocess is the fix);
@@ -380,6 +382,15 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   leak-check with a machine-wide `pgrep -x dora`, so never run two dora suites on
   this host at once; the twin's microphone body is off by ≥ 20–30 mm (03-sim §4.5)
   and the carriage mesh is 42 / 32 mm short per end — both need a tape measure.
+
+- **In flight, NOT pushed (2026-09-10): core's `SessionAutoEndNotice` + the three additive
+  `SessionTelemetry` fields (`session_id`, `mode`, `kind`, `auto_ended`) for an
+  "orphaned session" watch** — a session the runtime ends by itself after
+  `control.orphan_session_grace_s` with no `/ws/control` connection, so the Welcome page can
+  say the arms were released while nobody was watching. Core-only so far: the runtime has no
+  such config key and no implementation, the UI does not read the fields, and 04-runtime has
+  no §13.2 for it. Another session owns this — do not push or bump core's pointer until its
+  runtime half lands (the ws commit of 2026-09-10 deliberately left core's pointer alone).
 
 ## The shared lab account `mavis-v2` (production deployment, 2026-09-09)
 
