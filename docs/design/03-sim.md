@@ -439,6 +439,12 @@ authority for the cell). What the kitchen adds:
 - **`graspable: [fridge_door_handle, fridge_drawer_handle, range_handle]`**: a session
   may whitelist them against the Manipulation Arm's gripper; every
   arm link stays gated against every appliance body.
+- **The same posture is also a runtime PROFILE**, `Kitchen Interaction` (operator request
+  2026-09-09 evening; `python -m apollo_mavis_v2_runtime.profiles.seed_kitchen`,
+  04-runtime §10.5), so it can be reached on the real cell with "Go to profile" now that
+  the mode it was built for is gone. That profile PINS both carriages, because the
+  appliance numbers below only line up with the real cameras from this Perception Arm
+  carriage position.
 - **Keyframe**: Perception Arm at the **measurement posture** `view: [0.0, 2.646, −1.598,
   0.018, 1.637, 0.25, 2.007, 0.029]` (MJCF order, rail first — rail 0 = the operator's
   left end, camera on the kitchen: from the twin the wrist camera then sits at

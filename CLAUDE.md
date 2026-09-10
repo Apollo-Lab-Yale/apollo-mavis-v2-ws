@@ -209,6 +209,16 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   `[0, 0.8, 0, 28.9, 0, 28.2, 0]°`, carriages left unset (kept where they are).
   Twin-verified collision-free at both carriage ends, mic on and off, and
   plannable from the keyframe. Seeded into `var/profiles/` on 2026-09-08.
+- **`Kitchen Interaction` is an ORDINARY profile, not an initial condition**
+  (operator request 2026-09-09 evening; `python -m
+  apollo_mavis_v2_runtime.profiles.seed_kitchen`, 04-runtime §10.5): the posture the
+  `mavis_v2_kitchen` twin was measured at — Perception Arm
+  `[2.646, -1.598, 0.018, 1.637, 0.25, 2.007, 0.029]` rad with its **carriage pinned
+  at 0.0** (the kitchen numbers were deprojected from a frame taken there, so the
+  appliances only line up from that carriage position), Manipulation Arm at the
+  cell's factory zero with its carriage at 0.65. Reached with "Go to profile".
+  Seeded into `var/profiles/` for both kinds on 2026-09-09; the live runtime picked
+  it up with no restart.
 - Never write a vanilla LeRobot v3 dataset from the recorder again; never edit an
   export in place — regenerate it.
 - Recording filters idle / small-motion frames by default (`SessionSpec.

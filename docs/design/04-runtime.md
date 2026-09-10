@@ -1579,6 +1579,31 @@ idle|recording|saving|returning` (`returning` only with `return_to_start`,
   with 107 mm to the nearest monitored pair, and plannable from the cell's
   keyframe (`tests/test_reset_to_initial.py`). Never run automatically —
   designating an initial condition changes what every return aims at.
+
+  **Seeding the "Kitchen Interaction" posture** (operator request 2026-09-09
+  evening). `python -m apollo_mavis_v2_runtime.profiles.seed_kitchen [--kind
+  hardware|sim] [--dry-run]` writes ONE ordinary profile per kind, named
+  **`Kitchen Interaction`**, holding the posture the `mavis_v2_kitchen` twin was
+  prepared and measured at (03-sim §4.4): Perception Arm
+  `[2.646, -1.598, 0.018, 1.637, 0.25, 2.007, 0.029]` rad framing the fridge /
+  range / counter with its wrist D435i, carriage at **0.0**; Manipulation Arm at
+  the cell's factory-zero initial state (`[π, 0, 0, 0, 0, 0, 0]` rad), carriage at
+  **0.65**. It was that scene's keyframe; when the GELLO mode it had been built
+  for was cut, the operator asked for the posture to survive as a profile so it
+  can be reached with "Go to profile" like any other. Two differences from
+  `seed_initial`: it **pins both carriages** — every kitchen number was
+  deprojected from a frame taken with the Perception Arm's carriage at its zero
+  end, so the appliances only line up with the real cameras from there — and it
+  **never touches the initial-condition designation**, which stays with the
+  default posture. Idempotent the same way (matched by name within the kind).
+  Verified collision-free on BOTH twins (`mavis_v2_kitchen` and `mavis_v2`),
+  microphone off and on, at the cell's raised shell `geom_inflation_m = 0.025`:
+  tightest monitored pair `table ↔ grip_*_finger_pad_2` at 114.7 mm
+  (`tests/test_reset_to_initial.py`). Also checked LIVE the evening it was seeded:
+  from the arms' then-current posture (both at the seeded default, grip carriage
+  0.65, view 0.0) the same planner the goto uses found a path on both twins at the
+  raised shell — `arm_order ['view', 'grip']`, 2 and 3 waypoints, executed one arm
+  at a time. Not yet EXECUTED on the real arms.
 - **GIL stall of the video encoder (measured 2026-09-07).** lerobot's
   `StreamingVideoEncoder` holds the GIL while PyAV opens (`start_episode`,
   160–330 ms) and closes (`finish_episode`, 118–324 ms with `h264_nvenc`, ≈ 15
