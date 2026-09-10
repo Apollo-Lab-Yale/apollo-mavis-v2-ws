@@ -1176,6 +1176,28 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 > separate git worktree; `uv run --no-sync` is safe for read-only tools when the lockfile
 > is unchanged. Never two test runs in the same tree at once. Same class of hazard as the
 > 2026-09-05 test-suite incident (04-runtime §16).
+>
+> **The venv's own entry points are safe.** `$OPS_ROOT/apollo-mavis-v2-runtime/.venv/bin/pytest`,
+> `.venv/bin/python -m apollo_mavis_v2_runtime.profiles.seed_kitchen`, `.venv/bin/python -m ruff`
+> and friends do NOT re-sync the environment — only `uv run` does. So the practical form of
+> the rule is: with a runtime live, call the venv's entry points directly instead of going
+> through `uv run`. Verified 2026-09-10 (a full playback + orphan suite and ruff ran against a
+> live dev runtime with no effect on it), and it is how `seed_kitchen` was re-run on the shared
+> account while `mavis-runtime` was serving.
+>
+> **But a serving cell makes two runtime tests fail, permanently, on this host.** While
+> `mavis-runtime` is up it runs the 100 Hz control loop, four camera encoders, twin sync and
+> the EGL overlays (measured 2026-09-10: ~118 % CPU, host load average 2.8), and
+> `tests/test_return_fuzz_mavis_v2.py` plans 24 two-arm RRT starts against a WALL-CLOCK
+> budget. Its `MAX_HONEST_TIMEOUTS` cap of 2 is then exceeded by honest full-budget timeouts
+> (`3 <= 2`), and `test_e2e_reset_pinched_sim.py::test_goto_profile_back_to_the_pinched_profile_is_a_goal_in_collision_refusal`
+> goes the same way — while passing in isolation. The tell that this is load and not a
+> regression: the failing assertion is a COUNT, every case is still classified an honest
+> failure, `holds` is empty with `arrival 0.000 mrad / 0.00 mm`, and re-running the SAME seeds
+> reports DIFFERENT failing pairs (the RRT's answer depends on how far it gets inside its
+> budget, not on the geometry). **Run those two on a quiet host, or with the service stopped.**
+> Do NOT raise `MAX_HONEST_TIMEOUTS` or the planner budget to make them pass: both are part of
+> the return-flow safety proof the operator asked for (04-runtime §10.5, 11-safety §9).
 
 | Symptom | Cause / fix |
 |---|---|

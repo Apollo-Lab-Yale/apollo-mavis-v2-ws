@@ -97,6 +97,11 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   are certain the lockfile is unchanged. Never with a session open. And **never two test
   runs in the same tree at once** — that is how the venv got rewritten under a live
   process in the first place.
+  **The venv's own entry points are safe** — `.venv/bin/pytest`, `.venv/bin/python -m …`,
+  `.venv/bin/python -m ruff` do NOT re-sync; only `uv run` does. That is the usable form
+  of this rule: you can test and lint with a runtime live, you just must not go through
+  `uv run` to do it (verified 2026-09-10 — the whole playback suite plus ruff ran against
+  a live dev runtime this way with no effect on it).
 - Never open UFACTORY Studio "Live control" during a session. Controller
   `state 2` (standby) is HEALTHY for a mode-1 arm holding a posture; `clean_error`
   returning 1/2/9 is a status echo, not a failure (02-hardware §16).
