@@ -166,8 +166,8 @@ class SceneRegistry:                # REGISTRY = SceneRegistry() at import,
 
 `list()` hides `hidden: true` scenes by default so the UI/API (`GET /api/scenes`)
 see exactly one scene — **`mavis_v2`, titled "APOLLO MAVIS V2 Digital Twin"**; the
-eight dev/CI scenes (§4.3) and the hidden GELLO kitchen twin `mavis_v2_kitchen`
-(§4.4, selected implicitly by the GELLO card) stay in the package for tests,
+eight dev/CI scenes (§4.3) and the hidden kitchen twin `mavis_v2_kitchen`
+(§4.4, selected explicitly in config) stay in the package for tests,
 benchmarks, the guardrail script and the runtime, which address them by id.
 
 ### 4.1 Descriptor schema
@@ -213,7 +213,7 @@ allowed_pairs: # optional; structural pairs, twin pair labels (§4.2)
 ```
 
 **Environment geoms** (`EnvironmentSpec`; extended 2026-09-09 for the kitchen twin,
-16-gello §10). `type: plane | box` take `size` (MuJoCo half-extents); **`type: mesh`
+§4.4). `type: plane | box` take `size` (MuJoCo half-extents); **`type: mesh`
 is implemented for FILE meshes** (the pre-phase-15 text called it "phase-03+"): `mesh`
 is an asset-relative STL/OBJ under `assets/`, `scale` its per-axis scale, `size` must
 be absent, and the **collider is MuJoCo's convex hull of the mesh** (a mesh_copy or
@@ -232,9 +232,9 @@ paths must be relative (no `/` prefix, no `..`) and must exist at build
 (`SceneCompileError` before MuJoCo's compiler sees them).
 
 **`graspable`** (`SceneDescriptor.graspable`, echoed on `SceneMeta.graspable`): world
-geom names a session may whitelist against a gripper — the GELLO session calls
+geom names a session may whitelist against a gripper — a session calls
 `DigitalTwin.set_grasp_whitelist("grip", meta.graspable)` so the fingers may touch a
-handle while every arm link stays gated against every appliance body (16-gello D7).
+handle while every arm link stays gated against every appliance body.
 Validated at build: every name must be a world geom of the built model; the descriptor
 rejects duplicates and names that point at a non-collidable geom (a whitelist on a
 visual-only plate would be a no-op).
@@ -296,7 +296,7 @@ the debug inflation of 0.025 m. The scene author therefore declares them:
 | `dual_rail_tabletop`, `dual_mixed`, `triple_rail_row` | 2–3 | hidden | composition coverage |
 | `guardrail_env`, `guardrail_face`, `guardrail_rail` | 1–2 | hidden | safety CI cells (§11) |
 | **`mavis_v2`** | 2 | **the only visible scene** — title "APOLLO MAVIS V2 Digital Twin" | **the lab cell**: digital-twin reference for the real arms and a sim scenario |
-| `mavis_v2_kitchen` | 2 | hidden — title "APOLLO MAVIS V2 Kitchen (GELLO)" | the lab cell + the kitchen (fridge, range, counter, cabinets, wall, four AprilTags): the GELLO Manipulation twin, selected implicitly by the GELLO card (§4.4, 16-gello D6) |
+| `mavis_v2_kitchen` | 2 | hidden — title "APOLLO MAVIS V2 Kitchen" | the lab cell + the kitchen (fridge, range, counter, cabinets, wall, four AprilTags): the twin of the room the cell stands in, selected EXPLICITLY in config via `digital_twin_scene` / `sim_scene` and never listed by `GET /api/scenes` (§4.4) |
 
 `hidden: true` scenes are kept in the package (built by id by tests, benchmarks and
 the guardrail script) but never reach the runtime's `GET /api/scenes` or the UI; the
@@ -382,21 +382,22 @@ short of the rail end where the mesh stops 8.95 cm short, so the monitored
 carriage ↔ obstacle gap is ~3.4 cm generous, and the mesh rail width leaves the
 obstacle's inner face 1.4 cm past the mesh gripper-rail edge.
 
-### 4.4 `mavis_v2_kitchen` (GELLO)
+### 4.4 `mavis_v2_kitchen` — the lab kitchen in front of the cell
 
-The digital twin of **GELLO Manipulation** mode (phase-15; contract and measurement
-record in `16-gello.md` §3 / §10 — the numbers live THERE and in the YAML header,
+The digital twin of the **lab kitchen standing in front of the cell** (built 2026-09-09
+for the GELLO mode that was cut the same evening; the measurement record is the YAML header
+and this section,
 edit both together). `id: mavis_v2_kitchen`, `hidden: true`, `suitable_for: [sim,
-twin]`, title "APOLLO MAVIS V2 Kitchen (GELLO)". The cell geometry is `mavis_v2`'s:
+twin]`, title "APOLLO MAVIS V2 Kitchen". The cell geometry is `mavis_v2`'s:
 `arms`, `cam_front` / `cam_top`, `table`, `obstacle`, `allowed_pairs` and the
 Manipulation Arm's keyframe are copied **verbatim** from `mavis_v2.yaml`
 (`tests/test_mavis_v2_kitchen.py` asserts the blocks are equal, so §4.3 stays the one
 authority for the cell). What the kitchen adds:
 
 - **Appliances as dimensioned boxes** on the faces the Perception Arm's wrist D435i
-  measured on 2026-09-09 from the GELLO hold posture (one colour frame + the median of
+  measured on 2026-09-09 from the measurement posture (one colour frame + the median of
   45 depth frames, deprojected with the colour intrinsics and the overlay's `view_wrist`
-  principal-point nudge `[21, 13]`; details in 16-gello §3). The anchor planes: fridge
+  principal-point nudge `[21, 13]`; details in the YAML header). The anchor planes: fridge
   side **x = 0.075**, fridge door **y = −1.027**, range front **y = −1.222**, drawer
   fronts **y = −1.279**, counter top z = 0.926 (modelled at the 36-inch standard 0.914);
   the kitchen run is parallel to world X (tags 0 and 4 share x to 1 mm over 88 cm of
@@ -425,7 +426,7 @@ authority for the cell). What the kitchen adds:
   a hinged body.
 - **Four AprilTag plates** (`tag_0`, `tag_4` on the fridge's +X side panel at
   x = 0.0755, `tag_1` on the fridge door at y = −1.0262, `tag_3` on the range's oven
-  door at y = −1.2215; centres from the measurement, 16-gello §3): non-collidable 1 mm
+  door at y = −1.2215; centres from the measurement in the YAML header): non-collidable 1 mm
   boxes `size [0.0005, 0.1024, 0.1024]` (a 0.205 m sheet = the 9-bit tagStandard41h12
   tag plus one white bit of margin at 18.6 mm / bit; the detected quad is the inner 5
   bits = 0.0931 m as measured), textured with `assets/textures/tagStandard41h12_*.png`
@@ -433,12 +434,12 @@ authority for the cell). What the kitchen adds:
   the +X plates, yaw +90° (`[0.7071, 0, 0, 0.7071]`) for the +Y plates: the tag's right
   along local +y, its top along local +z, upright and unmirrored as seen from outside.
 - **`cam_kitchen`** at `(−0.15, 1.0, 2.0)`, `xyaxes [−1, 0, 0, 0, −0.6, 1]`, fovy 60:
-  the operator-side overview for the GELLO launch preview (looks −Y and 31° down, image
+  the operator-side overview of the kitchen (looks −Y and 31° down, image
   right = −X); the fridge front and the Manipulation Arm at its keyframe are in frame.
-- **`graspable: [fridge_door_handle, fridge_drawer_handle, range_handle]`** (16-gello
-  D7): a GELLO session whitelists them against the Manipulation Arm's gripper; every
+- **`graspable: [fridge_door_handle, fridge_drawer_handle, range_handle]`**: a session
+  may whitelist them against the Manipulation Arm's gripper; every
   arm link stays gated against every appliance body.
-- **Keyframe**: Perception Arm at the **GELLO hold posture** `view: [0.0, 2.646, −1.598,
+- **Keyframe**: Perception Arm at the **measurement posture** `view: [0.0, 2.646, −1.598,
   0.018, 1.637, 0.25, 2.007, 0.029]` (MJCF order, rail first — rail 0 = the operator's
   left end, camera on the kitchen: from the twin the wrist camera then sits at
   (0.460, 0.394, 1.579) m with its axis (−0.243, −0.907, −0.343)); Manipulation Arm at
@@ -558,6 +559,45 @@ Consequences, in order of importance:
 
 Raw captures, scripts and figures: `var/alignment-20260909/` (untracked). Nothing in this
 investigation changed a tracked number; §4.3 stands as measured.
+
+**Addendum, same evening — what the operator actually meant, and the residual measured.**
+The report was not about the unmodelled props: it was that **the two arms and their linear
+rails do not sit quite right**. The frames above could not show that (the twin's frustum held
+only floor), so a fresh pair was captured at a posture where the Manipulation Arm's wrist
+camera looks straight at the Perception Arm's column and BOTH rails, and the Perception Arm's
+looks down on the Manipulation Arm's rail (`var/align2/`, untracked). Method: the twin's
+silhouette is the boundary of the `align`-vs-raw difference mask (the tint marks every twin
+pixel), scored against the raw frame's Gaussian-blurred Sobel magnitude, over an exhaustive
+±25 px shift search, per connected structure.
+
+| camera | structure (bbox) | best shift | score gain | peak / far |
+| --- | --- | --- | --- | --- |
+| `grip_wrist` (no nudge) | Perception Arm column + near rail, x[173,362] y[0,480] | **dx +18, dy +10** | 1.83× | 1.55 |
+| `grip_wrist` | the far rail, x[431,640] y[170,480] | **dx +4, dy −6** | 2.04× | 2.69 |
+| `view_wrist` (nudge `[21,13]`) | the Manipulation Arm's rail, x[0,160] y[101,419] | **dx −21, dy −6** | 1.69× | 2.44 |
+| `view_wrist` | the microphone body, x[271,609] y[369,480] | (dx −19, dy −25) | 5.21× | 3.50 |
+
+Reading, in order of what it settles:
+
+1. **It is a geometry / pose error, not a camera-model offset.** Two structures in ONE
+   `grip_wrist` frame want shifts differing by **14 px in x and 16 px in y**. No principal
+   point, focal length or single camera pose can satisfy both — a camera-model error moves
+   everything in the frame the same way (a scale error moves it radially, which 14/16 px at
+   these radii is not). At their 0.6–1.0 m range the disagreement is **15–30 mm**.
+2. **The `view_wrist` `[21, 13]` nudge over-corrects at this range by the FULL 21 px in x.**
+   The rail wants `dx = −21`, i.e. exactly cancelling the nudge, while `dy` wants only −6 of
+   the +13. That is the depth-dependence predicted above: the nudge was fitted against an arm
+   at ~0.25 m and this rail is much further, so if the underlying error is POSITIONAL the
+   correction should shrink with range, and it does. It is now worth re-solving as a per-arm
+   6-DOF extrinsic rather than a 2-D patch.
+3. The microphone row is listed only for completeness: its "gain" is large because the real
+   region is featureless white table, so the fit is meaningless. It remains the known-wrong
+   body of §4.3.
+4. Because the residual is 15–30 mm and the gate's shell was **8 mm**, the gate could report
+   clearance while metal touched — which is what a grazing collision the same evening looked
+   like. The lab cell's `geom_inflation_m` was raised to **0.025** as a stop-gap
+   (11-safety §6.2 records the value, the cost and the test consequences). **Re-measuring the
+   cell is the actual fix**; the shell should come back down afterwards.
 
 ## 5. Scene composition via `mujoco.MjSpec`
 

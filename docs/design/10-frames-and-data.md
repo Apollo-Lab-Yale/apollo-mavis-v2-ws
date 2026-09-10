@@ -494,14 +494,12 @@ merge-compatible (overview §4.2; upstream `intervention` name/shape verbatim):
 features["intervention"]  = {"dtype": "bool",  "shape": (1,), "names": None}
 features["action_source"] = {"dtype": "int8",  "shape": (1,), "names": None,
     "info": {"labels": {"0": "policy", "1": "teleop", "2": "joint_jog",
-                        "3": "takeover", "4": "planner", "5": "gello"}}}
+                        "3": "takeover", "4": "planner"}}}
 features["wallclock_ns"]  = {"dtype": "int64", "shape": (1,), "names": None}
 ```
 
 - `action_source` labels mirror core's `CommandSource` string values
-  (spelling authority; `"5": "gello"` was reserved on 2026-09-09 when phase-15 appended
-  `CommandSource.GELLO` — GELLO Manipulation records nothing in v1, so no dataset carries
-  it yet; 16-gello §12.2; supersedes the earlier
+  (spelling authority; supersedes the earlier
   `{0: policy, 1: human_teleop, 2: reset_planner}` draft — 0/1 semantics
   unchanged). Per mode: collect ⇒ `1` (teleop); DAgger ⇒ `0` while the policy
   drives, `3` during human takeover. `2` (joint_jog) and `4` (planner) are

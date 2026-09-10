@@ -43,21 +43,18 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   (`15-pro-dagger.md` v1.0 is history only — superseded the evening of
   2026-09-08); the per-repo Online
   DAgger amendments → 04-runtime §10.7, 05-ui §8, 10-frames §7.4 / §11.10,
-  12-dagger, 14-dora; dora bus + external policy → 14-dora; **GELLO Manipulation**
-  (leader device, engage state machine, launch check / plan / sequential execution,
-  viewpoint node, kitchen twin measurements, REST, UI, implementation record) →
-  16-gello §0–§16 (§3 = the 2026-09-09 kitchen measurement log, §15 = what shipped
-  and how it deviates); per-repo amendments → 04-runtime §5.1 / §6.1 / §13 / §14,
-  05-ui §8.1 6b / §8.2, 03-sim §4.4, 11-safety §2 T11 / §13, 14-dora §4–§5 / §7.
+  12-dagger, 14-dora; dora bus + external policy → 14-dora; the **kitchen twin**
+  `mavis_v2_kitchen` and its 2026-09-09 measurement → 03-sim §4.4 and the header of
+  `apollo-mavis-v2-sim/.../assets/scenes/mavis_v2_kitchen.yaml`.
 - `docs/prompts/phase-XX-*.md` — the phased plan; one phase = one session's work,
   status table in `docs/prompts/README.md`.
-  **Next: commit phase-15 when the operator says so; then, with the operator
-  present, power the GELLO servos, render the lab config with the GELLO knobs,
-  restart the runtime and run the phase-15 acceptance steps (first ever hardware
-  run of phase-12 / 13 / 14 / 15 code); the first policy-repo trainer on the
-  Online DAgger shell (sim); admitting Online DAgger on hardware is the operator's
-  call (D7).** Plan: `docs/prompts/phase-15-gello.md` (phase-12 / 13 / 14 were
-  committed and pushed 2026-09-09 05:46, ws `e16d2c1`).
+  **Next: re-measure the cell so the twin matches the room (03-sim §4.5 — the
+  overlay residual is ~18 px / 15–30 mm and the gate cannot see the kitchen or the
+  cart), then the first hardware run of phase-12 / 13 / 14 code with the operator
+  present; the first policy-repo trainer on the Online DAgger shell (sim);
+  admitting Online DAgger on hardware is the operator's call (D7).** Phase-15
+  (GELLO Manipulation) was implemented on 2026-09-09 and then CUT the same evening
+  at the operator's request — see "GELLO Manipulation was cut" below.
 - `docs/deploy/DEPLOYMENT.md` — the lab machine, services, network profiles,
   troubleshooting. `docs/research/` — background notes, reference only.
 
@@ -110,12 +107,16 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   Manipulation Arm was cancelled 10 s in by `controller error 31: Collision Caused
   Abnormal Current`, twice. Until the cart and the appliances are in the scene, treat
   every planned motion (return-to-start, `R`, `goto_profile`, `home_rail`) as unverified:
-  10 % speed, hand on the E-stop. The `*_align` overlays cannot warn you — with only twin
-  floor in the frustum the Manipulation Arm's overlay draws NOTHING (`mask_fraction` 0.0
-  exactly) and the Perception Arm's draws only its known-wrong microphone body.
+  10 % speed, hand on the E-stop. And it is not only the furniture — **the arms and their
+  rails themselves are ~15–30 mm out** in the twin (03-sim §4.5 addendum), which is why the
+  gate's shell was raised to 25 mm. Careful with the `*_align` overlays as evidence: at a
+  posture whose twin frustum holds only floor, the Manipulation Arm's overlay draws NOTHING
+  (`mask_fraction` 0.0 exactly) and the Perception Arm's draws only its known-wrong
+  microphone body — judge alignment only where the twin predicts geometry in frame.
 - Driver caps at speed scale 1.0: `max_joint_vel` 0.6 rad/s, `max_cart_step_m`
-  0.004 (= 4 mm/tick, deliberately HALF the gate's 8 mm inflation — do not raise
-  it without changing the gate), rail 50 mm/s. Hardware tab picks 10 / 50 / 100 %,
+  0.004 (= 4 mm/tick, once deliberately HALF the gate's 8 mm inflation — the lab cell's
+  shell is 25 mm since 2026-09-09, so the step is well inside it; do not raise the step
+  without re-checking the gate), rail 50 mm/s. Hardware tab picks 10 / 50 / 100 %,
   default 100 % (operator decision 2026-09-08 evening; 50 % was the 2026-09-07 call).
 
 ## Operator-owned settings — do not change unasked
@@ -280,108 +281,79 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   _TRAIN_S / _EVERY / _FAIL_AT`) is the e2e stand-in; sim e2e
   `tests/dora_bridge/test_e2e_online_dagger.py`.
 
-## GELLO Manipulation (operator decisions 2026-09-09; 16-gello v1.0 is the contract)
+## GELLO Manipulation was CUT (operator decision, 2026-09-09 evening)
 
-- The landing page's **fifth card is "GELLO Manipulation"** (wire `mode: gello`,
-  route `#/gello`). GELLO = the passive xArm7-shaped leader (Dynamixel servos over
-  the FTDI FT232H / U2D2 at `/dev/serial/by-id/usb-FTDI_USB__-__Serial_Converter_
-  FTAKROCJ-if00-port0`, `root:dialout`). It drives the **Manipulation Arm only, in
-  joint space**; the operator keeps **←/→ for that arm's rail** (every source, in
-  every GELLO state); every other held key is ignored for it; the gripper follows
-  the leader's trigger; Tab / Z / Space / episode keys / joint panel are nacked.
-  No recording in v1. **The Perception Arm's action comes from an external
-  viewpoint node** over dora (`SessionAnnounce.external_arms == ["view"]`,
-  view-only delta_ee layout, attached only while RUNNING and no plan owns the
-  arm) and otherwise **holds the GELLO hold posture** J1–J7 `[2.646, -1.598,
-  0.018, 1.637, 0.25, 2.007, 0.029]` rad, rail 0.0 (`gello.view_posture_rad`,
-  NOT the seeded initial condition). `SessionSpec.gello.viewpoint: auto |
-  external | hold` (default `auto`); `start_from` must be `keep_current`.
-- **Engagement state machine (D3), no implicit motion**: `no_leader |
-  out_of_sync | tracking | paused | motion`; only `tracking` streams the leader
-  (through the uniform cap — 0.006 rad/tick at 100 %, also in sim — and the gate);
-  engage tolerance 0.10 rad, leash 0.80 rad; joints 1/3/5/7 unwrapped to the
-  nearest branch at engagement; fault / `R` / Go to profile / the exit return
-  force `paused`; **Resume** is the operator's button (Pause / Resume are Cockpit
-  buttons, actions `gello_pause` / `gello_resume` — the keymap stays 24 rows).
-- **Launch = check → plan → ONE ARM AT A TIME → engage**: `POST /api/session`
-  refuses in order `GELLO leader not available (…)` → joint limits → `GELLO posture
-  collides: <a> / <b> at <mm> mm - move GELLO and retry` → viewpoint node (only
-  `external`); the session-less `POST /api/gello/preview` returns the same verdict
-  plus a PNG of `cam_kitchen` with the colliding bodies red; the GELLO sheet polls
-  it at 2 Hz and enables Start only on `clear`. **GELLO is admitted on hardware
-  (D8)** — the refusal text is now `hardware sessions support teleop, data
-  collection and GELLO Manipulation only`; Online DAgger stays refused (D7).
-- **Kitchen twin `mavis_v2_kitchen`** (`hidden: true` — `GET /api/scenes` still
-  lists only `mavis_v2`; the GELLO card selects it via `GET /api/gello .scene_id`):
-  the cell + GE GDE21ESKSS fridge, GE 30" coil range, counter, upper cabinets,
-  wall as dimensioned BOXES on the faces measured 2026-09-09 from the Perception
-  Arm's wrist RealSense at the hold posture (16-gello §3: fridge left side
-  x = 0.075, fridge door y = −1.027, range door y = −1.222, counter top z = 0.926,
-  yaw 0, ±3 cm; tags tagStandard41h12 ids 0/4 fridge side, 1 fridge door, 3 range
-  door, quad 0.093 m → 0.205 m plates). Handles are `graspable` (finger ↔ handle
-  whitelisted per session); appliance bodies gate every arm link. The sim test
-  re-detects the four tags on a render from `view_wrist_cam` within 1 px of the
-  real frame. Edit the numbers in `mavis_v2_kitchen.yaml` and 16-gello §3 together.
-  The `*_align` overlays outline the appliances only when `twin_overlay.scene`
-  (render knob `TWIN_OVERLAY_SCENE`) names the kitchen.
-- **Leader device** = `apollo_mavis_v2_runtime.devices.gello.GelloReader`
-  (tracker pattern; extra `[gello]` = dynamixel-sdk + pyserial, imported only
-  there; never writes a servo register — AST-pinned). Calibration is session-less
-  REST: `POST /api/gello/calibrate {op: match_arm | gripper_open | gripper_closed |
-  clear, kind}` → `var/gello_calibration.json` (offsets = nearest π/2, the GELLO
-  convention); `gello.joint_signs` is operator config (default all +1 — unverified).
-  **On 2026-09-09 no servo answered any baud** (57600 … 4 M, protocol 2.0 / 1.0):
-  almost certainly servo power off; ids / baud / signs are unverified, the FTDI
-  `latency_timer` was 16 ms (the udev rule in `01-sudo-udev-and-deps.sh` sets 1 ms
-  and `dialout` + `uaccess` for `0403:6014`).
-- Config: `gello:` block (repo `backend: none`; lab render `GELLO_BACKEND=dynamixel
-  GELLO_USB_SERIAL=FTAKROCJ [GELLO_BAUD]`), `twin_overlay.scene`; `install-stack.sh`
-  syncs `--extra gello`. Clearance readout (the operator's complaint): the row
-  COUNT was always ≤ 5 — long labels wrapped and the panel sat above the episode
-  buttons; now 4 one-line rows with their own scroll and the episode controls above
-  (16-gello §12.4).
+- Phase-15 shipped a fifth mode "GELLO Manipulation" on 2026-09-09 and it was
+  **reverted the same evening at the operator's request** — they did not want to keep
+  debugging the leader. Reverts: core `236a769`, runtime `629002f`, ui `2704aaf`
+  (partial — the clearance fix stayed), plus this file and the docs. `16-gello.md`
+  and `phase-15-gello.md` are DELETED; the history is in the reverted commits
+  (`0654570`, `0eeb681`, `a40df01`, `30f06ab`). **Do not re-add any of it unasked.**
+- Why: the leader's Dynamixel bus is **silent**. The adapter is a genuine U2D2-class
+  FTDI FT232H (`0403:6014`, descriptors `FTDI / USB <-> Serial Converter / FTAKROCJ`,
+  `/dev/ttyUSB0`) and it enumerates and opens fine, but on 2026-09-09 — twice, with
+  the servo supply OFF and then ON — no id answered a per-id or BROADCAST ping at
+  9600 … 4 M on protocol 2.0 or 1.0, a hand-built protocol-2.0 broadcast packet read
+  back 0 bytes, and toggling RTS / DTR changed nothing. So it is not the host, the
+  driver or the baud. Remaining suspects are physical: the servo supply board and its
+  LED, the chain plugged into the U2D2's 3-pin TTL port rather than the 4-pin RS-485
+  one, a dead first servo blocking the daisy chain, or a supply voltage wrong for the
+  servo model. The FTDI `latency_timer` is still 16 ms — the 1 ms udev rule was never
+  installed (the agent has no passwordless sudo) and its GELLO lines were reverted
+  out of `scripts/tracker/01-sudo-udev-and-deps.sh` with the rest.
+- **KEPT deliberately, because it has nothing to do with the leader:**
+  - the **kitchen twin** `mavis_v2_kitchen` (03-sim §4.4 + the YAML header): the
+    fridge / range / counter / cabinets / wall that really do stand in front of the
+    cell, plus the four AprilTag plates. Still `hidden` — `GET /api/scenes` lists
+    only `mavis_v2` — but now selected EXPLICITLY in config with
+    `workcells.<kind>.digital_twin_scene` (hardware) or `sim_scene` (sim), which
+    points the GATE and the PLANNER at the appliances too, not just the overlays.
+    Its `graspable` handles and the textured / mesh / non-collidable
+    `EnvironmentSpec` support stay with it.
+  - the **clearance readout fix** (05-ui §8.2, the operator's other request that
+    day): the row COUNT was always ≤ 5 — long labels wrapped in the 320 px column
+    and the panel sat above the episode buttons; now 4 one-line rows with their own
+    `max-height` + scroll and `EpisodeControls` ABOVE the readout.
 
 ## Work in progress (2026-09-09)
 
 - **Phase-12 / 13 / 14 and the 2026-09-08 follow-ups are COMMITTED and PUSHED**
   (2026-09-09 05:46: core `7d9400a`, hardware `0e33d45`, sim `fb1a4af`, runtime
-  `17d8bc7`, ui `eca22df`, ws `e16d2c1`). None of it has run on the real arms.
-- **Phase-15 GELLO Manipulation is implemented and UNCOMMITTED** in core / sim /
-  runtime / ui and the policy-node repo (`~/projects/apollo-mavis-v2-ws-p12/
-  apollo-mavis-v2-policy-node`, still without a remote), plus the workspace docs
-  and deploy scripts. Test state: core 482 + `export_schemas --check` clean; sim
-  213 + 1 skip (EGL); runtime `-m "not dora"` 860 passed / 2 skips / 2 pre-existing
-  failures (`test_return_fuzz_mavis_v2[mic|nomic]`, an RRT-timeout budget that
-  fails identically without phase-15 — planner owner's call; `test_e2e_reset_
-  pinched_sim` flakes 1-in-2 under full-suite load and passes alone);
-  `test_e2e_gello_viewpoint` 1 (dora, alone); ui 47 files / 486; policy-node 142;
-  hardware 293 untouched. A sim smoke instance on port 8766 exercised the whole
-  GELLO REST / WS flow before and after the review fixes (16-gello §15.3). The
-  adversarial review (6 dimensions, 26 raw → 21 confirmed, all fixed) is
-  16-gello §15.5; the fixes' own deviations are §15.2 items 11–19. Commit only
-  when the user says so.
-- **The dev runtime (PID 3869832, started 04:45:20 on 2026-09-09 with
-  `var/mavis_v2_local.yaml`) runs exactly the 05:46 commit** — nothing of
-  phase-15 (the `gello:` block, `/api/gello*`, the kitchen twin, the fifth card's
-  backend) is live in it. Before the first GELLO run: `uv sync --extra gello` in
-  the runtime (the venv already has dynamixel-sdk / pyserial from this session),
-  add `GELLO_BACKEND=dynamixel GELLO_USB_SERIAL=FTAKROCJ TWIN_OVERLAY_SCENE=
-  mavis_v2_kitchen` to `scripts/dev/local.env` (operator's file), `mavis-dev.sh
-  render`, restart. The Vite dev server (:5173) serves the current UI source.
-- `var/gello_smoke.yaml` (port 8766, `gello.backend: fake`) is the throwaway
-  smoke config; `var/gello-kitchen-20260909/` holds the raw kitchen captures
-  (colour frame, aligned depth, tag detections, camera calibration) — keep them,
-  16-gello §3 is derived from them.
-- `~/projects/apollo-mavis-v2-ws-merge/` (branch `merge-13-12`) is a stale
-  leftover — unused; deleting it is the operator's call.
+  `17d8bc7`, ui `eca22df`, ws `e16d2c1`). **None of it has run on the real arms.**
+- **Phase-15 (GELLO) was implemented, pushed, and then reverted the same evening** —
+  see the section above. What remains of it: the kitchen twin and the clearance fix.
+- **The two arms and their rails are ~15–30 mm out in the twin, measured 2026-09-09
+  (03-sim §4.5 + its addendum).** The operator's "alignment" complaint is about the
+  ARMS AND RAILS, not the props. Measured on a posture where both are in frame: two
+  structures in ONE `grip_wrist` frame want shifts differing by 14 px x / 16 px y, so
+  no camera model can satisfy both — it is geometry, and intrinsics, extrinsics and
+  the SDK state were each ruled out with numbers. The `view_wrist` `[21, 13]` nudge
+  **over-corrects by the full 21 px in x** at rail range, so it is a depth-dependent
+  patch for what should be a per-arm 6-DOF extrinsic. Consequently the hardware gate
+  inflation was raised **0.008 → 0.025 m** with `warn_clearance_m` 0.045 in
+  `configs/mavis_v2.yaml` (operator decision after a grazing collision; 11-safety
+  §6.2 has the cost and the test consequences). That is a STOP-GAP — an 8 mm shell was
+  smaller than the geometry error. **Re-measure the cell and bring the shell back
+  down.** Judge alignment only at a posture where the twin predicts geometry in frame.
+- **The dev runtime (PID 3869832, started 04:45:20 on 2026-09-09) predates all of
+  this** — it holds the trees as of 04:45, so no phase-15 and none of the reverts,
+  and it will NOT pick up the new inflation until the config is re-rendered
+  (`mavis-dev.sh render`) and the process restarted. The Vite dev server (:5173)
+  serves the current UI source.
+- `var/gello-kitchen-20260909/` holds the raw kitchen captures (colour frame,
+  aligned depth, tag detections, camera calibration) and `var/alignment-20260909/`
+  + `var/align2/` the alignment evidence — keep both, 03-sim §4.4 / §4.5 are derived
+  from them. `var/gello_smoke.yaml` is a dead throwaway config.
+- `~/projects/apollo-mavis-v2-ws-merge/` (branch `merge-13-12`) and
+  `~/projects/apollo-mavis-v2-ws-p12/apollo-mavis-v2-policy-node` (the GELLO
+  viewpoint node lives there) are leftovers — deleting them is the operator's call.
 - Known follow-ups: lerobot's `StreamingVideoEncoder` start / finish hold the
   GIL 160–330 ms at `start_episode` and up to 324 ms at `finish_episode` with
   `h264_nvenc` (04-runtime §10.5 "GIL stall"; an encoder subprocess is the fix);
   `test_perf_bridge` `overruns == 0` flakes 1-in-2 (not loosened); dora live tests
   leak-check with a machine-wide `pgrep -x dora`, so never run two dora suites on
-  this host at once; the twin's microphone body hides AprilTag 4 in the kitchen
-  render while the real frame shows it — the mic mount geometry (03-sim §4.3) is
-  wrong and needs a measurement.
+  this host at once; the twin's microphone body is off by ≥ 20–30 mm (03-sim §4.5)
+  and the carriage mesh is 42 / 32 mm short per end — both need a tape measure.
 
 ## Hardware facts (not discoverable from code)
 

@@ -1,9 +1,6 @@
 # apollo-mavis-v2 — System Overview & Contract
 
-Status: v0.5 (2026-09-09 — phase-15 **GELLO Manipulation**, `16-gello.md` v1.0
-binding: §4 item 5 the fifth mode and the §4 preamble's active-arm exception,
-§5 the GELLO-mode key note, §8 five launcher cards, §10 the doc map gains
-16-gello). v0.4 (2026-09-08 — §1 the external interface paragraph (phase-12,
+Status: v0.4 (2026-09-08 — §1 the external interface paragraph (phase-12,
 merged into the main trees the same day, `14-dora-interface.md` §16.4), §2 the
 2026-09-01 "no Dora in v1" decision marked superseded in part, §4 item 3 online
 interactive learning = the **Online DAgger shell** over that interface
@@ -149,7 +146,7 @@ WorkcellConfig
                           intrinsics?, extrinsics_frame?, resolution, fps }]
   sim_scene?: scene id (sim mode)
   digital_twin_scene?: scene id (hardware mode — MJCF mirroring the real workcell)
-  safety: { geom_inflation_m: 0.008 default, min_clearance_m, enabled: true }
+  safety: { geom_inflation_m: 0.008 default / 0.025 on the lab cell since 2026-09-09 (11-safety §6.2), min_clearance_m, warn_clearance_m, enabled: true }
 ```
 
 Sim scenes and digital-twin scenes come from a **scene registry** in `sim`
@@ -241,10 +238,6 @@ the gate is off by default (collisions are harmless) and only enabled by the
 `safety_debug` configuration for guardrail testing.
 Active-arm selection: user picks the participating
 arms; **Tab** cycles which one keyboard teleop drives; non-active arms hold.
-Exception (2026-09-09, item 5): a **GELLO Manipulation** session has TWO live
-sources and no active-arm switching — the leader arm drives the Manipulation
-Arm and the viewpoint node drives the Perception Arm — and both commands are
-capped and gated JOINTLY on the same twin every tick (16-gello §2, §12.1).
 
 1. **Teleop** — held-key state → twist in the arm's control frame →
    target-pose integration → collision-aware differential IK → per-tick
@@ -306,32 +299,6 @@ capped and gated JOINTLY on the same twin every tick (16-gello §2, §12.1).
    blindly "returning to initial" and wrecking the scene. Inference-mode
    takeover is **never recorded** — no dataset exists in this mode, and the
    frames are not fed to DAgger aggregation.
-5. **GELLO Manipulation** (phase-15, 2026-09-09; `16-gello.md` v1.0 §0 / §1
-   binding) — a passive xArm7-shaped **GELLO leader arm** (Dynamixel servos read
-   over one USB serial adapter; a runtime device like the Vive controller, not a
-   workcell member) drives the **Manipulation Arm in joint space**: the seven
-   joints from the leader, the gripper from its trigger, the rail still from
-   `←` / `→` — through the same uniform step cap and the same twin gate as every
-   other source, so a fast leader is followed at the cap, never jumped to. The
-   **Perception Arm** follows an external **viewpoint node** over the dora
-   interface (`SessionAnnounce.external_arms: ["view"]`, a view-only
-   `action_names` layout; `viewpoint: auto | external | hold`) or holds the GELLO
-   hold posture when nothing publishes. The session runs on the **kitchen twin**
-   `mavis_v2_kitchen` — the cell plus the fridge, the range, the counter run and
-   their AprilTags as measured on 2026-09-09 (16-gello §3); a HIDDEN scene id, so
-   `mavis_v2` stays the only exposed scene. Launch = **check → plan → one arm at a
-   time → engage**: the leader must be fresh and calibrated, the unwrapped leader
-   posture must be inside the joint limits and collision-free on the twin (else
-   409 with the colliding pair; the launch sheet previews the virtual cell with
-   the colliding bodies tinted red and enables Start only when clear), then both
-   arms are twin-planned and executed sequentially in the planner's `arm_order`,
-   then the follower engages. Engagement states `no_leader | out_of_sync |
-   tracking | paused | motion`: the follower streams the leader only in
-   `tracking`; every other state holds the last command; `R` / Go to profile
-   force `paused` and Resume is a Cockpit button. Teleop-like otherwise: **no
-   recording in v1**; `Tab` / `Z` / `Space` / the episode keys are nacked (§5);
-   **admitted on hardware** (16-gello D8 — `hardware_session.armed` still gates
-   every driver connection; Online DAgger stays sim-only).
 
 ## 5. Keybindings (canonical)
 
@@ -384,27 +351,13 @@ code is both a held and a discrete row). A 2026-09-07 core change that flagged
 every held row `keyboard=False` ("teleop is the Vive only") is reverted by
 phase-13 — do not remove keyboard teleop again.
 
-**GELLO mode (2026-09-09, phase-15; 16-gello D9).** The table above is
-unchanged (24 rows, operator-owned), but in a GELLO Manipulation session only
-part of it acts: `←` / `→` still drive the Manipulation Arm's rail from every
-source (keyboard, gamepad D-pad, controller pad); every other HELD key
-(translate / rotate / gripper / clutch) is ignored for the Manipulation Arm,
-whose joints follow the leader and whose gripper follows the leader's trigger;
-`Tab` / `Z` / `Space` and the episode keys `N` / `Enter` / `Backspace` are
-nacked with a reason (no arm switching, no takeover, no recording in v1); `R`
-and Go to profile run as twin-planned motions that force the engagement state
-`paused`. Pause / Resume are Cockpit buttons (`gello_pause` / `gello_resume`,
-idempotent) — no new key; the keymap stays 24 rows (a key for them is 16-gello
-§16 item 3, the operator's call).
-
 ## 6. Safety & collision (all modes, all command sources)
 
 **Mode-independent invariant (hardware)**: in hardware mode the safety
 machinery below is active in every mode — teleop, data collection, DAgger,
-inference AND GELLO Manipulation (2026-09-09) — and gates every command source:
-keyboard twist, joint-jog panel, policy actions, DAgger takeover input, planner
-trajectories, the GELLO leader's joint targets and the viewpoint node's actions.
-No code path may send a command to a real arm without passing the gate.
+AND inference — and gates every command source: keyboard twist, joint-jog
+panel, policy actions, DAgger takeover input, and planner trajectories. No
+code path may send a command to a real arm without passing the gate.
 
 **Sim mode**: the gate is **off by default** — collisions in sim are harmless
 and the physics itself stops penetration; scene meshes/colliders constrain the
@@ -501,18 +454,13 @@ without a robot (Sim: the four digital-twin previews; Hardware: the real wrist
 cameras `grip_wrist` / `view_wrist` — pure black when absent — plus the live RØDE microphone waveform),
 per-arm status, the single locked scene *APOLLO MAVIS V2 Digital Twin*
 (`mavis_v2`), `start_from` choice (keep current state vs load a profile), and
-five mode launcher cards (four until 2026-09-09; the fifth, **GELLO
-Manipulation**, opens the `GelloSheet` — leader status and calibration, the
-viewpoint choice, a live collision preview of the virtual cell on the kitchen
-twin — and enables Start only when the preview is clear; 16-gello §11) —
-Hardware launchers enabled only once every
+four mode launcher cards — Hardware launchers enabled only once every
 configured arm is reachable (`hardware_ready`); task / policy are collected in
 an in-page `<dialog>` sheet, not on the page (the Data Collection sheet also
 names the dataset — new / continue existing — and offers the optional return
 to start), and since 2026-09-07 a **Datasets** panel (per dataset: episodes,
 frames, export status; per episode: delete; export to LeRobot v3 — 05-ui §8.1)
-→ **Mode pages** (teleop / collect / DAgger / inference, and `#/gello` since
-2026-09-09) with camera streams,
+→ **Mode pages** (teleop / collect / DAgger / inference) with camera streams,
 sim & twin renders, keybinding overlay, collision banner, episode controls.
 Teleop page additionally has the direct joint-control panel (per-joint sliders
 + numeric entry + rail) and profile actions incl. "set as initial condition";
@@ -557,9 +505,3 @@ blur/visibilitychange.
   session directory, per-namespace dataset roots, the served skill; §12
   implementation record). `15-pro-dagger.md` (v1.0, 2026-09-08 morning) is
   superseded by it and kept for history only.
-- `16-gello.md` — GELLO Manipulation (phase-15, 2026-09-09): the passive leader
-  arm as a runtime device, calibration, the engagement state machine, launch =
-  check / plan / one arm at a time / engage, the viewpoint node scoped to the
-  Perception Arm (`SessionAnnounce.external_arms`), the `mavis_v2_kitchen` twin
-  with the measured appliance boxes and AprilTags (§3), the UI sheet / panel and
-  the clearance-readout fix (§12.4); §15 implementation record, §16 open items.

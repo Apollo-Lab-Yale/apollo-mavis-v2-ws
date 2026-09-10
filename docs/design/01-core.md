@@ -79,7 +79,7 @@ apollo-mavis-v2-core/
 │   ├── dagger/                # types.py interfaces.py (§9)
 │   └── protocol/              # control.py (§10) telemetry.py (§11) session.py (§12)
 │                              #   tracker.py microphone.py maintenance.py (§12)
-│                              #   hardware_monitor.py (§11) gello.py (§11 / §12; phase-15)
+│                              #   hardware_monitor.py (§11)
 │                              #   video.py keymap.py (§13) export_schemas.py (§14)
 └── tests/                     # §18
 ```
@@ -338,11 +338,6 @@ All pydantic (wire-visible). Semantics in `11-safety-collision.md`.
 class CommandSource(str, Enum):
     TELEOP = "teleop"; JOINT_JOG = "joint_jog"; POLICY = "policy"
     TAKEOVER = "takeover"; PLANNER = "planner"
-    GELLO = "gello"                      # phase-15 (2026-09-09; 16-gello §6 / §8.2): a tick whose
-                                         #   Manipulation Arm command came from the GELLO leader
-                                         #   arm (joint-space follow). Rides gate events, the
-                                         #   health line and the UI union; datasets unaffected
-                                         #   in v1 (gello records nothing). Appended LAST
 
 class CollisionEvent(BaseModel):
     t: Literal["collision_event"] = "collision_event"
@@ -649,18 +644,6 @@ ActionName = Literal[
                                          #   (extra="forbid", ProfileStore id charset, REQUIRED);
                                          #   twin-planned, gated, cancellable execute_plan path
                                          #   (04-runtime §10.5); no key. Appended LAST (additive)
-                                         #   until phase-15
-    "gello_pause", "gello_resume",       # phase-15 (2026-09-09; 16-gello D3 / D9 / §8.2): the GELLO
-                                         #   Manipulation session's two Cockpit buttons. Pause stops
-                                         #   the follower (engagement state `paused`; the last
-                                         #   command is HELD, never a move); Resume re-runs the
-                                         #   engage rule (within engage_tol_rad -> `tracking`, else
-                                         #   `out_of_sync`). Idempotent (a no-op ack when already in
-                                         #   that state), argless, NO key binding (KEYMAP stays 24
-                                         #   rows — a Pause key is 16-gello §16 item 3, the
-                                         #   operator's call), nacked "not a GELLO Manipulation
-                                         #   session" elsewhere (the base ControlLoop handler,
-                                         #   2026-09-09 review). Appended LAST (additive)
 ]
 
 class HelloMsg(BaseModel):               # server -> client, immediately after accept
@@ -1020,47 +1003,6 @@ class HardwareMonitorTelemetry(BaseModel):   # additive block (phase-09a; 04-run
     arms: list[ArmMonitorTelemetry] = [] #   boxes (monitor connections released)
     overlays: list[TwinOverlayTelemetry] = []
 
-# GELLO Manipulation (phase-15, 2026-09-09; 16-gello §8.3). The literals and the DEVICE half
-# live in protocol/gello.py (a dependency-free leaf, the microphone precedent) so the telemetry
-# block and GET /api/gello (GelloInfo, §12) spell the leader state identically:
-GelloBackend      = Literal["dynamixel", "fake", "none"]
-GelloDeviceStatus = Literal["no_backend", "starting", "connected", "stale", "error"]
-GelloState        = Literal["no_leader", "out_of_sync", "tracking", "paused", "motion"]
-    # the engagement state machine (16-gello D3 / §6.1): ONLY tracking follows the leader; every
-    # other state HOLDS the last command — no_leader = sample missing / stale / invalid;
-    # out_of_sync = leader farther than engage_tol_rad from the measured arm (or the leash
-    # exceeded), re-engages automatically; paused = operator Pause / fault / before a planned
-    # motion, leaves only on Resume; motion = a twin-planned motion owns the arm
-GelloViewpointMode = Literal["auto", "external", "hold"]   # = GelloSessionConfig.viewpoint (§12)
-
-class GelloDeviceTelemetry(BaseModel):   # protocol/gello.py — the device half, session or not
-    backend: GelloBackend; status: GelloDeviceStatus
-    detail: str = ""                     # reason for error / no_backend / stale
-    port: str = ""; baud: int | None = None      # serial node opened / bus rate in use
-    seq: int = 0; rate_hz: float = 0.0; age_s: float | None = None
-    q_raw: list[float] | None = None     # rad (ticks * 2pi / 4096), BEFORE signs / offsets
-    q: list[float] | None = None         # rad, mapped: sign * (raw - offset)
-    gripper_frac: float | None = None    # 0 closed .. 1 open; None until both endpoints calibrated
-    calibrated: bool = False             # joint offsets known (config or var/gello_calibration.json)
-    joint_offsets_rad: list[float] | None = None
-    joint_signs: list[int]               # operator-owned config echo (7 x +-1); REQUIRED
-
-class GelloViewpointTelemetry(BaseModel):    # how the Perception Arm is driven (16-gello §7)
-    mode: GelloViewpointMode             # echo of GelloSessionConfig.viewpoint
-    attached: bool                       # an external viewpoint node's source is live for the
-                                         #   view block (else the arm holds the GELLO posture)
-    policy_id: str | None = None
-    detail: str = ""                     # "external node <id> attached" / "holding the GELLO
-                                         #   posture" / "waiting for a node" / incompatibility
-
-class GelloTelemetry(GelloDeviceTelemetry):  # TelemetryMsg.gello; + the session half (None / ""
-    state: GelloState | None = None      #   without a gello session)
-    state_detail: str = ""               # "leader 0.31 rad from the arm - move GELLO within 0.10"
-    lag_rad: list[float] | None = None   # unwrap(leader) - measured, per joint (the OUT OF SYNC bars)
-    max_lag_rad: float | None = None
-    engaged_arm: str | None = None       # "grip" while tracking
-    viewpoint: GelloViewpointTelemetry | None = None
-
 class TelemetryMsg(BaseModel):
     t: Literal["telemetry"] = "telemetry"
     seq: int; ts: float; epoch: str      # ts = server monotonic, s
@@ -1081,11 +1023,6 @@ class TelemetryMsg(BaseModel):
                                                 #   tracker / microphone
     datasets: DatasetsTelemetry | None = None   # additive (2026-09-07); the export job's
                                                 #   progress (§11 DatasetsTelemetry)
-    gello: GelloTelemetry | None = None         # additive (phase-15, 2026-09-09; 16-gello §8.3):
-                                                #   the GELLO leader (device half, session-less
-                                                #   like tracker / microphone) + a gello session's
-                                                #   engagement state; None when the runtime has no
-                                                #   reader. Appended LAST
 ```
 
 **Hardware monitor / twin overlay (`protocol/hardware_monitor.py`; phase-09a,
@@ -1148,22 +1085,17 @@ the `202` response and to the final `ArmMaintenanceResult` at
 since 09d (`SessionSpec.arms` must equal every configured arm — runtime 409
 otherwise; the model is unchanged).
 
-## 12. Protocol: session & REST models (`protocol/session.py`, `protocol/tracker.py`, `protocol/microphone.py`, `protocol/maintenance.py`, `protocol/gello.py`)
+## 12. Protocol: session & REST models (`protocol/session.py`, `protocol/tracker.py`, `protocol/microphone.py`, `protocol/maintenance.py`)
 
 Bodies for the `/api` surface (04-runtime §13.1); runtime defines no wire
 model of its own. Session models live in `protocol/session.py`; the phase-10
 tracker-calibration models in `protocol/tracker.py`, the phase-11
-microphone row + `MicStatus` vocabulary in `protocol/microphone.py`, the
+microphone row + `MicStatus` vocabulary in `protocol/microphone.py` and the
 phase-09b/09c/09d arm-maintenance request / result / plan models in
-`protocol/maintenance.py` and the phase-15 GELLO literals + `/api/gello*`
-REST models in `protocol/gello.py` (all below).
+`protocol/maintenance.py` (all below).
 
 ```python
-Mode = Literal["teleop", "collect", "dagger", "inference", "gello"]
-                                         # gello (phase-15, 2026-09-09; 16-gello §0 item 1 / D1): the
-                                         #   passive GELLO leader arm drives the Manipulation Arm in
-                                         #   joint space, the Perception Arm follows an external
-                                         #   viewpoint node or holds its GELLO posture. Appended LAST
+Mode = Literal["teleop", "collect", "dagger", "inference"]
 START_FROM_RE = r"^(keep_current|profile:[A-Za-z0-9_\-]+)$"
 DATASET_RE = r"^(?:[A-Za-z0-9][A-Za-z0-9_\-]*/)?[A-Za-z0-9][A-Za-z0-9_\-]*$"   # <ns>/<name> | <name>
 SLUG_RE = r"^[A-Za-z0-9][A-Za-z0-9_\-]*$"     # 2026-09-08 (15-online-dagger §5): one bare slug — the name
@@ -1187,16 +1119,6 @@ class OnlineDaggerConfig(BaseModel):     # SessionSpec.online_dagger (phase-14, 
 # chunk_horizon, seed, require_ref_grad) — every algorithm setting belongs to the trainer node
 # (operator decision 2026-09-08 §0 item 2; the PRO-DAgger reference implementation keeps its OWN
 # `ProDaggerConfig` in mavis_policy_node/pro_dagger/config.py, fed by --trainer-config). Deleted.
-
-class GelloSessionConfig(BaseModel):     # SessionSpec.gello (phase-15, 2026-09-09; 16-gello §8.1 / D1)
-    model_config = ConfigDict(extra="forbid")   #   an unknown key (a leader setting typed here by
-                                         #   mistake) is a 422, never silent — the OnlineDaggerConfig rule
-    viewpoint: GelloViewpointMode = "auto"      # auto = attach the external viewpoint node whenever a
-                                         #   compatible policy_spec is fresh, hold the GELLO posture
-                                         #   otherwise; external = the node must be attached at launch
-                                         #   (409); hold = ignore the bus. The ONLY per-session GELLO
-                                         #   choice — port / baud / signs / offsets / tolerances are
-                                         #   RuntimeConfig.gello (16-gello §9.1); gello records nothing
 
 class SessionSpec(BaseModel):            # POST /api/session body
     mode: Mode
@@ -1265,23 +1187,6 @@ class SessionSpec(BaseModel):            # POST /api/session body
                                          #   dataset - leave dataset unset" (the repo id is
                                          #   online_dagger/<session_name>, resumed iff .resume).
                                          #   Superseded: the morning's pro_dagger field
-    gello: GelloSessionConfig | None = None
-                                         # additive (phase-15, 2026-09-09; 16-gello §8.1 / D1): non-null
-                                         #   iff mode == "gello". Rules (evaluated BEFORE the generic
-                                         #   mode rules, so a gello body gets the specific message):
-                                         #   "mode 'gello' requires a gello block"; "mode 'gello'
-                                         #   requires start_from 'keep_current' (the launch motion is
-                                         #   the GELLO posture)"; "mode 'gello' takes no task" / "...
-                                         #   takes no dataset (GELLO records nothing in v1)" (dataset
-                                         #   or dataset_resume) / "... takes no policy checkpoint:
-                                         #   policy must be null" / "... takes no online_dagger
-                                         #   block"; "mode 'gello' requires policy_source
-                                         #   'checkpoint' (gello.viewpoint says whether an external
-                                         #   node drives the Perception Arm)"; the generic
-                                         #   "return_to_start / action_filter is a collect /
-                                         #   dagger-mode field" rules keep both at their defaults;
-                                         #   a non-null block on any other mode is "gello is a
-                                         #   gello-mode field". Appended LAST
 
 class ActionFilterConfig(BaseModel):     # idle-frame filter parameters (10-frames §11.4)
     enabled: bool = True
@@ -1366,8 +1271,6 @@ class SessionInfo(BaseModel):            # POST/GET /api/session response
                                          #   neither dataset nor return_to_start (they ride
                                          #   telemetry.episode / session). Superseded: the
                                          #   morning's pro_dagger echo
-    gello: GelloSessionConfig | None = None   # additive (phase-15, 2026-09-09; 16-gello §8.1): echo of
-                                         #   SessionSpec.gello; None for every other session. LAST
 
 class ArmStatusInfo(BaseModel):          # landing-page card
     arm_id: str; ip: str | None
@@ -1544,65 +1447,6 @@ class MicrophoneInfo(BaseModel):         # GET /api/microphones row
 
 Capture backends, source resolution, envelope binning and stall detection are
 runtime territory (04-runtime §13.1/§13.3/§14); core only fixes the spellings.
-
-**GELLO Manipulation REST models (`protocol/gello.py`; phase-15, 2026-09-09; 16-gello §5.4 /
-§8.4 / §9.2).** Session-less like the microphone and tracker-calibration routes: `GET /api/gello
--> GelloInfo`, `POST /api/gello/calibrate  GelloCalibrateRequest -> GelloCalibrateResult` (409
-while a session runs or without a fresh leader sample), `POST /api/gello/preview
-GelloPreviewRequest -> GelloPreviewResult` (never a 409 for a bad posture — the status says).
-The literals (`GelloBackend`, `GelloDeviceStatus`, `GelloState`, `GelloViewpointMode`, below
-`GelloCalibrateOp`, `GelloPreviewStatus`) and `GelloDeviceTelemetry` are defined here and
-imported by §11 / `session.py`; the module imports pydantic + typing only (a test pins it).
-
-```python
-GelloCalibrateOp   = Literal["match_arm", "gripper_open", "gripper_closed", "clear"]
-    # match_arm: offset_j = round((raw_j - sign_j * q_arm_j) / (pi/2)) * pi/2 from the Manipulation
-    # Arm's CURRENT joints (monitor sample on hardware, parked posture in sim) -> var/
-    # gello_calibration.json; gripper_open / gripper_closed: raw reading at the endpoints;
-    # clear: delete the file (16-gello D10 / §4)
-GelloPreviewStatus = Literal["clear", "collision", "joint_limit", "no_leader", "not_calibrated",
-                             "no_workcell", "scene_error"]
-
-class GelloInfo(GelloDeviceTelemetry):   # GET /api/gello: the device half of §11 (same class, so the
-    scene_id: str                        #   two surfaces never drift) + what the launch sheet needs:
-    scene_label: str                     #   the twin the GELLO card launches (gello.scene_id, the
-                                         #   hidden mavis_v2_kitchen) and its title
-    view_posture_rad: list[float]        # Perception Arm GELLO hold posture J1-J7 (16-gello §0 item 3)
-    view_rail_m: float                   #   ... and its rail slot (twin convention)
-    calibration_path: str                # var/gello_calibration.json (absolute)
-    hardware_admitted: bool              # the hardware tab may launch gello (16-gello D8)
-    gripper_open_rad: float | None = None       # echoes of the two gripper-endpoint ops (§4 "the
-    gripper_closed_rad: float | None = None     #   result of every op is echoed"); None until set
-
-class GelloCalibrateRequest(BaseModel):  # POST /api/gello/calibrate body
-    op: GelloCalibrateOp
-    kind: Literal["hardware", "sim"]     # where match_arm reads the Manipulation Arm's joints
-
-class GelloCalibrateResult(BaseModel):   # ... response: the calibration now in force
-    ok: bool; detail: str = ""
-    joint_offsets_rad: list[float] | None = None      # 7 multiples of pi/2
-    gripper_open_rad: float | None = None; gripper_closed_rad: float | None = None
-
-class GelloPreviewRequest(BaseModel):    # POST /api/gello/preview body
-    kind: Literal["hardware", "sim"]
-    scene: str | None = None             # None = the runtime's gello.scene_id
-    speed_scale: float | None = Field(default=None, gt=0, le=1)   # annotates the check only
-
-class GelloPairInfo(BaseModel):          # one violating pair of a preview
-    a: str; b: str                       # geom labels ("grip_link6", "fridge_body")
-    dist_m: float                        # signed clearance at the goal posture
-
-class GelloPreviewResult(BaseModel):     # ... response (16-gello §5.4): the §5.1 launch check run
-    status: GelloPreviewStatus           #   session-less on a cached kitchen twin
-    ok: bool                             # True iff status == "clear" (VALIDATED — the CollisionReport
-                                         #   blocked / severity precedent; the sheet enables Start on it)
-    detail: str = ""                     # "collides: fridge_body / grip_link6 at 3 mm - move GELLO ..."
-    pairs: list[GelloPairInfo] = []      # tightest first (collision only)
-    q_goal: dict[str, list[float]] = {}  # {grip: [8], view: [8]} the launch would plan to (rail last)
-    leader_q: list[float] | None = None  # unwrapped leader joints (7); None without a leader
-    image_png_b64: str | None = None     # the render with colliding bodies tinted red; None on failure
-    camera: str = "cam_kitchen"          # the scene camera the PNG was rendered from
-```
 
 **Arm maintenance (`protocol/maintenance.py`; phase-09b,
 `docs/prompts/phase-09b-error-recovery.md`; phase-09c
@@ -1886,12 +1730,6 @@ EXPORTED_MODELS: dict[str, type[BaseModel]] = {
   # external: SessionAnnounce, PolicySpecAnnounce, DoraInfo (phase-12, §20), TrainerStatusAnnounce,
   #           OnlineDaggerAnnounce (phase-14; RefGradStatus / ProDaggerAnnounce deleted) — 43 schema
   #           files in total on 2026-09-08 evening (`export_schemas --check` clean)
-  # gello:    GelloSessionConfig (the SessionSpec block; also rides SessionSpec / SessionInfo $defs,
-  #           the OnlineDaggerConfig precedent), GelloInfo, GelloCalibrateRequest, GelloCalibrateResult,
-  #           GelloPreviewRequest, GelloPreviewResult, GelloPairInfo (REST /api/gello*; phase-15,
-  #           2026-09-09, 16-gello §8.4) — GelloTelemetry / GelloViewpointTelemetry ride TelemetryMsg
-  #           $defs only, GelloPairInfo also GelloPreviewResult's. 48 models = 50 schema files
-  #           (+ keymap.json, index.json) on 2026-09-09 (`export_schemas --check` clean)
   # microphone: MicrophoneInfo (REST /api/microphones; phase-11 — MicrophoneTelemetry
   #           rides TelemetryMsg $defs only)
   # maintenance: ArmMaintenanceRequest, ArmMaintenanceResult (REST POST
@@ -2181,15 +2019,3 @@ the morning's `EventKind iteration_complete` / `pro_dagger_phase`, the six-field
 `ProDaggerAnnounce`, `RefGradStatus` and the 23-field `TrainerStatusAnnounce`: deleted, not
 aliased (never shipped; the one permitted history note is the module docstring's "v1.0
 PRO-DAgger shell superseded 2026-09-08").
-
-**Phase-15 addition (2026-09-09; 16-gello §7 / D5; additive, `MAVIS_SCHEMA` stays 1):**
-`SessionAnnounce.external_arms: list[str] = Field(default_factory=list)` appended LAST (after
-`online_dagger`) — the arms this session accepts `policy_action` for. Empty = every session arm
-(today's behaviour: dagger / inference sessions, and a gello session with `viewpoint: hold`,
-which ignores the bus); a gello session with `viewpoint` auto / external announces `["view"]` —
-the external viewpoint node drives the Perception Arm ONLY, `action_names` / `state_names` carry
-the view block only, `arm_ids` still lists both arms (obs_state carries both), and nothing can
-move the Manipulation Arm over the bus. `EVENT_KINDS`, `RUNTIME_INPUTS`, `POLICY_OUTPUTS` and
-every other spelling are unchanged; both contract goldens (runtime `tests/dora_bridge/golden/
-contract_golden.json` and the policy-node repo's copy) move together (`session_announce_fields`
-ends in `external_arms`). The runtime publishes `obs_state` in gello mode too (16-gello §7).

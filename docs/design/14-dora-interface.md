@@ -520,7 +520,7 @@ kept for one minor and listed in `SessionAnnounce.deprecated_keys`.
 | `events` | on event | `Utf8[1]` JSON `EventEnvelope` | `kind` (str) | always |
 | `arm_state` | `dora.publish.state_hz` (50; ≤ 100) | `Float64[N_arms × 32]` | `arm_ids` (list[str]), `layout` (list[str], 32 names), `has_rail` (list[int]), `error_code`/`warn_code` (list[int]), `stale` (list[int]), `arm_source` (list[str]), `active_arm` (str), `gate_severity` (str), `gate_blocked` (bool), `watchdog_tripped` (bool), `tick` (int), `source` (`"loop"` \| `"idle"`) | **always**: from the loop snapshot while a session is RUNNING, from the idle arm reader otherwise (§4.2; gate/watchdog fields `false`, `tick` −1, `arm_source` / `active_arm` `""`) |
 | `arm_cmd` | same ticks as `arm_state` | `Float64[Σ dof]` | `arm_ids`, `dof` (list[int]) | session RUNNING |
-| `obs_state` | `dora.publish.obs_hz` (30; 10–100) | `Float32[S]` | `observation_id` (int, monotonic per session from 1), `tick`, `state_names` (list[str]), `arm_ids`, `frames` (list[str], per-arm FrameRef), `has_rail`, `image_camera_ids` (list[str]), `image_seq` (list[int]), `engaged_arm` (str, `""`), `episode_state` (str) | session RUNNING, modes dagger/inference/gello (phase-15: the viewpoint node reads it too; the metadata `state_names` ALWAYS names the FULL published vector — every session arm, `SessionFacts.obs_state_names` — while the announced `SessionAnnounce.state_names` is the layout a node may DECLARE, the view block in gello; select by name from the obs metadata — 16-gello §7 / §15.2 item 5, the skill's `contract.md`; reworded 2026-09-09 review) and collect when `publish.obs_in_collect` |
+| `obs_state` | `dora.publish.obs_hz` (30; 10–100) | `Float32[S]` | `observation_id` (int, monotonic per session from 1), `tick`, `state_names` (list[str]), `arm_ids`, `frames` (list[str], per-arm FrameRef), `has_rail`, `image_camera_ids` (list[str]), `image_seq` (list[int]), `engaged_arm` (str, `""`), `episode_state` (str) | session RUNNING, modes dagger/inference (and collect when `publish.obs_in_collect`) |
 | `policy_reset` | on reset | `Utf8[1]` JSON `PolicyResetMsg` | — | session RUNNING with `policy_source: external` |
 | `cam_<camera_id>` | camera stream fps (preview 15 / session 30) | `UInt8[H*W*3]` | `camera_id`, `encoding: "rgb8"`, `width`, `height`, `primitive: "image"`, `frame_seq` (`CameraFrame.seq`), `frame_t_mono`, `frame_wallclock_ns`, `frame_ref: "camera:<id>"`, `mount` (`"ee:<arm>"` or `"world"`), `intrinsics` (list[float] `[fx,fy,cx,cy]`, when known), `distortion` (list[float]); wrist cams **always** (in and out of sessions) `q` (list[float], 8), `tcp_pose_world` (7), `camera_pose_world` (7, OpenCV convention), `pose_t_mono` (float, snapshot time used for the FK), `pose_source` (`"loop"` \| `"idle"`) | always (process-lifetime previews included) |
 | `cam_<camera_id>_depth` | camera fps | `UInt16[H*W]` | as above with `encoding: "mono16"`, `depth_scale_m: 0.001`, `aligned_to: "color"`, same `frame_seq` as the rgb frame | when `CameraConfig.depth` (hardware) or the sim depth stream is on; else declared but silent |
@@ -592,13 +592,6 @@ class SessionAnnounce(BaseModel):            # core protocol/external.py
                                              #   evening): v1.1's six-field pro_dagger:
                                              #   ProDaggerAnnounce (ref_grad_dir, offline_dataset,
                                              #   offline_dataset_dir) — the shell knows no anchor
-    external_arms: list[str] = []            # phase-15 (16-gello D5 / §7; additive, appended
-                                             #   LAST): the arms this session accepts
-                                             #   policy_action for. [] = every session arm (all
-                                             #   modes until phase-15; gello with viewpoint hold);
-                                             #   ["view"] in a GELLO Manipulation session — then
-                                             #   action_names / state_names are the VIEW block
-                                             #   only, arm_ids still lists both arms
 ```
 
 **`events`** — `EventEnvelope{kind, t_mono, wallclock_ns, session_id, payload}`
@@ -720,31 +713,6 @@ Appendix A).
 | `policy_trainer_status` (additive, phase-14, 2026-09-08; row reworded 2026-09-08 evening) | `policy/trainer_status` | `Utf8[1]` JSON `TrainerStatusAnnounce` — the 10-field GENERIC contract (15-online-dagger §6): `mavis_schema`, `trainer_id`, `node_version`, `state: idle \| preparing \| training \| ready \| error`, `session_id` echo (`null` = alive only), `policy_version` (acting version after the last swap), `progress` (0..1), `metrics: dict[str, float]` (free-form finite scalars, e.g. `loss`, `proj_rate`), `detail`, `uptime_s`; every float `allow_inf_nan=False`. Superseded (2026-09-08 evening): v1.1's algorithm fields (`iteration`, `ref_grad{…}`, epoch / step / `n_proj` / pool sizes / `scale_check`) — a trainer puts whatever it wants into `metrics` | — (the common inbound keys; same `seq` counter as the node's other outputs) | 8 |
 | `tick` | `dora/timer/hz/10` | — | — | bridge watchdog |
 | `probe_heartbeat` | `probe/heartbeat` | `Int64[1]` | — | dataflow liveness |
-
-**GELLO Manipulation (phase-15, 2026-09-09; 16-gello §7 / §12.3).** A session with
-`spec.mode == "gello"` accepts `policy_action` for the arms in `SessionAnnounce.external_arms`
-ONLY — `["view"]`, the Perception Arm (its viewpoint node), never the Manipulation Arm
-(GELLO drives it). The announced `action_names` / `state_names` are the view block alone
-(`view_ee.dx … view_gripper.pos, view_rail.dpos`), so a node that derives its layout from the
-announce (`nodes/fake_policy.py`, the policy-node repo) needs no change; a spec that publishes
-the two-arm layout is incompatible and is ignored (the arm holds). **Frame rule (2026-09-09
-review):** when `external_arms` is non-empty the node's `action_frame` MUST be
-`frames[external_arms[0]]` and compatibility is judged against those arms only — a gello session
-announces the Manipulation Arm FIRST (`arm_ids ["grip", "view"]`, the UI's order), so a node
-taking the first announced arm's frame answered `arm_base:grip` and was ignored (`viewpoint node
-action_frame 'arm_base:grip' != the session's view frame 'arm_base:view'`); with `external_arms`
-empty the first arm's frame and the every-frame check stay as before. Both reference nodes
-implement it (`fake_policy.py` when `--action-frame` is absent; policy-node `fake.py::on_session`
-/ `node.py::validate_against_session`). The `obs_state` metadata `state_names` names the FULL
-two-arm vector (§4.1); the announced `state_names` is what the node may declare. The runtime's
-`gello/viewpoint.py::ViewpointSource` attaches an `ExternalPolicySource` over `arms_meta =
-[("view", has_rail)]` while the announced spec is fresh AND compatible (`action_space
-delta_ee`, `action_frame` == the session's view frame, the exact view `action_names`,
-`state_names ⊆` the view state layout) and the session is RUNNING with no planned motion on
-the arm (`viewpoint: auto`); `external` refuses the launch without one (409); `hold` never
-reads the bus (`external_arms: []`). `obs_state` is published in gello mode too (§4.1). The
-same §6.2 / §6.3 rules for metadata, watermark (`policy_reset{session_start}` on attach,
-`{session_stop}` on detach) and staleness apply verbatim.
 
 **Reserved ids (declared in the compatibility ledger, not implemented in v1):**
 `weights_reload` / `weights_ack` (runtime-driven hot-swap of an external
@@ -993,13 +961,6 @@ Consequences and rules:
 - **Digital-twin scene boundary**: when the user provides the twin scene
   boundary (Appendix A), it becomes the workspace check for any future
   externally commanded motion; the parked-arm model needs no such check.
-- **Phase-15 (2026-09-09) amendment — the viewpoint node.** GELLO Manipulation
-  (16-gello §7) is the first mode in which an external node DRIVES the
-  Perception Arm live: inside a `mode: gello` session the runtime announces
-  `external_arms: ["view"]` and accepts the node's `policy_action` for that arm
-  alone (§5), gated on the kitchen twin like every other command. Outside such a
-  session nothing changes: the parked-arm model above still holds, and the
-  Manipulation Arm is never reachable over the bus in any mode.
 
 What a consumer does (also `examples/viewer_node.py`, ≈ 30 lines):
 
@@ -1365,12 +1326,7 @@ load (measured 3–5 % per node); attach **≤ 5 s** after control-plane start
 `schemas/config.py` `CameraConfig.depth`, `CameraConfig.align_depth_to_color`;
 `EXPORTED_MODELS` += `SessionAnnounce`, `PolicySpecAnnounce`, `DoraInfo` (the
 rest ride `$defs`); ruff `banned-api` += `dora`, `pyarrow`; §19 drift ledger
-row (`policy_stale` promised by 04-runtime §15). Phase-15 (2026-09-09; 16-gello
-§7): `SessionAnnounce.external_arms: list[str] = []` appended LAST (both contract
-goldens regenerated, byte-identical, `session_announce_fields[-2:] == ["online_dagger",
-"external_arms"]`; the policy-node `contract.py` copy and the skill's `contract.md`
-name it); `EVENT_KINDS`, `RUNTIME_INPUTS`, `POLICY_OUTPUTS`, `MAVIS_SCHEMA` unchanged.
-**Not added** (v0.2):
+row (`policy_stale` promised by 04-runtime §15). **Not added** (v0.2):
 `CommandSource.EXTERNAL`, `SessionSpec.external_arms`, `ArmTelemetry.owner`,
 the `View*` models, `action_source` label 5 — see Appendix A.
 
