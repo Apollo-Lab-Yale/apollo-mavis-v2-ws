@@ -83,6 +83,20 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   the runtime test suite on the lab machine without the `tests/conftest.py`
   guard (on 2026-09-05 a test without the fake seam started a rail-homing job on the
   real Manipulation Arm; 04-runtime §16).
+- **Never run `uv run` in a sub-repo whose venv a live runtime is executing from.**
+  `uv run` re-syncs the environment: it rebuilds and REINSTALLS the package
+  (`Building apollo-mavis-v2-runtime … Uninstalled 1 package … Installed 1 package`),
+  which deletes and rewrites the site-packages the already-running process is importing
+  from. On 2026-09-10 two `uv run pytest` invocations (two Claude sessions at once) in
+  `apollo-mavis-v2-runtime` killed the dev runtime **mid hardware session**: the log
+  stopped mid-health-line with no traceback and no teardown, so the arms were left
+  enabled instead of stopped-and-braked, and the operator's next click answered 500 from
+  a dead server. Same class of hazard as the 2026-09-05 test-suite incident. Rules:
+  **stop the runtime first** (`scripts/dev/mavis-dev.sh stop runtime`), or run the tests
+  from a separate git worktree, or use `uv run --no-sync` for read-only tools when you
+  are certain the lockfile is unchanged. Never with a session open. And **never two test
+  runs in the same tree at once** — that is how the venv got rewritten under a live
+  process in the first place.
 - Never open UFACTORY Studio "Live control" during a session. Controller
   `state 2` (standby) is HEALTHY for a mode-1 arm holding a posture; `clean_error`
   returning 1/2/9 is a status echo, not a failure (02-hardware §16).
@@ -211,14 +225,21 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   plannable from the keyframe. Seeded into `var/profiles/` on 2026-09-08.
 - **`Kitchen Interaction` is an ORDINARY profile, not an initial condition**
   (operator request 2026-09-09 evening; `python -m
-  apollo_mavis_v2_runtime.profiles.seed_kitchen`, 04-runtime §10.5): the posture the
-  `mavis_v2_kitchen` twin was measured at — Perception Arm
-  `[2.646, -1.598, 0.018, 1.637, 0.25, 2.007, 0.029]` rad with its **carriage pinned
-  at 0.0** (the kitchen numbers were deprojected from a frame taken there, so the
-  appliances only line up from that carriage position), Manipulation Arm at the
-  cell's factory zero with its carriage at 0.65. Reached with "Go to profile".
-  Seeded into `var/profiles/` for both kinds on 2026-09-09; the live runtime picked
-  it up with no restart.
+  apollo_mavis_v2_runtime.profiles.seed_kitchen`, 04-runtime §10.5). **Only the
+  Perception Arm differs from the default posture** (operator request 2026-09-10): it
+  goes to `[2.646, -1.598, 0.018, 1.637, 0.25, 2.007, 0.029]` rad with its **carriage
+  pinned at 0.0** (the kitchen numbers were deprojected from a frame taken there, so
+  the appliances only line up from that carriage position), while the Manipulation
+  Arm's entry is DERIVED from `seed_initial` with its carriage unset — so a goto from
+  the default moves the Perception Arm and NOTHING else. Before 2026-09-10 the grip
+  entry was the kitchen SCENE's keyframe (factory zero, carriage 0.65) whose joint 1
+  is `+π` where the default's is `−π`: same orientation, 360° of joint travel, so
+  every kitchen goto rotated the Manipulation Arm a full circle first. Verified
+  collision-free on both twins, mic on and off, at the 25 mm shell, at EVERY grip
+  carriage position 0.000–0.650 m (tightest pair 75.3 mm) — that sweep is why the pin
+  could go. Re-seeded into `var/profiles/` for both kinds on 2026-09-10; the live
+  runtime picked it up with no restart. **A store seeded earlier holds the old
+  numbers — re-run the seed.**
 - Never write a vanilla LeRobot v3 dataset from the recorder again; never edit an
   export in place — regenerate it.
 - Recording filters idle / small-motion frames by default (`SessionSpec.

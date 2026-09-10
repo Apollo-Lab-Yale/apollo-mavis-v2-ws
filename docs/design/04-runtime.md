@@ -1581,29 +1581,43 @@ idle|recording|saving|returning` (`returning` only with `return_to_start`,
   designating an initial condition changes what every return aims at.
 
   **Seeding the "Kitchen Interaction" posture** (operator request 2026-09-09
-  evening). `python -m apollo_mavis_v2_runtime.profiles.seed_kitchen [--kind
-  hardware|sim] [--dry-run]` writes ONE ordinary profile per kind, named
-  **`Kitchen Interaction`**, holding the posture the `mavis_v2_kitchen` twin was
-  prepared and measured at (03-sim §4.4): Perception Arm
-  `[2.646, -1.598, 0.018, 1.637, 0.25, 2.007, 0.029]` rad framing the fridge /
-  range / counter with its wrist D435i, carriage at **0.0**; Manipulation Arm at
-  the cell's factory-zero initial state (`[π, 0, 0, 0, 0, 0, 0]` rad), carriage at
-  **0.65**. It was that scene's keyframe; when the GELLO mode it had been built
-  for was cut, the operator asked for the posture to survive as a profile so it
-  can be reached with "Go to profile" like any other. Two differences from
-  `seed_initial`: it **pins both carriages** — every kitchen number was
-  deprojected from a frame taken with the Perception Arm's carriage at its zero
-  end, so the appliances only line up with the real cameras from there — and it
-  **never touches the initial-condition designation**, which stays with the
-  default posture. Idempotent the same way (matched by name within the kind).
-  Verified collision-free on BOTH twins (`mavis_v2_kitchen` and `mavis_v2`),
-  microphone off and on, at the cell's raised shell `geom_inflation_m = 0.025`:
-  tightest monitored pair `table ↔ grip_*_finger_pad_2` at 114.7 mm
-  (`tests/test_reset_to_initial.py`). Also checked LIVE the evening it was seeded:
-  from the arms' then-current posture (both at the seeded default, grip carriage
-  0.65, view 0.0) the same planner the goto uses found a path on both twins at the
-  raised shell — `arm_order ['view', 'grip']`, 2 and 3 waypoints, executed one arm
-  at a time. Not yet EXECUTED on the real arms.
+  evening; **amended 2026-09-10**). `python -m
+  apollo_mavis_v2_runtime.profiles.seed_kitchen [--kind hardware|sim] [--dry-run]`
+  writes ONE ordinary profile per kind, named **`Kitchen Interaction`**. Its job is
+  to put the **Perception Arm** where the `mavis_v2_kitchen` twin was measured FROM
+  (03-sim §4.4): `[2.646, -1.598, 0.018, 1.637, 0.25, 2.007, 0.029]` rad, framing
+  the fridge / range / counter with its wrist D435i, carriage **pinned at 0.0** —
+  every kitchen number was deprojected from a frame taken there, so the appliances
+  only line up with the real cameras from that carriage position. The
+  **Manipulation Arm is its entry in the DEFAULT posture, carriage left unset**
+  ("keep it where it is"), and it is DERIVED from `seed_initial.default_profile`
+  rather than copied, so the two can never drift apart. Consequence, and the point
+  of the amendment: **a goto between the default posture and this profile moves the
+  Perception Arm and nothing else.**
+
+  Until 2026-09-10 the profile carried the kitchen SCENE's keyframe for the grip
+  arm — the xArm7 factory zero `[π, 0, 0, 0, 0, 0, 0]` with the carriage pinned at
+  0.65 — and both halves of that cost motion for nothing. Joint 1 of the factory
+  zero is `+π` where the default posture's is `−180° = −π`: the same physical
+  orientation, a DIFFERENT joint value, and the planner walks straight lines in
+  joint space, so every goto rotated joint 1 a full **360°** before teleop could
+  start (the operator's "it has to turn a full circle"). The 0.65 pin added an
+  up-to-0.65 m carriage traverse whose only purpose was parking the arm at the far
+  end. Neither is needed — the grip arm plays no part in the kitchen measurement.
+  It still **never touches the initial-condition designation**, which stays with
+  the default posture, and it is idempotent the same way (matched by name within
+  the kind). **A store seeded before 2026-09-10 holds the old numbers — re-run it.**
+
+  Verified 2026-09-10 collision-free on BOTH twins (`mavis_v2_kitchen` and
+  `mavis_v2`), microphone off and on, at the cell's raised shell
+  `geom_inflation_m = 0.025`, at **every** grip carriage position from 0.000 to
+  0.650 m — that sweep is what allowed the pin to be dropped — with the tightest
+  monitored pair `obstacle ↔ grip_rail_platform` at 75.3 mm
+  (`tests/test_reset_to_initial.py`, which also pins "a goto moves the Perception
+  Arm only" as an invariant). The pre-amendment posture was checked LIVE on
+  2026-09-09: from both arms at the seeded default the same planner the goto uses
+  found a path on both twins at the raised shell — `arm_order ['view', 'grip']`, 2
+  and 3 waypoints, executed one arm at a time. Not yet EXECUTED on the real arms.
 - **GIL stall of the video encoder (measured 2026-09-07).** lerobot's
   `StreamingVideoEncoder` holds the GIL while PyAV opens (`start_episode`,
   160–330 ms) and closes (`finish_episode`, 118–324 ms with `h264_nvenc`, ≈ 15
@@ -1838,6 +1852,78 @@ shipped. Runtime side, as shipped:
   `FAKE_TRAINER_PREPARE_S` 0.5 / `FAKE_TRAINER_TRAIN_S` 1.0 / `FAKE_TRAINER_FAIL_AT`)
   only. Numbers, deviations and open items: 15-online-dagger §12.
 
+### 10.8 Episode playback (2026-09-10, operator request)
+
+The Welcome page's Datasets panel gets a **Playback** button on every episode row; it
+opens an in-page modal with two actions, the second gated on the first (05-ui §8.1
+item 7). `recorder/playback.py` reads the episode, `SessionManager` runs the motions,
+`GET …/episodes/{id}/playback` + `POST /api/session/playback` are the wire (§13.1).
+
+**What is replayed is `observation.state`, not `action`.** The action column is
+`delta_ee` by default (10-frames §6) — a stream of TCP deltas that only means anything
+against the exact state it was produced from, so integrating it would drift. The
+measured joint / rail / gripper trajectory is the ground truth of where the arms
+actually went, and it is directly commandable. The per-dim column layout comes from the
+dataset's OWN manifest (`features["observation.state"]["names"]`), never from the
+current session's arm set, so an episode recorded with one arm or before a track was
+fitted either reads back correctly or is refused by name — never mis-sliced in silence.
+Nothing imports lerobot or torch: one pyarrow read.
+
+**Return to this episode's initial state** builds a TRANSIENT `StateProfile` from frame
+0 and hands it to the existing `_profile_motion_reported` path, so it inherits
+everything unchanged — twin planning, the gate, the two separately planned phases
+(joints with the carriages held, then the carriages), one arm at a time in the
+planner's `arm_order`, cancellation by any operator input. The profile is never stored.
+Synchronous, like `return_home`, because the dialog only enables **Playback** once it
+succeeded; a `skipped` ("already there") counts as arrival.
+
+**Play back the whole episode** is the one motion in the stack that moves several arms
+AT ONCE, and the reason it may is exactly the reason `execute_plan` may not. The
+2026-09-08 incident was a SEQUENTIALLY PLANNED motion executed simultaneously: each
+arm's RRT path had been validated against the other arm standing still, so running
+them together walked combinations nothing had checked and the gate held them at 5.2 mm.
+A playback is the opposite case — a trajectory the arms already executed together on
+the real cell — and splitting it one arm at a time would be the unvalidated thing to
+do (arm A walking its whole 37 s path while arm B sat at frame 0 is a different path
+through space). Three things earn it the right, all binding:
+
+1. **Lockstep resampling** (`playback.resample`). ONE global time scale for every arm,
+   never a per-arm one: the tick count of each recorded interval is the MAX over all
+   arms of what the executor's caps need (`ExecutorCaps.ticks_for` mirrors
+   `PlanExecutor.step`'s `ratio` exactly — joint slew, rail slew AND the hardware
+   lever-weighted Cartesian bound), floored at `rate_hz / fps` so the replay runs at
+   the RECORDED rate where the caps allow and uniformly slower where they do not
+   (recorded at 100 % speed, replayed at 10 %). Every arm therefore gets the same
+   waypoint count and every segment costs exactly one tick, so the executor cannot
+   subdivide one arm's segment and desynchronise the pair. `slowdown` reports the
+   factor. The loop refuses a command whose per-arm counts differ.
+2. **Whole-path twin verification** (`_verify_playback`) before a single waypoint is
+   sent: every posture, all arms jointly, at the resolution it will be COMMANDED — not
+   at the recorded frame rate, so there is no unchecked interpolation between two
+   approved postures. A recorded trajectory can legitimately fail this, because the
+   episode was recorded with objects the twin does not model (03-sim §4.5): the refusal
+   names the pair and how many seconds in. Sim sessions with a `NullGate` have no twin
+   and skip it (11-safety §5).
+3. **The live gate stays the authority per tick**, and the plan is interruptible
+   throughout: any operator input, a driver fault or a teardown cancels it and the arms
+   hold. The Welcome page has no control socket, so `action: "stop"` is the operator's
+   cancel (idempotent).
+
+The recorded **gripper** rides a per-waypoint TRACK (`_playback_gripper`, applied in
+`ControlLoop._plan_step` from `PlanExecutor.index`), not a single target deferred to
+arrival: for a manipulation episode the grip IS the task. Playback refuses when an arm
+is more than `PLAYBACK_START_TOL_RAD` (1°) from frame 0 — with the distance, rather
+than quietly re-placing it, because a drifted cell is news. Arrival is confirmed per
+arm with `_await_arrival` (the executor retiring waypoints only says the COMMAND
+arrived; a carriage trails its targets at the track's own speed).
+
+Measured 2026-09-10 in sim on a real recording (`bc_demo/drawer_assembling`, 932
+frames at 25 fps, both arms): `goto_initial` 5.1 s and every joint + both carriages
+exactly on frame 0; `play` **37.2 s for a 37.28 s recording** (real time, `slowdown`
+1.0) ending exactly on the last frame with the gripper following its track. Not yet
+run on the real arms. Tests: `tests/test_episode_playback.py` (35, incl. the lockstep
+and real-time properties and an end-to-end replay in sim).
+
 ## 11. DAgger orchestration
 
 Components only — the wire protocol, aggregation rules, and trainer loop are
@@ -1923,11 +2009,13 @@ generated from them — 05-ui §2). Errors: `{"detail": str}` with 4xx/5xx.
 | `GET /api/session` | → `SessionInfo` \| 404 | reconnect resync |
 | `POST /api/session` | `SessionSpec{…, speed_scale}` → `SessionInfo{session_id, epoch, mode, arms, streams, state, kind, speed_scale}` | 409 if a session exists, a tracker calibration is in progress (`"tracker calibration in progress"`, phase-10), requested `kind` unavailable, scene/arm mismatch, dagger without a policy, or inference with no promoted deploy checkpoint (`policy=None` resolves to latest for dagger, promoted deploy for inference — 12-dagger §9). Returns after BRINGUP; START_FROM progress via telemetry. `streams` = camera ids + `"sim"` and/or `"twin"` (sim); `[]` for a hardware session (the preview cameras are ADOPTED, not re-added — §13.4). **Hardware refusal matrix (phase-09c/09d, `SessionManager._validate_hardware`, all before anything is touched; `detail` substrings):** `mode ∉ {teleop, collect}` → `"hardware sessions support teleop and data collection only (<mode> on hardware: not yet)"` (collect admitted 2026-09-07, §10.5; a collect body is additionally checked by `_check_dataset_spec` BEFORE this matrix — 409 `"dataset … already exists …"` / `"unknown dataset … start it as a new dataset instead"` / `"… is being exported - retry in a moment"` / `"… is a legacy LeRobot v3 dataset (read-only) …"`, and after connect by `dataset_incompatibility` → 409 `"dataset … cannot be continued by this session: <why> …"`; `return_to_start` without a return profile → 409; no live hardware camera → 409 `"data collection needs at least one live hardware camera …"`); empty arms → `"session needs at least one arm"`; an arm outside `workcells.hardware.arms` / outside the twin scene → `"arms [...] not in the hardware workcell"` / `"… not in scene"`; **not EVERY configured arm (phase-09d)** → `"hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing ['view'] (phase-09d: both arms are always part of the session)"`; no / unknown `digital_twin_scene` (or the `[sim]` extra missing); no read-only monitor configured → `"no read-only hardware monitor - the digital twin cannot be posed for the gate"`; a rail homing in flight on ANY arm (`maintenance_busy`: the monitor op OR a phase-09d `RailHomingJob`) → `"rail homing in progress on the Perception Arm - wait for it to finish"`; per selected arm (user-facing name first): the read-only monitor not `running`/`stale` or without a sample → `"Manipulation Arm: no monitor sample (monitor error: …) - the read-only monitor must be connected before a hardware session (the digital twin cannot be posed)"`; probe `refused`/`unreachable` → `"…: control box 192.168.1.201 is unreachable - power it on / check the network first"`; `error_code != 0` → `"…: controller error 31 is latched - clear errors first"`; the twin expects a rail the monitor did not find → `"…: the digital twin 'mavis_v2' expects a linear track but the monitor found none"`; `rail_present and not (rail_homed and rail_enabled)` → **`"Manipulation Arm: rail not homed - home it from the Hardware tab (Home rail) before starting a session (carriage position unknown)"`**; `start_from` profile not covering the arms. Post-connect: a monitor poll thread still inside the SDK after 15 s, a per-arm bring-up error (`"hardware bring-up failed: Manipulation Arm: rail - [rail] …"`), a connected arm whose track is not `ready` (`"… rail - linear track error after connect (carriage position unknown …)"`), a dof mismatch with the twin, a stale first state, or — phase-09d — a `start_from` profile motion the gate twin cannot plan (`"profile motion not collision-free: goal_in_collision (grip_right_inner_knuckle / table) - the digital twin found no safe path from the measured posture to profile '…'"`) → teardown + 409. `hardware_session_active` (the monitor hand-over predicate) turns true only AFTER this matrix passed, right before `_bringup_hardware` pauses the monitor: a refused request never flips it (a supervisor round inside the validation window would otherwise disconnect the monitors and 409 with "monitor paused"). `speed_scale` outside (0, 1] is pydantic's 422. `GET /api/session` answers `state: bringup` while the hardware bring-up runs (D5). **Online DAgger (2026-09-08 evening, §10.7; 15-online-dagger §3 / §7 / §12; the morning's "PRO-DAgger" text with its `offline dataset …` 409s is superseded):** a body with `online_dagger` set (`mode: dagger`, `policy_source: external`) is additionally checked by `_check_online_dagger` AFTER `_check_dataset_spec` + the hardware matrix and BEFORE `_check_return_to_start` — 409 `"Online DAgger session '<s>' already exists - resume it or pick another name"`, `"Online DAgger session '<s>' not found"`, `"Online DAgger session '<s>': session.json is unreadable - fix or remove it"`, `"dataset 'online_dagger/<s>' is being exported - retry in a moment"` (or the legacy-tree text), `"no external policy attached (dora bridge is not attached)"` / `"no external policy attached (no policy_spec heartbeat within 3 s)"`, `"no Online DAgger trainer attached (the policy node does not report the online_dagger capability)"`; `return_to_start` without a return profile is 409 for dagger too (D6). 422: `"online_dagger requires mode dagger"`, `"online_dagger requires policy_source 'external'"`, `"online_dagger derives the rollouts dataset - leave dataset unset"`, `"return_to_start is a collect / dagger-mode field"`, unknown `online_dagger` keys (`extra="forbid"`), `session_name` > 64 chars / off `SLUG_RE`. `SessionInfo` echoes `online_dagger` (and `policy_source`, `fault_detail`; not `dataset` / `return_to_start`) |
 | `POST /api/session/return_home` | → `ReturnHomeResult{ok, status: done\|skipped\|failed\|cancelled\|timeout\|refused, detail, arms, profile_id}` | 2026-09-08 (§10.5). Walk the workcell back to its designated initial-condition profile — joints first with the carriages held, then the carriages, each phase twin-planned + gated + interruptible — and report where the arms ended up. **SYNCHRONOUS**: the Cockpit's "End session" awaits it before the DELETE (05-ui §8.2), which is why the client deadline is 240 s while the runtime bounds each phase by the plan's own budget. Operational refusals are a **200 with `ok: false`**, never an HTTP error: no session (`refused`, `"no active session"`), an open episode (`refused`), a non-running or faulted session (`failed`), an unplannable path (`failed`, the twin's reason + failing pair), operator input (`cancelled`), a gate hold past budget (`timeout`). `skipped` is a SUCCESS — no initial condition designated for this kind, the profile covers no session arm, or the arms are already there. The `reset_to_initial` key (`R`) fires the same motion over /ws/control, fire-and-forget |
-| `DELETE /api/session` | → 204 | TEARDOWN (idempotent). Cancels an in-flight plan and produces **no motion of its own** — the return above is a separate, explicit call |
+| `POST /api/session/playback` | body `EpisodePlaybackRequest{repo_id, episode_id, action: goto_initial\|play\|stop}` → `ReturnHomeResult` | 2026-09-10 (§10.8, operator request). `goto_initial` walks the arms to the episode's FIRST recorded frame (a transient profile through the return-to-initial path: two twin-planned + gated phases, one arm at a time, interruptible); `play` replays the whole measured trajectory (lockstep-resampled, every posture twin-verified first, both arms together — the ONE motion that may, §10.8); `stop` cancels a replay (idempotent, the Welcome page's only cancel — it has no control socket). Both motions are **SYNCHRONOUS** (a 37 s episode is a 37 s request). Operational refusals are a **200 with `ok: false`**: no session, an episode naming arms this session does not drive, an arm more than 1° from frame 0 (`"run 'Return to the initial state' first"`), a twin-blocked posture (naming the pair and how many seconds in), `MOTION_BUSY`, the §10.5 blockers. `repo_id` / `episode_id` are pattern-validated in the MODEL (422), not only in the path routes: they arrive in a JSON body and are joined onto a filesystem root |
+| `DELETE /api/session` | → 204 | TEARDOWN (idempotent). Cancels an in-flight plan and produces **no motion of its own** — the return above is a separate, explicit call. Also the path the orphaned-session watch takes on its own (§13.2) |
 | `GET /api/datasets` | → `DatasetInfo[]` | 2026-09-07 (§10.6; core §12): every dataset under `datasets_root`, newest first — `repo_id`, `root`, `layout: episode_dirs \| lerobot_v3`, `total_episodes`, `total_frames`, `fps`, `robot_type`, `kind`, `task`, `cameras`, `arms`, `modified_at`, `in_use`, `export {state: none\|stale\|fresh\|running\|failed, path, at, episodes}`. Reads `manifest.json` / `episode.json` only (no lerobot import). 2026-09-08: also every dataset under the mapped namespace roots (§10.6 "Per-namespace roots"); rows carry `namespace` + `path` (additive) |
 | `GET /api/datasets/layout` | → `DatasetLayoutInfo{default_namespace, generic_root, namespaces: {ns: {root, subdir}}}` | 2026-09-08 (15-online-dagger §7; core §12): where datasets live, so the UI shows the REAL folder in its previews and never hard-codes a namespace. Declared BEFORE `/datasets/{ns}/{name}` — the literal segment is never read as a namespace (`/api/datasets/layout/x` → 404). Always 200 |
 | `GET /api/datasets/{ns}/{name}` | → `DatasetInfo` \| 404 | one dataset |
 | `GET /api/datasets/{ns}/{name}/episodes` | → `EpisodeInfo[]` \| 404 | capture order; `episode_id`, `index` (position), `frames`, `duration_s`, `task`, `session_id`, `recorded_at`, `frames_dropped`, `audio`, `export_ok`, `export_note`, `open` |
+| `GET /api/datasets/{ns}/{name}/episodes/{id}/playback` | → `EpisodePlaybackInfo` \| 404 \| 409 | 2026-09-10 (§10.8): `frames`, `fps`, `duration_s`, the per-arm INITIAL state (`EpisodePlaybackArm{arm_id, q, rail_pos_m, gripper_open_frac}`) and `playable` / `reason`. **Session-less on purpose** — the dialog opens and explains itself before anything moves, so a refusal is a sentence rather than a 409 to interpret. 404 unknown dataset / episode; 409 a legacy LeRobot tree, a missing or unreadable `frames.parquet`, a manifest without `observation.state` column names |
 | `DELETE /api/datasets/{ns}/{name}/episodes/{episode_id}` | → 204 | removes ONE episode directory (10-frames §11.7); 404 unknown; 409 `"episode is being recorded"` for the open episode, 409 `"legacy LeRobot v3 dataset - read-only"`; allowed while a session records into the dataset — EXCEPT (2026-09-08 evening, §10.7) a saved rollout of the RUNNING Online DAgger session: 409 `"dataset 'online_dagger/<s>' is in use by the running Online DAgger session - end the session first (the trainer is told about discards, not deletions)"` |
 | `DELETE /api/datasets/{ns}/{name}` | → 204 | the whole tree; 409 while a session records into it or an export runs; 404 unknown |
 | `POST /api/datasets/{ns}/{name}/export` | `{format: "lerobot_v3", out?: str}` → **202** `{repo_id, format, started_at}` | starts the export job (§10.6, 10-frames §11.8); progress on `telemetry.datasets.export`; 409 while a session records into that dataset, while another export runs, or for a legacy tree; 404 unknown |
@@ -1996,6 +2084,57 @@ Handler rules (`server/ws_control.py`):
 - Watchdog feed = `HeldState.rx_mono` (§8); client `ts` is a latency metric
   only, never trusted for safety.
 
+**Orphaned session** (2026-09-09 evening, operator request; `session/orphan.py`,
+`OrphanSessionWatch`). A session nobody can drive is a hazard, not a feature: that
+evening a hardware Teleop session started at 22:51 was still `running` at 23:16
+because the Cockpit tab had been closed with the browser's Back button instead of
+**End session**. Both control boxes stayed enabled with the arms holding their
+posture, the read-only hardware monitor stayed paused — so every Welcome-page arm
+gate read `monitor_off` and all four launch cards were disabled with no explanation
+— and nothing on the machine would ever have released them.
+
+So the runtime ends such a session itself. The one liveness signal is the
+**controller** `/ws/control` connection, because that socket carries the 25 Hz key
+heartbeat, the actions and the deadman: without it nobody can drive, and an
+`observer` deliberately does not count. When it has been gone for
+`control.orphan_session_grace_s` (default **30 s**; 0 disables the watch) the watch
+calls `SessionManager.teardown()`. Properties, all binding:
+
+- **The end produces NO motion.** It is exactly the `DELETE /api/session` path: the
+  drivers hand the arms back stopped with the brakes engaged, where they stand, and
+  the tracks keep their homed state. It deliberately does NOT run the Cockpit's
+  return-to-initial-condition first — that is a twin-planned motion, and with nobody
+  in the room and the twin not modelling the furniture (03-sim §4.5) an unattended
+  replan is the last thing wanted.
+- **A reload is not an orphan.** The grace period is what separates "closed for
+  good" from F5: a reloaded Cockpit re-opens the socket within a second and the
+  countdown resets. `POST /api/session` and `POST /api/session/{return_home,
+  playback}` also stamp it (`note_activity`), so a synchronous motion driven from a
+  page with no control socket is never cut off mid-way.
+- **A session that never had a controller is never ended.** The watch fires only on
+  a session whose controller connected and then went away — the case that bit us —
+  which keeps a deliberately REST-driven session (a test harness, a script, a policy
+  bring-up that has not opened its socket) safe from a background thread tearing it
+  down. `ws_control` records the attendance itself (`note_controller_connected`), so
+  a controller that connects and drops inside one poll period still counts. The one
+  gap left: a `POST /api/session` whose browser died before the Cockpit ever mounted
+  stays up — visible instead, because `telemetry.session.mode` now lets the Welcome
+  page offer its Cockpit route (and thus **End session**).
+- **An open episode is discarded**, because `teardown()` discards it (§10.4). An
+  episode being recorded by nobody is not worth keeping the arms live for; the notice
+  and the log line both say it happened, naming the episode id.
+- A dedicated 0.5 s daemon thread polls it (`Runtime.start()` arms it last,
+  `Runtime.stop()` disarms it first so the two teardowns cannot race). Not the
+  telemetry socket: the orphan case is "every browser tab is gone".
+
+Why the session ended is published on `telemetry.session.auto_ended`
+(`SessionAutoEndNotice{session_id, mode, kind, ended_at, reason}`; core §11) and
+survives until the next session starts, so the Welcome page can tell the operator
+the arms were released while nobody was watching — otherwise the cell is silently in
+a different state than the person walking back to it expects. Tests:
+`tests/test_orphan_session.py` (injected clock; plus one end-to-end over
+`create_app` that closes a control socket and watches the session go).
+
 ### 13.3 `/ws/telemetry`
 
 Broadcast-only, N observers, **25 Hz** (config 20–30). An asyncio task reads
@@ -2004,8 +2143,18 @@ the `snapshot` slot, builds `TelemetryMsg` (shape exactly as 05-ui §2:
 collision: CollisionReport, clearances, episode, dagger, inference`), and fans out with
 per-client latest-wins: a slow consumer gets frames dropped, never
 back-pressures control. Runtime-side additions inside the same message:
-`session: {state, start_from_progress?, plan_status?, trainer_alive?, bringup?,
-translate_frame?, fault_detail?}` — additive, UI ignores unknown fields.
+`session: {state, session_id?, mode?, kind?, auto_ended?, start_from_progress?,
+plan_status?, trainer_alive?, bringup?, translate_frame?, fault_detail?}` — additive,
+UI ignores unknown fields.
+**`session.session_id` / `mode` / `kind`** (additive, 2026-09-09; a hardware bring-up
+counts, exactly as for `GET /api/session` — `SessionManager.session_identity()`): the
+live session's identity, `null` with none. The Welcome page never opens `/ws/control`
+and has no `SessionInfo` on a fresh load, so this is how it learns a session is
+running and which Cockpit route to offer instead of four disabled launch cards.
+**`session.auto_ended`** (additive, 2026-09-09; `SessionAutoEndNotice`): why the LAST
+session ended WITHOUT an operator click — today only the orphaned-session watch
+(§13.2) — cleared when the next session starts, `null` when the last one ended by
+DELETE or none ran. Shown verbatim by the Welcome page.
 **`session.fault_detail: str`** (additive, 2026-09-08; core §11): the
 manager's session-level notice the per-arm rows do NOT already carry —
 `ActiveSession.notice()`: the last profile motion's outcome / a refused or
@@ -2366,6 +2515,11 @@ control:
   jog: {slew_rad_per_tick: 0.02, rail_m_per_tick: 0.002}   # any delta; constant-speed approach
   watchdog: {stale_s: 0.2, ramp_s: 0.1}   # = SafetyConfig input_deadman_s/input_ramp_s
   health_log_every_s: 1.0    # control-loop INFO health line period ("Logging" below); 0 = off
+  orphan_session_grace_s: 30 # 2026-09-09 (§13.2): how long a session survives with NO
+                             # controller /ws/control connection and no session REST
+                             # activity before the runtime ends it ITSELF through the
+                             # no-motion teardown. Long enough that an F5 in the Cockpit
+                             # is not an orphan; 0 disables the watch (the test suites pin 0)
 recorder: {fps: 25, vcodec: auto, jpeg_quality: 80,
            audio: true,                                      # per-episode WAV when the mic is live (§10.5)
            export: {video_file_mb: 200, data_file_mb: 100},   # LeRobot v3 export shard caps (10-frames §11.8)

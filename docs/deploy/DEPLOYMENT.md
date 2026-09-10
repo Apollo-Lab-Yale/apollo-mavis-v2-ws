@@ -901,7 +901,9 @@ source ~/apollo-mavis-v2-ws/scripts/deploy/_common.sh   # so uv finds the shared
 C=~/apollo-mavis-v2-ws/var/mavis_v2_lab.yaml
 uv run python -m apollo_mavis_v2_runtime.profiles.seed_initial --config $C --dry-run   # look first
 uv run python -m apollo_mavis_v2_runtime.profiles.seed_initial --config $C             # then write
-# and the ordinary "Kitchen Interaction" profile (operator request 2026-09-09, NOT an initial condition):
+# and the ordinary "Kitchen Interaction" profile (operator request 2026-09-09, NOT an initial
+# condition; amended 2026-09-10 so only the Perception Arm differs from the default posture -
+# a store seeded before that date holds the old grip entry, so re-run this after a pull):
 uv run python -m apollo_mavis_v2_runtime.profiles.seed_kitchen --config $C
 ```
 
@@ -1161,8 +1163,23 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 
 ## S11. Troubleshooting
 
+> **Never run `uv run` in a sub-repo whose venv a live runtime is executing from** —
+> least of all with a hardware session open. `uv run` re-syncs the environment: it
+> rebuilds and REINSTALLS the package (`Building apollo-mavis-v2-runtime … Uninstalled 1
+> package … Installed 1 package`), deleting and rewriting the very site-packages the
+> running process imports from. On 2026-09-10 two concurrent `uv run pytest` invocations
+> in `apollo-mavis-v2-runtime` killed the dev runtime **mid hardware session**: the log
+> stopped mid-health-line with no traceback and no teardown, so the arms were left
+> enabled rather than stopped-and-braked, and the next UI click answered 500 from a dead
+> server. Stop the runtime first (`scripts/dev/mavis-dev.sh stop runtime`, or
+> `systemctl --user stop mavis-runtime` on the shared account), or run the suite from a
+> separate git worktree; `uv run --no-sync` is safe for read-only tools when the lockfile
+> is unchanged. Never two test runs in the same tree at once. Same class of hazard as the
+> 2026-09-05 test-suite incident (04-runtime §16).
+
 | Symptom | Cause / fix |
 |---|---|
+| the whole UI answers `Internal Server Error` / `500`, or the browser cannot reach `:8765` at all | the runtime process is GONE, not erroring. `pgrep -af apollo_mavis_v2_runtime` empty and `curl :8765/api/health` refusing confirm it; the log's last line will be a mid-second health line with **no traceback and no teardown**. Most likely cause on a developer machine: a `uv run` in the runtime tree re-synced the venv under the live process (see the box above). Restart (`scripts/dev/mavis-dev.sh restart runtime` / `systemctl --user restart mavis-runtime`), then **check the arms** — a runtime that dies without `teardown()` never hands them back stopped-and-braked, so read `telemetry.hardware_monitor.arms[]` (`error_code`, `warn_code`) once the read-only monitor reconnects, and **Clear errors** on the card if anything latched. |
 | tracker `error` with `LIBUSB_ERROR_BUSY` in `journalctl --user -u mavis-runtime` | another libsurvive holds the dongle: the developer's runtime, `survive-cli`, `scripts/tracker/03-…`. `sudo fuser -v /dev/bus/usb/$(lsusb -d 28de:2101 \| awk '{printf "%s/%s", $2, substr($4,1,3)}')` shows the pid; stop it (S8.4). A killed process can keep the interface claimed → replug the dongle. |
 | tracker `no_backend` | pysurvive missing — a plain `uv sync` removed it. `(cd $OPS_ROOT/apollo-mavis-v2-runtime && uv pip install --no-deps --force-reinstall ../third_party/wheels/pysurvive-*-cp312-*.whl)`; restart. |
 | tracker `error`: permission / cannot open device | mavis-v2 lacks `plugdev` or the udev rule is missing: `id mavis-v2`, `ls -la /dev/bus/usb/…` should be `root plugdev 0660`; `sudo udevadm trigger --subsystem-match=usb`; restart `user@<uid>` after group changes. |
