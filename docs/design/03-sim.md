@@ -3,7 +3,10 @@
 Status: v0.1 (2026-09-01; amended 2026-09-05 — phase-09c: §8 the static
 rail-sweep recipe the runtime builds on `check_config_violations` /
 `monitored_pairs` to gate the `home_rail` maintenance op, and the `DigitalTwin`
-API it relies on). Conforms to `00-overview.md` (spine, v0.3). Ground
+API it relies on; amended 2026-09-09 — phase-15: §4.4 the `mavis_v2_kitchen`
+scene, and **§4.5 the overlay-alignment investigation** whose answer is that the
+camera model, the extrinsics and the SDK state are all exact and the twin is
+missing real furniture, which the gate and the planner also cannot see). Conforms to `00-overview.md` (spine, v0.3). Ground
 truth for numbers: `docs/research/{mujoco-xarm7-sim,xarm7-ik,collision-ik}.md`
 (benchmarked on this machine, 2026-09-01). Depends only on `apollo_mavis_v2_core`
 (+ mujoco, mink, numpy); never imports `hardware`, `runtime`, or FastAPI.
@@ -461,6 +464,100 @@ twin's modelled **microphone body occludes tag 4** at the bottom-centre of the i
 §4.3), so the four-tag run is mic-off and the mic-on run asserts 0 / 1 / 3. Renders for
 the operator: `kitchen_final_cam_kitchen.png`, `kitchen_final_view_wrist_cam*.png`
 (phase-15 report).
+
+### 4.5 Overlay-alignment investigation, 2026-09-09 (the twin is right; the CELL changed)
+
+The operator reported that the `*_align` overlays, accepted at 0 px / < 1 px on 2026-09-06
+(§4.3), "no longer line up" and asked whether the cause was the camera intrinsics, the
+xArm SDK's state estimate, or the twin's own geometry. Five parallel audits (intrinsics +
+projection, extrinsics + kinematics, state plumbing, empirical measurement, regression
+history) answered: **none of them. Nothing regressed. The twin no longer models the room.**
+
+What was ruled out, with the number that rules it out:
+
+| suspect | verdict | evidence |
+| --- | --- | --- |
+| camera intrinsics | REJECTED | both cameras' configured `fx/fy/cx/cy` equal the librealsense factory **Color 640×480** values to **< 0.01 px**; `rs-enumerate-devices -c` re-read live. The "fx ≈ 385 at 640×480" trap is the **DEPTH** imager — colour 640×480 is a centre CROP of the 16:9 chain, so fx stays 608 (55.5° × 43.1°). The live V4L2 nodes confirm `640×480 YUYV`, and `opencv_camera.py` read-back-verifies every field, so a silent profile fallback is unreachable |
+| intrinsics → MuJoCo conversion | REJECTED | an independent EGL render of spheres at known `(X, Y, −2 m)` matches the OpenCV projection to **0.55 px mean / 0.67 px max** with the repo's `principal_pixel = [W/2 − cx, H/2 − cy]`, versus 15.3 px with the opposite sign and 7.9 px with zero. Inverting the compiled `cam_intrinsic` returns the config values exactly (float32); effective fovy 43.067° (the MJCF's 57 is the depth FOV and is overwritten) |
+| xArm SDK state | REJECTED | the twin's FK, posed from the monitor's `q`, reproduces the **controller's own** `tcp_pose` to **0.0002 mm / 0.0001°** on both arms (grip differs by exactly the 172 mm gripper TCP offset, 0.000 mm perpendicular) — same joint zeros, same signs, no DH mismatch. Bounds any joint order/sign/offset error at **< 2 µrad** |
+| joint order / rail slot / `rail_flip` / `base_in_world: {}` | REJECTED | `base_in_world: {}` is filtered out as identity, so the scene's measured base poses win (verified: twin `grip_link_base` = `[−0.356, −0.1786, 0.8422]`). `rail_flip` false is correct for this cell and is applied once, not twice; a wrong flip would move grip's carriage **622 mm** |
+| twin extrinsics / cell geometry drift | REJECTED | every number in `mavis_v2.yaml` and `xarm7_on_rail.xml` matches §4.3 to the last digit and is **byte-identical since sim `536c4ba` / runtime `a11cdd2` (2026-09-07 02:29)**; later commits touched only comments. All five working trees clean |
+| a code/config regression | REJECTED | the overlay-relevant slice of the rendered lab config equals `a11cdd2:configs/mavis_v2.yaml` exactly; `git diff a11cdd2 HEAD` is **empty** for `streams/twin_overlay.py` and `devices/hardware_monitor.py` |
+| camera roll / J1 / J3 / J5 / J7 offset | ≤ **0.7°** | the two edges of a rectangular mat back-project to world directions deviating **−0.650°** and **+0.641°** — anti-symmetric, so best-fit roll is **+0.005°**; a roll error would shift both the same way. The 0.65° residual is the hand-laid mat not being square |
+| camera pitch / yaw, J2 / J4 / J6 offset | ≤ **5.5°**, and 5° moves the feature only 89 px of the 502 px needed | perpendicularity residual −1.291° has sensitivity −0.237 °/deg to pitch, −0.020 °/deg to yaw |
+| wrist-camera extrinsic translation | ≤ ~3 mm in the direction that matters | ±20 mm moves the target edge ≤ 41 px; and the twin puts `grip_left_finger` only **14 px** below the frame edge while the real frame shows no finger, so it cannot be off by more in that direction |
+
+What is actually wrong: **at the captured posture the twin's wrist cameras look at nothing
+the twin contains.** `grip_wrist_cam` sits at world `(−0.465, −0.595, 1.091)` looking down,
+**0.286 m outside the twin table's −Y edge** (`table` half-size `[0.6075, 0.31, 0.015]`,
+y ∈ [−0.310, +0.310]); the environment pass returns `floor` over **100.00 %** of the frame,
+one segmentation level, so Canny finds no edge and `env_outline` draws nothing either.
+Result: `grip_wrist_align.mask_fraction = 0.0` **exactly** — the Manipulation Arm's overlay
+is a pass-through of the real frame with **zero twin pixels** (verified two ways: the live
+telemetry value, and a pixel diff of the published pair whose max is JPEG noise on 3 px of
+307 200). `view_wrist_align`'s **only** content is the `view_microphone` capsule, 8.128 % of
+the frame, over a real frame that contains no microphone. Both facts were reproduced offline
+**bit-exactly** (robot mask 0.00000 / 0.08128 vs telemetry 0.0 / 0.08127604166666667), which
+also proves the live process renders the on-disk geometry with the `[21, 13]` nudge applied.
+
+Meanwhile the real frame is full of an object at table height that the twin does not have.
+The blue mat's two edges were fitted per-row / per-column on an HSV mask (TLS, rms 0.63 and
+1.09 px, n = 15 / 12) and back-projected through the twin's camera rotation: the surface's
+world position is **y = −0.597 ± 0.002** (robust to the plane-height assumption: −0.596 at
+z 0.735, −0.598 at z 0.0), against the twin table's near edge at **y = −0.310**. The range
+is fixed independently by prop scale — at the twin's table plane (0.343–0.376 m) the props
+measure banana 11.1 cm, lime 5.9 × 4.2 cm, cucumber 12.6 cm, plate 18.3 cm (textbook plastic
+play food); at the twin's **floor** (1.05–1.15 m, what it actually renders) they would be
+banana 34 cm, lime 18 cm. So the real surface is at **0.37 ± 0.04 m ⇒ z ≈ 0.72 ± 0.04**,
+statistically indistinguishable from the twin's table top 0.735 — and the twin renders bare
+floor there. **This is the blue cart with the toy food that §4.4 lists as "not modelled"**,
+pushed against the operator side of the cell table since the 09-06 acceptance. Explaining the
+gap with a camera parameter instead would need 502 px in v (105 % of the frame height) or
++307 mm of camera translation; the full single-parameter sensitivity sweep (fx 380/460/500/700,
+cx/cy ±20/±40, camera ±5/10/20 mm along and across the axis, pitch/yaw/roll ±1…5°, every joint
+±1…5°, the J1 + π branch, rail ±10/50 mm) has no candidate above 18 % of the deficit, and the
+`+π` branch is excluded outright because it puts the table on the wrong side of its own edge.
+
+Consequences, in order of importance:
+
+1. **The safety gate and the planner share this twin.** They are blind to the cart, to the
+   kitchen run of §4.4, and to the props. On 2026-09-09 at 19:05:17 a **twin-planned,
+   gate-approved** `return_home` on the Manipulation Arm (8 waypoints, max |dq| 2.86 rad) was
+   cancelled 10 s in by **controller error 31 "Collision Caused Abnormal Current"**, twice
+   (`var/logs/runtime.log.1`) — after an E-stop at 18:58:34 and a re-home of both rails at
+   19:01. Modelling the cart is therefore a **safety** fix, not a cosmetic one.
+2. **The overlay currently cannot show a misalignment even if one existed** at postures like
+   this: with nothing but floor in the twin's frustum there is no cue to judge. A residual
+   measurement needs a posture where the twin predicts geometry in frame — close the gripper
+   to `open_frac ≈ 0.2`, or add ~15° on J5/J6, which brings the fingers from 14 px outside to
+   well inside; or aim at the rail end faces / table edges as on 09-06.
+3. **The `[21, 13]` nudge's "depth-independent" evidence spans only ~0.1–0.3 m.** The two
+   bands of the 09-06 test were both near, so a **positional** mount error fitted at
+   D₀ ≈ 0.25 m and a **rotational** one are still indistinguishable. They now diverge
+   measurably: under the position model the 21 px becomes `21·(1 − D₀/D)` of
+   over-correction — **7.9 px at 0.4 m, 15.8 px at 1.0 m, 18.4 px at 2.0 m** (the same ~5 cm
+   ambiguity §4.4 records for the kitchen deprojection) — while under the rotation model it
+   stays 21 px at every depth and instead leaves `21·x²` ≈ **6 px at the left/right edges**.
+   One frame containing a near **and** a far feature settles it. The physically correct
+   encoding is a per-arm 6-DOF wrist-camera extrinsic (today it is **one shared constant for
+   two hand-assembled brackets**, patched in 2-D on one of them), solved by `calibrateHandEye`
+   over 10–15 braked postures at depths spanning ≥ 3×, using the twin's FK as `T_base_flange`
+   (proved exact above).
+4. **Two mesh defects dominate the picture wherever they are in frame, and neither can move
+   the camera** (the arm base pose is `base_pos + (0, q, 0)` and depends on no mesh; the
+   camera's `pos` is an absolute link7 offset): the carriage mesh is **42 mm (−X) / 32 mm (+X)
+   short per end = 64 px / 49 px at 0.4 m**, and the microphone body is off by **≥ 20–30 mm**
+   (displacing it 20–30 mm in world −Y empties it from the frame; 10 and 20 mm in any of ±Y/±Z
+   do not). The mic is the ONLY twin body in the Perception Arm's wrist frame today, so an
+   operator judging that tile is judging the known-bad mic mesh.
+5. `hardware_monitor` reads `get_servo_angle()` **without `is_real`**, i.e. the **commanded**
+   register, while the session driver reads the measured 30003 push. Worth ≤ 1e-4 rad ⇒
+   **≤ 0.13 px** at rest (measured: `cmd-meas` = 0.0000 rad on 33 399 health lines at rest,
+   max 0.0087 rad while moving), so it is not the alignment story — but it means the twin draws
+   the *planned* posture after an abort, exactly the error-31 case above.
+
+Raw captures, scripts and figures: `var/alignment-20260909/` (untracked). Nothing in this
+investigation changed a tracked number; §4.3 stands as measured.
 
 ## 5. Scene composition via `mujoco.MjSpec`
 

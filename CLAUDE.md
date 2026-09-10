@@ -26,7 +26,8 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   decisions. Read it before touching any sub-repo.
 - `docs/design/` — per-repo designs and cross-cutting protocols. **Measurement
   histories and root-cause write-ups live there, not here.** Pointers: cell
-  geometry + wrist-camera extrinsics → 03-sim §4.3 and the header of
+  geometry + wrist-camera extrinsics → 03-sim §4.3, the 2026-09-09 overlay-alignment
+  root cause → **03-sim §4.5**, and the header of
   `apollo-mavis-v2-sim/src/apollo_mavis_v2_sim/assets/scenes/mavis_v2.yaml`;
   cameras → 02-hardware §8, 04-runtime §14; microphone → 04-runtime §14/§14.1,
   05-ui §8.1, `docs/deploy/DEPLOYMENT.md`; control boxes, SDK quirks, the first
@@ -101,6 +102,17 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   enters the shell, `no_escape` when that is impossible; the finished path is
   re-verified at the executor's tick resolution (11-safety §9, 03-sim §10). Never
   whitelist a violating pair in the planner again — the gate is the safety authority.
+- **The twin does NOT model the room the cell now sits in (measured 2026-09-09, 03-sim
+  §4.5).** The blue cart with the toy food stands at table height ~0.29 m inside the twin
+  table's operator-side edge, and the kitchen run of 03-sim §4.4 is absent from `mavis_v2`
+  — the scene the gate, the planner AND the overlays use. The gate is therefore blind
+  there: at 19:05 on 2026-09-09 a twin-planned, gate-approved `return_home` on the
+  Manipulation Arm was cancelled 10 s in by `controller error 31: Collision Caused
+  Abnormal Current`, twice. Until the cart and the appliances are in the scene, treat
+  every planned motion (return-to-start, `R`, `goto_profile`, `home_rail`) as unverified:
+  10 % speed, hand on the E-stop. The `*_align` overlays cannot warn you — with only twin
+  floor in the frustum the Manipulation Arm's overlay draws NOTHING (`mask_fraction` 0.0
+  exactly) and the Perception Arm's draws only its known-wrong microphone body.
 - Driver caps at speed scale 1.0: `max_joint_vel` 0.6 rad/s, `max_cart_step_m`
   0.004 (= 4 mm/tick, deliberately HALF the gate's 8 mm inflation — do not raise
   it without changing the gate), rail 50 mm/s. Hardware tab picks 10 / 50 / 100 %,
