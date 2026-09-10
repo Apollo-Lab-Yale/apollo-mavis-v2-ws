@@ -357,6 +357,22 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
 - `~/projects/apollo-mavis-v2-ws-merge/` (branch `merge-13-12`) and
   `~/projects/apollo-mavis-v2-ws-p12/apollo-mavis-v2-policy-node` (the GELLO
   viewpoint node lives there) are leftovers — deleting them is the operator's call.
+- **C31 re-fault under load (2026-09-09 late evening, uncommitted in hardware + ui + docs).**
+  Opening the fridge door tripped `C31 Collision Caused Abnormal Current` on the
+  Manipulation Arm, and every burst ended in `recovery budget exhausted (3 in 30 s)` —
+  self-inflicted: each 20 ms auto-recovery re-enabled the servos with the door still
+  pulling on the gripper, the arm re-faulted ~200 ms later WITHOUT moving (four C31 in
+  660 ms, `held=[]`, identical reseed angles), and the budget was gone before the
+  operator had a turn. The driver now LATCHES at once when the same recoverable code
+  re-fires within `REFAULT_WINDOW_S` (1.5 s) of an auto-recovery with no new target
+  (`re-latched … holding still: the collision load is still on the arm - back it off or
+  let go of the object, then Recover`; one budget slot; 02-hardware §3.5). What it does
+  NOT do: make the door openable — the seal / hinge force is a real external torque and
+  sensitivity 3 reads it as a collision. Lowering the Manipulation Arm's
+  `collision_sensitivity` to 2 (then 1), weighing the payload, pulling along the door's
+  arc at 10–50 % speed are the operator's calls, not yet made. Same evening, UI:
+  **Continue existing prefills Task from `DatasetInfo.task`** (05-ui §8.1 item 6) so a
+  resume is one click. The dev runtime (PID 3869832) does NOT have the driver fix.
 - Known follow-ups: lerobot's `StreamingVideoEncoder` start / finish hold the
   GIL 160–330 ms at `start_episode` and up to 324 ms at `finish_episode` with
   `h264_nvenc` (04-runtime §10.5 "GIL stall"; an encoder subprocess is the fix);
@@ -364,6 +380,49 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   leak-check with a machine-wide `pgrep -x dora`, so never run two dora suites on
   this host at once; the twin's microphone body is off by ≥ 20–30 mm (03-sim §4.5)
   and the carriage mesh is 42 / 32 mm short per end — both need a tape measure.
+
+## The shared lab account `mavis-v2` (production deployment, 2026-09-09)
+
+- **The cell runs from `mavis-v2`, not from a developer account.** Home `/home/mavis-v2`
+  (uid 1001, a sudoer, admin password `ApolloLab#` — the operator explicitly authorised
+  publishing it in this public repo on 2026-09-09), linger enabled. Checkout
+  `~mavis-v2/apollo-mavis-v2-ws`, data tree in its gitignored `var/`, rendered config
+  `var/mavis_v2_lab.yaml`, persistent render knobs `var/lab.env`, demonstrations in
+  `~mavis-v2/data/{bc_demo,online_dagger}` (outside `var/`, so `git clean` can never
+  reach recorded data). Day-to-day commands: the workspace README, "Running the cell";
+  first-time install and troubleshooting: `docs/deploy/DEPLOYMENT.md`.
+- **All six repos are PUBLIC and the account holds NO GitHub credentials** (no
+  `~/.git-credentials`, no `~/.config/gh`, no credential helper): every clone and pull is
+  anonymous HTTPS with `GIT_TERMINAL_PROMPT=0`, verified on the ws and all five
+  submodules. `apollo-mavis-v2-runtime` was flipped private → public on 2026-09-09 to
+  make this work. Updates: `scripts/deploy/update.sh`. Keep that checkout CLEAN — it must
+  always fast-forward; development happens in a developer's clone and arrives via GitHub.
+- One service, `systemd --user` `mavis-runtime.service` (API + built UI on 8765, tracker,
+  mic, arm probes). **Autostart is deliberately NOT enabled**: the lab config is armed and
+  nothing should connect the boxes with no operator present, nor take the dongle / mic /
+  port from a developer's runtime (`AUTOSTART=1 install-services.sh` opts in). **One
+  runtime at a time** owns the dongle, the mic, each control box and 8765.
+- **No account name or home path is hard-coded in the repo** (operator requirement
+  2026-09-09): the scripts default to `OPS_USER` `mavis-v2`, `OPS_ROOT`
+  `$OPS_HOME/apollo-mavis-v2-ws`, `DATA_ROOT` `$OPS_ROOT/var` (`scripts/deploy/_common.sh`)
+  but every one is an env knob; the systemd unit uses systemd's **`%h`** so it carries no
+  account name at all (`install-services.sh` only rewrites it for a layout that breaks the
+  `~/apollo-mavis-v2-ws` relation, and refuses to install a unit holding another account's
+  literal path); `sync-data-from-dev.sh`'s `DEV_USER` defaults to the invoking user, not to
+  `xiatao`. Docs write `$OPS_ROOT` / `$DATA_ROOT` / `$DEV_USER` or `~/…`, and name
+  `mavis-v2` / `xiatao` only as *this machine's* values. The legacy FHS layout
+  (`mavis` + `/opt` + `/var/lib`) is still reachable through the same env vars. New scripts: `update.sh` (S9 upgrade, refuses while a session is open),
+  `sync-data-from-dev.sh` (additive rsync of `~/data` between accounts, either
+  direction), `install-ufactory-studio.sh` (AppImage + desktop entry).
+- The NetworkManager dispatcher hook `/etc/NetworkManager/dispatcher.d/90-mavis-netsetup`
+  now bakes in the PRODUCTION hardware venv, so arm-NIC repair no longer depends on a
+  developer's checkout existing. Re-render it with `netsetup install --dispatcher-only`
+  from whichever venv should own it. Nothing else on the machine is per-account except
+  the udev rules (`60-apollo-teleop-input.rules`, already installed) and `mavis-v2`'s
+  device groups (plugdev, input, audio, video, render, dialout — all present).
+- **UFACTORY Studio: version 1.0.2 ONLY** (operator decision 2026-09-09 evening). 1.0.1
+  was deleted from every account, its desktop entries and icons with it. Do not
+  re-install it.
 
 ## Hardware facts (not discoverable from code)
 

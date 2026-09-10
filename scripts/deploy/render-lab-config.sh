@@ -1,19 +1,21 @@
 #!/usr/bin/env bash
 # S4: write the lab runtime config $LAB_CONFIG ($DATA_ROOT/mavis_v2_lab.yaml, i.e.
-# /var/lib/apollo-mavis-v2/mavis_v2_lab.yaml) from the repo config
+# ~mavis-v2/apollo-mavis-v2-ws/var/mavis_v2_lab.yaml) from the repo config
 # apollo-mavis-v2-runtime/configs/mavis_v2.yaml, overriding only what differs between
-# "developer sim defaults" and "operations on the real cell": absolute shared paths,
-# ui_dist, host/port, the lab tracker settings that so far lived only in the developer's
-# volatile /tmp/mavis_v2_live.yaml (backend libsurvive, --lighthousecount 3, yaw_deg
-# 116.3, rail_in_ik false), the arm IPs and (when given) the camera USB serials. The
-# result is validated with the runtime's own config model before it is installed.
-# Idempotent. NO sudo: LAB_CONFIG lives in the mavis-owned $DATA_ROOT so the ops
-# account can re-render alone (S9); sudo is used only if LAB_CONFIG points into a
+# "developer sim defaults" and "operations on the real cell": absolute data paths,
+# ui_dist, host/port, the lab tracker settings (backend libsurvive, --lighthousecount 3,
+# yaw_deg 116.3, rail_in_ik false), hardware_session.armed, the arm IPs and (when given)
+# the camera USB serials. The result is validated with the runtime's own config model
+# before it is installed. Idempotent. NO sudo: LAB_CONFIG lives in the ops account's own
+# $DATA_ROOT so it can re-render alone; sudo is used only if LAB_CONFIG points into a
 # directory the caller cannot write (e.g. /etc).
 #
 #   bash scripts/deploy/render-lab-config.sh            # render, diff, validate, install
 #   DRY_RUN=1 bash scripts/deploy/render-lab-config.sh  # render + diff only, print YAML
 #   LAB_CONFIG=/tmp/x.yaml ...                          # install somewhere else
+# Knobs come from the environment OR from the env file $LAB_ENV ($DATA_ROOT/lab.env, one
+#   KEY=value per line, sourced by this script; variables already exported win over the
+#   file). The lab box keeps DORA_BIND_HOST there so update.sh re-renders the same config.
 # Knobs (env): TRACKER_BACKEND=libsurvive LIGHTHOUSE_COUNT=3 TRACKER_YAW_DEG=116.3
 #   RAIL_IN_IK=false HARDWARE_ARMED=true MIC_ENABLED=true EGL_DEVICE_ID=0 RUNTIME_HOST RUNTIME_PORT UI_DIST
 #   LOG_LEVEL=INFO      logging.level (DEBUG adds per-event IK slips + driver events); the
@@ -36,6 +38,20 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=_common.sh
 source "$HERE/_common.sh"
+
+# Persistent render knobs of this machine (DORA_BIND_HOST, CAMERA_SERIALS, LOG_LEVEL, ...):
+# the env file is sourced, but anything already in the environment wins, so a one-off
+# `DRY_RUN=1 ...` or `CAMERA_SERIALS=... bash render-lab-config.sh` still behaves as typed.
+if [ -f "$LAB_ENV" ]; then
+  _pre_env="$(export -p)"
+  set -a
+  # shellcheck disable=SC1090
+  . "$LAB_ENV"
+  set +a
+  eval "$_pre_env"
+  unset _pre_env
+  printf '    knobs from %s: %s\n' "$LAB_ENV" "$(grep -E '^[A-Z_]+=' "$LAB_ENV" | cut -d= -f1 | paste -sd' ')"
+fi
 
 SRC_CONFIG="${SRC_CONFIG:-$RUNTIME_DIR/configs/mavis_v2.yaml}"
 [ -f "$SRC_CONFIG" ] || die "source config not found: $SRC_CONFIG (run install-stack.sh first)"
@@ -212,7 +228,7 @@ else
   fi
   DEST_DIR="$(dirname "$LAB_CONFIG")"
   [ -d "$DEST_DIR" ] || mkdir -p "$DEST_DIR" 2>/dev/null || true
-  if [ -w "$DEST_DIR" ]; then run install -m 664 "$TMP" "$LAB_CONFIG"   # group mavis keeps write access
+  if [ -w "$DEST_DIR" ]; then run install -m 664 "$TMP" "$LAB_CONFIG"   # group keeps write access
   else warn "$DEST_DIR is not writable by $(id -un): installing via sudo"; as_root install -m 644 -o root -g root "$TMP" "$LAB_CONFIG"; fi
 fi
 note "runtime reads it via --config / \$APOLLO_CONFIG (mavis-runtime.service sets both)"

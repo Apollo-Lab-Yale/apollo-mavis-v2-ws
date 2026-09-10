@@ -1,11 +1,18 @@
-# MAVIS v2 runtime -- systemd --user unit for the operations account (mavis).
-# Installed by scripts/deploy/install-services.sh into ~/.config/systemd/user/;
-# paths are rewritten there when OPS_ROOT / LAB_CONFIG differ from the defaults.
-# The lab config lives in the mavis-owned data tree (not /etc) so S4/S9 need no sudo.
-# Guide: docs/deploy/DEPLOYMENT.md S6. Runs at boot through `loginctl enable-linger`.
+# MAVIS v2 runtime -- systemd --user unit for the shared operations account.
+#
+# NO ACCOUNT NAME IS BAKED IN. `%h` is systemd's specifier for the home of the user the
+# unit runs as, so this file is correct for ANY operations account whose workspace checkout
+# sits at ~/apollo-mavis-v2-ws -- `mavis-v2` on the Apollo lab machine, something else
+# elsewhere. install-services.sh installs it into ~/.config/systemd/user/ and rewrites the
+# two paths ONLY when OPS_ROOT / LAB_CONFIG are not the %h-relative defaults (e.g. the
+# legacy /opt + /var/lib layout).
+#
+# Guide: docs/deploy/DEPLOYMENT.md S6; day-to-day commands: the workspace README.
+# The user manager exists at boot through `loginctl enable-linger <ops account>`, but this
+# unit is deliberately NOT enabled -- the operator starts it by hand (README, S6).
 [Unit]
 Description=MAVIS v2 runtime (API + built UI on :8765, Vive tracker, microphone, arm probes)
-Documentation=file:///opt/apollo-mavis-v2/docs/deploy/DEPLOYMENT.md
+Documentation=https://github.com/Apollo-Lab-Yale/apollo-mavis-v2-ws/blob/main/docs/deploy/DEPLOYMENT.md
 # The user manager has no network-online.target of its own (system target); the
 # ordering is harmless there and the runtime re-probes the arms every 2 s anyway.
 # PulseAudio is socket-activated per user: order after the socket so the first
@@ -17,18 +24,21 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/apollo-mavis-v2/apollo-mavis-v2-runtime
+WorkingDirectory=%h/apollo-mavis-v2-ws/apollo-mavis-v2-runtime
 # Headless MuJoCo rendering on the NVIDIA EGL platform (also defaulted in __main__).
 Environment=MUJOCO_GL=egl
 # The runtime honours $APOLLO_CONFIG when --config is absent; keep both in sync.
-Environment=APOLLO_CONFIG=/var/lib/apollo-mavis-v2/mavis_v2_lab.yaml
+Environment=APOLLO_CONFIG=%h/apollo-mavis-v2-ws/var/mavis_v2_lab.yaml
+# Workspace root for any ${APOLLO_HOME}-relative path (the render pins absolute paths, this
+# only makes the inference explicit).
+Environment=APOLLO_HOME=%h/apollo-mavis-v2-ws
 Environment=PYTHONUNBUFFERED=1
 Environment=OPENBLAS_NUM_THREADS=1
 Environment=OMP_NUM_THREADS=1
 Environment=MKL_NUM_THREADS=1
 # The venv interpreter directly, not `uv run`: that needs uv on PATH and network at
 # boot and may re-lock/resync (only a plain `uv sync` drops pysurvive).
-ExecStart=/opt/apollo-mavis-v2/apollo-mavis-v2-runtime/.venv/bin/python -m apollo_mavis_v2_runtime --config /var/lib/apollo-mavis-v2/mavis_v2_lab.yaml
+ExecStart=%h/apollo-mavis-v2-ws/apollo-mavis-v2-runtime/.venv/bin/python -m apollo_mavis_v2_runtime --config %h/apollo-mavis-v2-ws/var/mavis_v2_lab.yaml
 Restart=on-failure
 RestartSec=5
 # SIGTERM -> uvicorn -> lifespan -> Runtime.stop(): releases the Watchman dongle

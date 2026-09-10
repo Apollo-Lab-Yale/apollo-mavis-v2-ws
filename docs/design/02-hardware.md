@@ -338,6 +338,25 @@ Classification (controller error codes):
   Budget ≤3 recoveries per rolling 30 s, else `LATCHED`. **C24
   special-case**: after recovery halve `max_joint_vel`/`max_joint_acc` for
   10 s, then restore; a second C24 in the backoff window → `LATCHED`.
+  **Re-fault while holding (2026-09-09 evening)**: the SAME recoverable code
+  firing again within `REFAULT_WINDOW_S` (1.5 s) of an AUTOMATIC recovery while
+  the streamer has only re-sent the re-seeded posture (no target more than
+  `REFAULT_STILL_TOL_RAD` = 1 mrad away arrived from the runtime) means the cause
+  is still physically present — for C31 the collision load is still on the arm —
+  and re-enabling cannot clear it. The driver `LATCHED`s at once with
+  `re-latched <ms> ms after recovery with the arm holding still: the collision
+  load is still on the arm - back it off or let go of the object, then Recover`
+  (generic wording for the other codes) and the burst costs ONE budget slot.
+  Measured in the fridge-door session (`var/logs/runtime.stderr.log` 21:42–22:55):
+  every auto-recovery took 20 ms, the door's pull tripped C31 again ~200 ms
+  later with the arm standing still, four C31 in 660 ms, "recovery budget
+  exhausted (3 in 30 s)" before the operator had a turn — and a manual Recover
+  13 s later succeeded because the load had gone. A re-fault AFTER a new target
+  is a fresh event on the budget path; a user Recover forgets the burst
+  (`_reset_recovery_budget`). Note the joint-torque read-back cannot gate this
+  BEFORE re-enabling: with the servos off after a collision stop the reported
+  currents are ~0 whatever the load, so the controller's own re-fault is the
+  only detector. Tests: `test_driver_recovery.py` "re-fault under load" pack.
 - **UNRECOVERABLE** → `LATCHED` immediately: 1/2/3 e-stop variants (never
   auto-resume), 10–17 servo motor, 19/28 end-module comms, 110 baseboard.
   **111** (rail dropped off RS-485) latches only the rail (`RAIL_ERROR`);

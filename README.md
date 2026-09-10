@@ -13,6 +13,125 @@ against the real hardware or its MuJoCo
 digital twin (scene `mavis_v2` in `apollo-mavis-v2-sim`, which is the
 authoritative description of the cell's geometry).
 
+## Running the cell — the shared operations account
+
+**The lab cell runs from one shared operations account.** Its checkout at
+`~/apollo-mavis-v2-ws` is the copy that drives the real arms; a developer's own checkout
+(`~/projects/apollo-mavis-v2-ws` in their own home) is for writing code, not for sessions.
+Nothing in this repository hard-codes which account that is — it is the `OPS_USER` knob in
+`scripts/deploy/_common.sh`, and the systemd unit uses systemd's `%h`, so the same tree
+deploys under any account name. **On the Apollo lab machine it is `mavis-v2`**, admin
+password **`ApolloLab#`**, and the account is a sudoer. Log in on the machine's desktop as
+that account, or from another account:
+
+```bash
+sudo -iu mavis-v2          # or: su - mavis-v2   (both ask for a password)
+```
+
+A real login — the desktop session or `ssh mavis-v2@localhost` — is the easy way, because
+`systemctl --user` needs the account's own D-Bus. `sudo -iu` / `su -` do **not** set it up,
+and every `systemctl --user` then fails with *"Failed to connect to bus"*. Fix it in that
+shell with:
+
+```bash
+export XDG_RUNTIME_DIR=/run/user/$(id -u) DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus
+```
+
+### Bring it up
+
+```bash
+systemctl --user start mavis-runtime          # the API + the built UI on :8765
+systemctl --user status mavis-runtime         # Active: active (running)?
+```
+
+Then open **<http://127.0.0.1:8765/>** in a browser on this machine. That one service is
+the whole stack: the FastAPI server, the built React UI it serves itself, the Vive
+tracker, the microphone and the arm probes. There is no separate UI server to start and
+no database.
+
+It binds `127.0.0.1` and has **no authentication**: reachable from any account on this
+machine, from nowhere else. Keep it that way — do not bind `0.0.0.0` to "just have a
+look from a laptop".
+
+```bash
+journalctl --user -u mavis-runtime -f         # live log
+tail -f ~/apollo-mavis-v2-ws/var/logs/runtime.log        # the 1 Hz `loop:` health line
+systemctl --user stop mavis-runtime           # release the arms, dongle, mic and port
+bash ~/apollo-mavis-v2-ws/scripts/deploy/healthcheck.sh  # read-only: arms, cameras, mic, tracker, UI
+```
+
+`start` is deliberately manual: **autostart at boot is OFF**. This config is *armed*
+(it may open the real xArm drivers), and nobody wants the cell connecting itself with
+no operator in the room — it would also take the tracker dongle, the microphone and
+port 8765 away from a developer's instance. Turn it on only if you want that:
+`AUTOSTART=1 bash ~/apollo-mavis-v2-ws/scripts/deploy/install-services.sh`.
+
+**One runtime at a time.** The Watchman dongle, the RØDE microphone, each control box
+and port 8765 all take a single owner. If the service will not start, a developer's
+runtime is usually still holding them — stop that one first (`ss -tlnp | grep 8765`).
+
+If the tracker never leaves `searching`, check that the Watchman dongle is actually
+plugged in (`lsusb -d 28de:2101`); if the wrist cameras come up dark, see
+`docs/deploy/DEPLOYMENT.md` (the cold-boot D435i quirk).
+
+### Where things live
+
+Everything below is relative to the operations account's home (`~` = `/home/mavis-v2` on
+the lab machine).
+
+| | |
+|---|---|
+| checkout (all five sub-repos) | `~/apollo-mavis-v2-ws` |
+| rendered runtime config | `~/apollo-mavis-v2-ws/var/mavis_v2_lab.yaml` (generated — re-render, never edit) |
+| persistent render knobs | `~/apollo-mavis-v2-ws/var/lab.env` (arming, tracker yaw, dora bind host) |
+| profiles, calibration, logs | `~/apollo-mavis-v2-ws/var/{profiles,calibration,logs}` |
+| **recorded demonstrations** | `~/data/bc_demo/<name>` |
+| **Online DAgger rollouts** | `~/data/online_dagger/<session>/rollouts` |
+| UFACTORY Studio | menu entry "UFACTORY-Studio (1.0.2)"; the AppImage is in `~/Applications` |
+
+Datasets live in `~/data`, *outside* the checkout, one directory per episode, so a
+re-clone or a `git clean` can never touch recorded data. `GET /api/datasets/layout`
+publishes the map the UI uses.
+
+### Updating
+
+**Every repo in the stack is public, and the account holds no GitHub credentials.**
+Pulls are anonymous HTTPS — nothing to log in to, nothing to expire:
+
+```bash
+bash ~/apollo-mavis-v2-ws/scripts/deploy/update.sh
+```
+
+That refuses to run while a session is open, stops the service, pulls the workspace and
+every submodule at the pinned combination, re-syncs the four virtualenvs, rebuilds the
+UI, re-renders the config from `var/lab.env` and restarts. To look before you leap:
+`git -C ~/apollo-mavis-v2-ws fetch --recurse-submodules && git -C ~/apollo-mavis-v2-ws status`.
+
+Never `git commit` in this checkout — it must stay clean so it can always fast-forward.
+Development happens in a developer's own clone and arrives here through GitHub.
+
+### Copying data in from a developer account
+
+```bash
+DEV_USER=<their-account> bash ~/apollo-mavis-v2-ws/scripts/deploy/sync-data-from-dev.sh
+DRY_RUN=1 … # list first; DIRECTION=ops-to-dev copies the other way
+```
+
+Additive `rsync` (never deletes on the receiving side), re-owned to the receiving account.
+`DEV_USER` defaults to whoever runs the script, so from a developer's own shell the bare
+command already does the right thing.
+
+### Before you move an arm
+
+The digital twin does **not** yet model the room the cell now stands in, and the arms
+and rails themselves are 15–30 mm out in the twin (`docs/design/03-sim.md` §4.5). The
+collision gate is therefore inflated to 25 mm as a stop-gap and still cannot see the
+blue cart or the kitchen run. Treat every planned motion — return-to-start, `R`,
+"Go to profile", `home_rail` — as unverified: **10 % speed, hand on the E-stop.** Never
+open UFACTORY Studio's "Live control" while a session is running.
+
+Full operator guide, first-time install and troubleshooting: `docs/deploy/DEPLOYMENT.md`.
+
 ## Topology
 
 ```
@@ -62,9 +181,10 @@ apollo-mavis-v2-hardware        apollo-mavis-v2-sim
 - `docs/prompts/` — phased development prompts; each phase is meant to be a
   self-contained instruction for one implementation session (status table in
   `docs/prompts/README.md`; latest: `phase-14-online-dagger.md`, 2026-09-08).
-- `docs/deploy/DEPLOYMENT.md` — operations deployment guide (dedicated `mavis`
-  account, `/opt/apollo-mavis-v2`, systemd user service, dev-vs-ops hardware
-  ownership); the matching scripts live in `scripts/deploy/`.
+- `docs/deploy/DEPLOYMENT.md` — operations deployment guide (the shared operations
+  account, its `~/apollo-mavis-v2-ws` checkout, the systemd user service, anonymous
+  public-repo updates, dev-vs-ops hardware ownership); the matching scripts live in
+  `scripts/deploy/`, and the day-to-day commands are in "Running the cell" above.
 
 ## Development flow
 
