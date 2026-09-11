@@ -269,8 +269,14 @@ arms; **Tab** cycles which one keyboard teleop drives; non-active arms hold.
    counterfactual `policy_action` + `policy_version`. AsyncTrainer (separate
    process, GPU 1) fine-tunes on human-labeled frames (50/50 new vs aggregate
    sampling), writes versioned checkpoints; runtime hot-swaps weights only at
-   episode boundaries. Delta-EE actions applied to the current *measured* pose
-   keep human↔policy switches jump-free. **Online interactive learning on this
+   episode boundaries. Human↔policy switches are jump-free because every
+   `delta_ee` row is integrated on the last COMMAND (leashed to the measured
+   pose) — the same path the human twist takes — and an `abs_ee` waypoint is
+   reached by deadline interpolation (12-dagger §6, corrected 2026-09-11; the
+   earlier "applied to the current *measured* pose" rule is history). Every
+   dataset carries both `action` (`delta_ee`) and `action.abs_ee`
+   (10-frames §6), and either column can be replayed through the executor
+   (04-runtime §10.8). **Online interactive learning on this
    cell = the algorithm-agnostic Online DAgger shell over the external interface
    (operator decision 2026-09-08 evening; `15-online-dagger.md` v2.0):** the
    user-facing middle mode is **Online DAgger** — the same `dagger` session with

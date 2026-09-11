@@ -688,7 +688,9 @@ and `collision_rebound=False` are fixed defaults in `apply_backstops`, not confi
 ```python
 class ArmSafetyParams(BaseModel):           # the L3 knob set — conceptual view; see the
                                             #   XArmDriverConfig field mapping above
-    collision_sensitivity: int = 3          # 3–4; 5 false-triggers under payload
+    collision_sensitivity: int = 3          # 3 = the operator's default; 1..3 selectable at
+                                            #   run time (override below); 5 false-triggers
+                                            #   under payload, 0 is off - both refused
     self_collision_detection: bool = True
     tool_model: Literal["none","xarm_gripper","xarm_g2","cylinder","cuboid"] = "xarm_gripper"
     tool_model_params: dict = {}            # radius/height/xyz + offsets (mm at the boundary)
@@ -705,6 +707,28 @@ boundary set: `set_reduced_tcp_boundary(...)`, `set_fence_mode(True)`,
 `set_collision_rebound(False)`. Verify via `get_reduced_states()`; log the echo into
 the session record. Backstops are per-controller — blind to other arms and the rail;
 L3 never substitutes for the twin gate.
+
+**Operator-selectable collision sensitivity (2026-09-11, operator decision).**
+The level is no longer config-only: the UI offers **1, 2 or 3** — on the
+Welcome/Hardware arm card without a session (monitor path) and in the Cockpit
+during a hardware session (session path, the driver's monitor thread) — through
+the `set_collision_sensitivity` maintenance op (core §12, 02-hardware §6 / §8.6).
+Rules: (a) the controller default is the **config value 3**, re-applied at EVERY
+driver connect by `apply_backstops`, so an override lasts exactly one session /
+until the next connect — the operator lowers it for a task (the fridge door: its
+seal / hinge force reads as a collision at 3, the C31 re-fault of 2026-09-09) and
+the cell comes back up at 3; (b) **0 is refused** (that would switch L3 off) and
+**4 / 5 are refused** (false triggers under payload) — at the wire (422), in the
+monitor and in the driver; (c) the UI shows the controller's READ-BACK, never the
+requested value, so what the operator sees is what the box enforces; (d) it is
+one non-motion write, so it needs no confirm dialog, but **L3 weakens at lower
+levels**: at 2 and especially 1 the torque threshold that stops the arm on
+contact is higher, so a real collision is detected later and harder — the twin
+gate (L2) is unchanged and remains the safety authority, and the operator keeps a
+hand on the E-stop as for every unverified motion (CLAUDE.md, "The twin does NOT
+model the room"). The runtime's `backstops_match` compares against the
+operator's requested level while one is set (core §11), so the override is not
+flagged as a config mismatch; the raw read-back stays visible beside it.
 
 ## 12. Degraded modes
 

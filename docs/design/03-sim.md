@@ -6,7 +6,11 @@ rail-sweep recipe the runtime builds on `check_config_violations` /
 API it relies on; amended 2026-09-09 — phase-15: §4.4 the `mavis_v2_kitchen`
 scene, and **§4.5 the overlay-alignment investigation** whose answer is that the
 camera model, the extrinsics and the SDK state are all exact and the twin is
-missing real furniture, which the gate and the planner also cannot see). Conforms to `00-overview.md` (spine, v0.3). Ground
+missing real furniture, which the gate and the planner also cannot see; amended
+2026-09-11 — §6 the session twin is the SERVO-FAITHFUL scene (gravity compensation
++ a 40× rail servo, built by the runtime manager and the guardrail tool, not by
+`build_scene`) and its measured BANDWIDTH limitation, the reason action-replay
+fidelity in sim lags the real arm; §14 the corresponding test note). Conforms to `00-overview.md` (spine, v0.3). Ground
 truth for numbers: `docs/research/{mujoco-xarm7-sim,xarm7-ik,collision-ik}.md`
 (benchmarked on this machine, 2026-09-01). Depends only on `apollo_mavis_v2_core`
 (+ mujoco, mink, numpy); never imports `hardware`, `runtime`, or FastAPI.
@@ -724,6 +728,36 @@ while running:
   take the physics lock. `inject_fault` latches `error_flags` until
   `clear_errors()` — exercises runtime's recovery path without hardware.
 
+**Servo fidelity of the played robot (2026-09-11).** The stock `REGISTRY.build(scene)`
+model is the TWIN / IK / preview model: its menagerie position actuators are soft
+enough that the arm **sags 5–14 mrad under gravity** at a held command (1–2 cm at
+the tool) and the rail spring-servo (k = 50) lags ~0.12 m at approach speed — a real
+xArm7 + linear track hold a commanded position stiffly. A session's `SimWorkcell`
+therefore never runs the stock scene: `SessionManager._servo_faithful_scene`
+(04-runtime) and, identically, `guardrail_check._build_real_robot_scene` (§11)
+rebuild it with compile-time `MjSpec` edits — `gravcomp = 1.0` on EVERY body (must
+be set before compile; `body_gravcomp` assigned post-compile is ignored) and a **40×
+rail servo** (`*_rail_joint` stiffness ×40, damping ×4, `*_rail` actuator gear ×40 —
+same `ctrl == position` equilibrium). This is deliberately NOT in `build_scene` /
+the registry: the twin, the IK model, the overlays and the previews keep the stock
+compile so a gate check never depends on servo tuning, and the played robot alone is
+"the real cell". Measured: the servo-faithful sim settles a small step to < 1e-3 rad
+in ~0.6 s and the rail to < 1 mm in ~1 s (04-runtime `PLAN_ARRIVAL_*`).
+
+What it does NOT fix — **bandwidth**. The position servo is a PD with a time
+constant of ~100 ms: each 10 ms tick closes only ~9 % of the remaining command error,
+where the real xArm in servo mode trails its command by ~1 tick. Raising `kp` alone
+does not help — `kv` and the actuator `forcerange` bound the achievable bandwidth,
+and a stiffer P term oscillates before it tracks. Consequence, measured 2026-09-11:
+an action-column replay (04-runtime §10.8, `delta_ee` / `abs_ee` through the policy
+executor) is judged on the TCP after SETTLING, and a replay of a real recording lags
+the real arm by that servo lag throughout — the residual is the twin's, not the
+executor's (the 12-frame synthetic episode gives `delta_ee` 2.0 mm / 2 mrad and
+`abs_ee` 0.3 mm / 0 mrad once settled). Left as a documented limitation: the sim's
+job is the gate, the planner and the executor's logic, not the arm's transient
+response. A future retune would touch the actuator `kp` / `kv` / `forcerange` of
+`xarm7_on_rail.xml` together, verified with the §14 settle test and the guardrail.
+
 **Gripper mapping** (`gripper.py`). Menagerie actuator `ctrlrange="0 255"`,
 equilibrium driver angle `q_drv = ctrl·0.85/255` rad (0.85 = fully closed);
 real gripper 0–850 pulses ↔ 0–0.085 m opening (**850 = open**). Core's
@@ -1365,7 +1399,7 @@ No hardware anywhere; the only split is CPU-only vs EGL-capable. Markers:
 | Composition (§5) | build every scene ×1–3 arms: prefixed names, `nq/nv`, keyframes, rail `range == (0, 0.65)`; `to_xml()` round-trip recompiles equal-sized; addressing slices verified by perturb-and-check FK; **microphone** (§3): flag adds body `a0_microphone` welded to link7 with one cylinder `size [0.040, 0.095]` / `pos z 0.095` / contype 1 / mass 0.45, `nq/nu/nkey` and key 0 unchanged, XML round-trip; rejected on a gripper or camera-less arm; `SceneOverrides.microphones` toggles the same `mavis_v2` (meta `{view: True, grip: False}`, unknown arm → `SceneArmMismatchError`, gripper arm → `SceneCompileError`); an `allowed_pairs` label naming a switched-off mic is skipped |
 | mavis_v2 (§4.3) | measurement pins (table, rails, obstacle, overview cameras); keyframe = the initial state (joint 1 = π, joints 2–7 = 0, rails 0 / 0.65, folded tools toward −Y, view carriage 11.2 cm short of the obstacle); initial-state clearances (nothing monitored within 9 cm; link2↔link4 = 1.78 cm and whitelisted, gate `check()` clean); YAML `title`/`microphone: false`; mic ↔ camera gap recomputed from the compiled `d435` mesh (block starts at x = 0.055 → 1.5 cm radial gap; tip = cam z + 0.14; look = link7 +z); twin audit clean at δ = 0.008/0.025 with the mic, 20 monitored `view_microphone` pairs, none with `view_d435_mount`, initial-state mic clearances (table 3–4.5 cm, grip rail > 0.07, obstacle > 0.15, own link1 > 0.1, grip_link6 > 0.5) |
 | Gripper (§6) | fingertip gap monotone in ctrl; direction assert (ctrl 0 = open); open-frac round-trip |
-| SimWorkcell (§6) | command_joints reaches target (servo settle < 0.5 s); rail clamp [0, 0.65]; snapshot immutability; pacing: 200 ticks within ±2% wall time (perf); fault injection latches & recovers via stop/start |
+| SimWorkcell (§6) | command_joints reaches target (servo settle < 0.5 s); rail clamp [0, 0.65]; snapshot immutability; pacing: 200 ticks within ±2% wall time (perf); fault injection latches & recovers via stop/start. **Servo fidelity (2026-09-11 note):** the settle assertions run on the STOCK scene and say nothing about gravity sag (5–14 mrad at a held command) or the ~100 ms PD time constant — the runtime's `SessionManager._servo_faithful_scene` / this repo's `guardrail_check._build_real_robot_scene` remove the sag (gravcomp + rail ×40), the bandwidth limit stays (§6); the runtime's action-replay tests judge the TCP after settling for that reason |
 | Twin (§8) | inflation thresholds: contact appears at δ, not 1.1δ (two-arm approach sweep); link_base↔link1 excluded; grasp whitelist; `check` restores measured qpos; clearance vs analytic sphere distance; audit sweep (no false alarms at δ=0.025) |
 | IK (§9) | circle-tracking servo 500 ticks: pos err < 0.5 mm, no limit violations; rail-preference (lateral target moves joints, rail < 1 cm); unreachable target sets `diverged` within 10 ticks; ECAA weight slews & floors; flat-tolerance frees roll; row cap respected (perf: p99 < 1 ms with 3 arms + env) |
 | Planner (§10) | two-arm position swap on `dual_rail_tabletop`: sequential plan succeeds within ≤2 orderings, edges valid at `max_step_rad` resolution; impossible variant returns `goal_in_collision` with the correct pair; start inside the inflation shell / the gate's band escapes tick by tick at the requested speed (the other arm's pinch and the gripper's own knuckle pairs are constants; goal judged first; the executor's equal ticks); waypoints all pass `check_config` |

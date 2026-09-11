@@ -121,17 +121,30 @@ def frame_ref(kind: str, ident: str | None = None) -> FrameRef
 quat_normalize(q)                     # unit norm AND w >= 0 (negate if w < 0)
 quat_mul(a,b); quat_conj(q); quat_rotate(q,v)
 quat_to_mat(q); mat_to_quat(m)        # Shepperd; canonical w >= 0
-rpy_to_quat(rpy); quat_to_rpy(q)      # xArm SDK RPY (intrinsic XYZ) — hardware/units.py
+rpy_to_quat(rpy); quat_to_rpy(q)      # xArm SDK RPY: extrinsic XYZ, R = Rz(yaw)·Ry(pitch)·Rx(roll)
+                                      #   (verified 2026-09-11 on 15 hardware episodes; the
+                                      #   old Rx·Ry·Rz was wrong) — hardware/units.py
+mat_to_rot6d(m) -> (6,); rot6d_to_mat(r6)  # Zhou et al. 2019: first two COLUMNS of R,
+                                      #   column-major [R00,R10,R20,R01,R11,R21]; decode =
+                                      #   Gram-Schmidt (ValueError on a ~zero / parallel pair)
+quat_to_rot6d(q); rot6d_to_quat(r6)   # canonical w >= 0 — the abs_ee action codec
 rotvec_to_quat(r); quat_to_rotvec(q)  # log map; delta-EE action rotations
 quat_geodesic(a,b) -> [0,pi]; quat_slerp(a,b,t)
 xyzw_to_wxyz(q); wxyz_to_xyzw(q)      # ONLY sanctioned order-swap helpers (scipy/ROS)
 pose_mul(a,b); pose_inv(a); pose_between(a,b)        # a⁻¹ ⊕ b
+pose_interp(a, b, t) -> Pose          # lerp position + slerp orientation, t clipped [0,1]
+flange_to_tcp(pose, *, gripper); tcp_to_flange(pose, *, gripper)  # link7 flange <-> link_tcp:
+                                      #   gripper=True: pose ⊕ (Trans(0,0,0.172), Rz(π));
+                                      #   gripper=False: unchanged (link_tcp IS the flange)
 pose_error(a,b) -> (pos_err_m, geodesic_rad)
 integrate_twist(p, tw, dt) -> Pose    # translation along twist axes, rotation about
                                       #   pose origin (04-runtime §6 teleop semantics)
 clamp_pose_to_leash(target, anchor, max_pos_m, max_rot_rad) -> Pose  # geodesic clamp
 
 TCP_OFFSET_M = 0.172                  # link7 flange -> link_tcp along tool +Z (MJCF)
+FLANGE_TO_TCP_QUAT = (0.,0.,0.,1.)    # Rz(π) wxyz: the gripper base is mounted 180° about
+                                      #   tool z under link7 (MJCF xarm_gripper_base_link
+                                      #   quat "0 0 0 1"); gripper arms only (2026-09-11)
 LEGACY_FLANGE_QUAT_OFFSET = (0.,1.,0.,0.)  # legacy xarm7-ik 180°-about-X ("identity =
                                       #   gripper down") flange convention, 10-frames doc
 RAIL_TRAVEL_M = 0.65                  # SDK does NOT clamp; legacy solver hardcoded 0.74
@@ -419,7 +432,12 @@ class ArmConfig(BaseModel):
                                          #   (03-sim §4); additive, phase-11
     collision_sensitivity: int = Field(3, ge=0, le=5)
                                          # -> set_collision_sensitivity, 0 = off .. 5 = most
-                                         #   sensitive; MAVIS: 3 on both arms (phase-09b)
+                                         #   sensitive; MAVIS: 3 on both arms (phase-09b).
+                                         #   The CONTROLLER DEFAULT, re-applied at every
+                                         #   connect; the operator may override it to 1..3
+                                         #   at run time (§12 set_collision_sensitivity,
+                                         #   2026-09-11) - volatile, this value returns at
+                                         #   the next connect
     reduced_tcp_boundary_mm: tuple[int, int, int, int, int, int] | None = None
                                          # Reduced-mode TCP box [x_max, x_min, y_max, y_min,
                                          #   z_max, z_min] mm (SDK set_reduced_tcp_boundary
@@ -469,7 +487,11 @@ hardware driver applies at connect (`backstops.apply_backstops`, 02-hardware
 Reduced boundary → rebound off), the UI re-applies session-less
 (`ArmMaintenanceOp` `apply_backstops`, §12) and the monitor reads back
 (`ArmMonitorTelemetry.backstops_match`, §11). They are volatile on the
-controller (lost at reboot), never `save_conf()`ed. MAVIS values are estimates
+controller (lost at reboot), never `save_conf()`ed. `collision_sensitivity` is
+also the one the operator may override at run time to 1, 2 or 3 (§12
+`set_collision_sensitivity`, 2026-09-11) — the config value stays the default
+that every connect restores, and `backstops_match` compares against the
+requested level while an override is in force (§11). MAVIS values are estimates
 the user accepted on 2026-09-05 without weighing (whole-arm collision detection
 is the goal; provisional since 2026-09-04): Manipulation Arm 0.95 kg @ (0, 0,
 60) mm, Perception Arm 0.55 kg @ (0, 0, 90) mm, collision sensitivity 3 on both
@@ -1524,7 +1546,8 @@ module embeds `ArmMonitorTelemetry` in the result, so defining them here would
 make the two modules import each other. Import them from either module.
 
 ```python
-ArmMaintenanceOp = Literal["clear_errors", "apply_backstops", "recover", "home_rail"]
+ArmMaintenanceOp = Literal["clear_errors", "apply_backstops", "recover", "home_rail",
+                           "set_collision_sensitivity"]           # 2026-09-11
     # (defined in protocol/hardware_monitor.py, re-exported here - §11)
     # clear_errors:    no session: clean_error + clean_warn, NEVER motion_enable — on the
     #                  read-only monitor's polling thread (its zero-write guarantee becomes
@@ -1544,6 +1567,19 @@ ArmMaintenanceOp = Literal["clear_errors", "apply_backstops", "recover", "home_r
     #                  the ONE op that moves a mechanical part (phase-09c); since phase-09d
     #                  it may first run a planned pre-positioning motion as an asynchronous
     #                  RailHomingJob (status "accepted", 202)
+    # set_collision_sensitivity: the operator's collision-sensitivity override (operator
+    #                  decision 2026-09-11) - ONE write, set_collision_sensitivity(level) with
+    #                  level = the body's collision_sensitivity, 1 / 2 / 3 ONLY (0 = off, 4 / 5
+    #                  false-trigger under payload: 422 at the wire); NO motion. The one op
+    #                  that runs on BOTH paths: session-less on the read-only monitor's poll
+    #                  thread (the Hardware-tab arm card, judged from the rich-frame
+    #                  read-back) and inside a hardware session on the session driver's
+    #                  monitor thread (the Cockpit control; before/after None - the real
+    #                  30003 stream has no read-back). VOLATILE: the controller default is the
+    #                  config value 3, re-applied at EVERY connect, so the override lasts
+    #                  until the next connect; the UI shows the controller's read-back, never
+    #                  the value it asked for (02-hardware §6 / §8.6, 05-ui §8.1 / §8.2,
+    #                  11-safety §11)
 MaintenancePath = Literal["monitor", "session"]   # which thread executed the op (the
                                                   #   RailHomingJob drives the arm through
                                                   #   its own driver connection; no "job"
@@ -1561,6 +1597,13 @@ class ArmMaintenanceRequest(BaseModel):  # POST body
     op: ArmMaintenanceOp
     dry_run: bool = False                # home_rail only: sweep verdict alone, zero writes
                                          #   (additive, phase-09c)
+    collision_sensitivity: int | None = Field(None, ge=1, le=3)
+                                         # set_collision_sensitivity only: the level to write
+                                         #   (additive, 2026-09-11); the bound is in the JSON
+                                         #   Schema, and an after-validator makes it REQUIRED
+                                         #   for that op ("set_collision_sensitivity needs
+                                         #   collision_sensitivity (1, 2 or 3)" -> 422); every
+                                         #   other op ignores it
 
 class PrePositionPlan(BaseModel):        # phase-09d: twin-planned motion before homing
     needed: bool                         # False = current posture already sweep-clear
@@ -1609,6 +1652,11 @@ class ArmMaintenanceResult(BaseModel):   # response (200 / 202 whether or not ok
                                          #   the job's final result is "done" again
     job_id: str | None = None            # RailHomingJob id when status == "accepted" and on
                                          #   the job's final result (additive, phase-09d)
+    collision_sensitivity: int | None = None    # set_collision_sensitivity: the level WRITTEN
+                                                #   (1..3; None for every other op and for a
+                                                #   refusal) - the session path has no monitor
+                                                #   sample, so the UI toasts this (additive,
+                                                #   2026-09-11)
 ```
 
 Queueing on the monitor thread, the recovery budget, the 409 matrix, the

@@ -1,6 +1,14 @@
 # 12 — DAgger / Interactive Learning Protocol
 
-Status: **v1.3 (2026-09-08, evening — Online DAgger, the algorithm-agnostic shell of
+Status: **v1.4 (2026-09-11 — §6 the action-space contract corrected against the executor as
+built: a `delta_ee` row integrates on the last COMMAND with a leash to the measured pose, an
+`abs_ee` row is a waypoint reached by deadline interpolation, both spaces accepted; §4 the
+counterfactual column for an `abs_ee` policy. The hil-serl "apply to the measured pose"
+attribution is kept as history with the correction.) **v1.4 addendum, later the same day:
+§6 rule 1 gained the ROW BUDGET — a `delta_ee` row is ONE per-period increment applied
+exactly once in total (`ActionAnchor.row_step`), with the 2026-09-11 replay dry-run numbers
+that forced it (90.7 → 14.5 mm RMS); §6 also notes the per-arm hold of 14-dora v1.3.**
+v1.3 (2026-09-08, evening — Online DAgger, the algorithm-agnostic shell of
 `15-online-dagger.md` v2.0, replaces the v1.2 PRO-DAgger wording; operator decision
 2026-09-08 evening: the runtime knows no DAgger algorithm; PRO-DAgger is a reference
 implementation in the policy repo). Sections touched: §4 the `actor` column's home
@@ -208,7 +216,16 @@ Per-frame semantics (assembled in `GatedPolicyExecutor.step` → `DaggerRecorder
 - `policy_action` = counterfactual: the policy **is queried every policy tick
   even during HUMAN/TRANSITION** (cheap on GPU 0; needed for HG-DAgger doubt
   calibration and Sirius-style weighting later). Query failure / no fresh
-  chunk → NaN fill.
+  chunk → NaN fill. **The column keeps the recorded canonical `delta_ee` width
+  in dataset-frame units whatever the policy's space (2026-09-11,
+  `GatedPolicyExecutor._update_counterfactual`)**: a `delta_ee` row (per policy
+  period) is scaled by `dt / period × frame_scale`; an `abs_ee` row is a waypoint
+  one period ahead, so its delta from the current COMMAND `FK(q_last)` — position
+  difference, space-frame rotvec, rail difference, in the arm's recording frame —
+  is what the policy "would move" per period and is scaled by the SAME factor;
+  the gripper stays absolute; NaN where the row (or an unconvertible r6) is not
+  finite (one warning per session). An absolute value is never stored in this
+  column.
 - `control_mode` = gate state at the snapshot instant;
   `intervention = (control_mode != 0)`; `action_source = 3` (takeover) iff
   human executed, else `0` (policy); `4` (planner) is reserved — planner
@@ -315,49 +332,120 @@ external` replaces `PolicyRunner` with `ExternalPolicySource`: actions arrive as
 the reset watermark is dropped, `policy_reset` is published on session start /
 hand-back / episode boundary, and a spec heartbeat older than `spec_stale_s`
 marks `policy_stale` (the loop holds). The recorded frame / action layout stays
-the runtime's; the node must declare a matching `PolicySpec`.
+the runtime's; the node must declare a matching `PolicySpec`. Since 14-dora v1.3
+(2026-09-11) a node may drive a SUBSET of the arms (`spec.arms`, per-arm
+`action_<arm_id>` streams): `policy_step` sees NaN for every undriven arm's block and
+HOLDS that arm — a hold, never a NaN strike (`GatedPolicyExecutor._driven_finite`
+counts strikes on driven blocks only), and staleness is asked per arm.
 
-What makes human↔policy switches discontinuity-free (hil-serl mechanism,
-research §3.1/§4.3); implemented by `ActionAnchor` in `runtime/dagger/loop.py`:
+What makes human↔policy switches discontinuity-free; implemented by
+`ActionAnchor` in `runtime/dagger/policy_runner.py` and applied per tick, per arm,
+by `runtime/dagger/step.py::policy_step` (shared by `GatedPolicyExecutor` and the
+04-runtime §10.8 action replay — the replay is how the contract is measured):
 
 ```python
 class ActionAnchor:
-    def __init__(self, workcell: WorkcellInterface, ik: IKSolver,
-                 slew: SlewLimits) -> None: ...
+    def __init__(self, ik: IKSolver, kin, slew: SlewLimits, *, action_space: str,
+                 leash_pos_m: float = 0.025, leash_rot_rad: float = 0.2) -> None: ...
+        # leash = ControlConfig.leash (the teleop rule) unless DaggerConfig.anchor_leash is set
+        #   (anchor_leash_kwargs); the anchor itself is FK(q_last) on EVERY tick — no stored pose
     def on_gate_event(self, ev: GateEvent) -> None: ...
-        # Re-seed: target pose := current MEASURED ee pose (get_state());
-        # drop any pending policy chunk; start slew window on human->policy
-    def apply_delta(self, arm_id: str, delta: np.ndarray, t_mono: float) -> np.ndarray: ...
-        # delta = [dxyz(m), drotvec(rad), gripper, rail(m)] in canonical frame;
-        # target = measured_pose ⊕ clamp(delta); returns joint targets via IK
-    def apply_absolute(self, arm_id: str, pose: Pose, t_mono: float) -> np.ndarray: ...
-        # abs/chunked policies: slew-limited approach toward pose
+        # open the slew window on human->policy handback; nothing to re-seed; DROP the arm's
+        #   half-applied row (a row's remainder is never carried across a switch)
+    def row_step(self, arm_id, row_key, delta_row, dt_over_period) -> np.ndarray: ...
+        # the row budget (2026-09-11): delta_row = [dp3, dr3, rail] per PERIOD; returns this
+        #   tick's share = eff x min(dt / period, budget); budget 1.0 on every new row_key;
+        #   a replaced row's remainder (eff x budget) is folded into the next row's eff
+    def apply_delta(self, arm_id, dp, dr, rail_d, q_last, q_meas, dt, now) -> np.ndarray | None: ...
+        # dp/dr = this tick's SHARE (row_step x staleness) in the recording frame;
+        # target = leash( FK(q_last) ⊕ Δ , measured ); IK from q_last; None on IK failure
+    def apply_absolute(self, arm_id, row, q_last, q_meas, dt, now, period, t_row) -> np.ndarray | None: ...
+        # row = [x,y,z, r6(6), gripper, rail?]; remaining = max(period - (now - t_row), dt);
+        # frac = dt / remaining; pose_interp(FK(q_last), target, frac); rail approaches with
+        # the same frac; None on a bad r6 pair or IK failure. Nothing is scaled.
 
 @dataclass(frozen=True)
 class SlewLimits:
-    lin_mps: float = 0.15      # blend-window cartesian speed cap
+    lin_mps: float = 0.15      # blend-window cartesian speed cap (both spaces)
     ang_radps: float = 1.5
     rail_mps: float = 0.15
     window_s: float = 0.4      # slew window after human->policy handback (0.3-0.5)
 ```
 
-Rules by policy action space (`CheckpointInfo.action_space`):
-1. **`delta_ee` (canonical; required for new DAgger-intended policies).** Both
-   human and policy emit per-tick deltas **applied to the current measured EE
-   pose** (`target = currpos ⊕ Δ·scale`, then twin-gate clip — exactly
-   hil-serl `franka_env.step`). Neither source carries an integrated setpoint
-   across a switch → both directions jump-free by construction. The rail is
-   one more delta dimension, clamped to [0, 0.65] m. The human twist
-   integrator re-seeds from measured pose on takeover entry (`on_gate_event`).
-2. **`abs_ee` / chunked (ACT, diffusion).** Policy→human: pending chunk
-   **dropped immediately**; human deltas anchor to measured pose. Human→policy:
-   **re-anchor + re-query** — `policy.reset()`, fresh chunk from the current
-   observation, slew-limited execution toward it for `window_s` (0.3–0.5 s);
-   after the window, raw chunk targets pass un-slewed (still twin-gated and ≤
-   firmware per-tick step limits, <10 mm). Weight hot-swap obeys the same
-   rule: never mid-chunk (§8).
+Rules by policy action space (`CheckpointInfo.action_space` / the node's
+`PolicySpec.action_space`; the runtime accepts `delta_ee` and `abs_ee` from either
+source since 2026-09-11 — 04-runtime §11, 14-dora §6.1):
+1. **`delta_ee` (canonical; required for new DAgger-intended policies) — jump-free
+   by integrating on the last COMMAND (2026-09-11).** A row is ONE per-period
+   increment and is applied **exactly once in total** (the row budget, later on
+   2026-09-11; `ActionAnchor.row_step`, called by `policy_step`): each tick takes
+   `min(dt / period, budget)` of the row until its budget (1.0) is spent, then the
+   arm HOLDS until the next row; a row replaced before it was fully applied carries
+   its remainder into the next row (folded into that row's effective delta and spread
+   over its period), so a source publishing slower than its announced rate no longer
+   over-applies and a faster one loses no motion; a gate event drops the arm's
+   half-applied row (`on_gate_event` — never carried across a switch); staleness only
+   DECAYS the share (`row_step(…) × staleness_scale`), it never re-applies. A row's
+   identity is `(policy_version, t_row, chunk_remaining)`, so every chunk row is a
+   new row. The share is integrated on `FK(q_last)`, the last gated command, then
+   clamped to a leash around the MEASURED pose (0.025 m / 0.2 rad by default) before
+   IK and the twin-gate clip. Continuity comes from the fact that
+   the COMMAND stream never jumps: human and policy both write into the same
+   `q_last` through the same leash → IK → gate path, so a switch in either direction
+   continues from the last command, whichever source produced it, and neither
+   source carries a private integrated setpoint. The leash bounds how far intent
+   may run ahead of the arm (IK divergence, a held arm), and a lagging arm
+   accumulates the policy's intent up to the leash instead of losing it. The rail is
+   one more delta dimension, clamped to [0, 0.65] m. **History / correction:** v1.0–
+   v1.3 stated the hil-serl rule (`franka_env.step`: `target = measured ⊕ Δ`,
+   "applied to the current measured EE pose", re-seeded from the measured pose on
+   every gate event) and the executor implemented it. Re-anchoring to the MEASURED
+   pose every tick caps the executed velocity at the arm's own tracking lag — the
+   command can never get further from the arm than one row — which bled the motion
+   on the twin (8.7 % fidelity when a recorded `delta_ee` episode was replayed; MoveIt
+   Servo #1857 is the same bug, and hil-serl gets away with it because its rows are
+   large relative to the Franka's lag). Superseded 2026-09-11; the human twist path
+   was already integrate-on-command + leash (04-runtime §6), so the two sources now
+   share one rule.
+   **Why the budget — measured 2026-09-11** (`scripts/dev/replay_dryrun.py` against the
+   private sim runtime; `bc_demo/drawer_assembling` episode `20260909T091000.433Z-d66aaf`,
+   932 frames @ 25 fps = 37.3 s, Manipulation Arm only over `action_grip`, the replay
+   node announcing 30 Hz, `--mode step --timeline dense`; reports under
+   `var/dryrun-inference/runs/20260911T06*/report.json`). The node published 778 rows
+   in 37.3 s — **~21 Hz against the announced 30 Hz period** — and the pre-budget rule
+   re-applied `dt / period` of the newest row on EVERY tick it stayed newest, i.e.
+   1.3–1.4× per row: TCP position error vs the recorded commanded TCP **RMS 90.7 mm /
+   max 114.5 mm / final 36.0 mm** (rot RMS 20.6 mrad). With the budget the SAME replay
+   reads **RMS 14.5 mm / max 28.4 mm / final 2.1 mm** (rot RMS 19.7 mrad); the `abs_ee`
+   replay of the same episode (rule 2) reads **6.7 / 17.4 / 0.3 mm, rot RMS 3.5 mrad**.
+   What remains is the twin's servo lag, not the executor's: the session twin's PD
+   closes ~9 % of the error per 10 ms tick (τ ≈ 100 ms; 04-runtime §10.8), so a delta
+   path that integrates the recorded increments trails by about one lag where a
+   waypoint path is told where to be. The path's unit coverage is the 12-frame
+   synthetic replay of `tests/test_episode_playback.py`; the budget rule is pinned by
+   `tests/dagger/test_row_budget.py` (slow source applies exactly once, nominal cadence
+   0.3/0.3/0.3/0.1 then hold, fast source carries the remainder, a gate event drops a
+   half-applied row) and the dry run is its end-to-end evidence. None of these numbers is
+   from the real arms.
+2. **`abs_ee` / chunked (ACT, diffusion) — waypoints by deadline interpolation
+   (2026-09-11).** Each row is the pose the TCP should hold one period after the
+   row became current: the command interpolates from `FK(q_last)` toward it with
+   `frac = dt / remaining` (`remaining = max(period − (now − t_row), dt)`), so it
+   arrives exactly at the deadline whatever the tick jitter; gripper (index 9) and
+   rail (index 10) are absolute; stale (`staleness_scale <= 0`) ⇒ hold, never a
+   scaled row — an absolute value is never multiplied by a tick, chunk or staleness
+   factor (the dora source's rescale mask is all zeros for this space). Policy→human:
+   pending chunk **dropped immediately**; the human's deltas continue from the same
+   `q_last` (rule 1). Human→policy: **re-query** — `policy.reset()`, fresh chunk from
+   the current observation, and for `window_s` (0.3–0.5 s) the per-tick step toward
+   the waypoint is capped by `SlewLimits` (position, rotation AND rail); after the
+   window the interpolation runs uncapped (still twin-gated and ≤ the driver's
+   per-tick step, 4 mm). Weight hot-swap obeys the same rule: never mid-chunk (§8).
+   The counterfactual column stores an `abs_ee` row as its per-frame delta from
+   `FK(q_last)` (§4).
 3. **`joint`**: as `abs_ee` with joint-space slew (`max dq = 0.05 rad/tick`
-   during the window).
+   during the window). Not implemented — a `joint` row holds the arm
+   (`policy_step` returns None); the recorder still spells the layout.
 
 A checkpoint carries `action_frame` + `action_space` in its manifest; the
 runtime **refuses to start** a DAgger/inference session on a mismatch with the

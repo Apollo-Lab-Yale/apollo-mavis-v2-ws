@@ -1,8 +1,14 @@
 # 10 — Frames & Data: Coordinate Frames + Dataset Format
 
-Status: v1.1 (2026-09-01; amended 2026-09-07 — the on-disk layout became
+Status: v1.2 (2026-09-01; amended 2026-09-07 — the on-disk layout became
 EPISODE-LEVEL: §1 item 5, §7 intro/§7.5, §8.3, §9 rewritten, §11 new; LeRobot
-v3 is now a derived export). Conforms to `00-overview.md` v0.3 (binding spine).
+v3 is now a derived export; **amended 2026-09-11 — the second action column
+`action.abs_ee` (§6, §7, §11.4) with the r6 rotation codec (§3.1), the `delta_ee`
+execution rule restated as integrate-on-the-last-COMMAND + leash (§1.2, §3.2 —
+"applied to the current measured pose" is superseded), `observation.state` `ee.*`
+defined as the twin FK of the measured joints at `link_tcp` for every workcell kind
+(§6.1), and §11.11 the backfill of pre-2026-09-11 episodes**). Conforms to
+`00-overview.md` v0.3 (binding spine).
 Spelling authority for every type/field name: `01-core.md` (`FrameRef`, `Pose`,
 `ArmState`, `SessionSpec`, `FrameAnnotations`, `ControlMode`, `EpisodeSummary`,
 `TCP_OFFSET_M`, `LEGACY_FLANGE_QUAT_OFFSET`, `RAIL_TRAVEL_M`, ...). Research
@@ -26,11 +32,19 @@ consistency pass aligns them):
    permute at their boundary and nowhere else. The legacy `xarm7-ik`
    `[rail, j1..j7]` order is remapped by the compatibility layer (§4.3).
 2. **Canonical action space** for datasets and DAgger-intended policies:
-   **`delta_ee`** — per-tick deltas applied to the current *measured* TCP pose
-   (12-dagger §6). `abs_ee` and `joint` are alternative per-session
+   **`delta_ee`** — the EXECUTED commanded-TCP increment from recorded frame
+   `k` to `k+1` (`FK(q_cmd[k+1]) ⊖ FK(q_cmd[k])`, §3.2). At inference a
+   `delta_ee` row is **integrated on the last COMMAND** (`FK(q_last)`), leashed
+   to the measured pose (12-dagger §6, 2026-09-11); the earlier wording "applied
+   to the current *measured* TCP pose" is superseded — re-anchoring on the
+   measured pose every tick bled the motion on a lagging arm (8.7 % replay
+   fidelity on the twin). `abs_ee` and `joint` are alternative per-session
    conventions using core's exact `PolicySpec.action_space` literals
-   (`"delta_ee" | "abs_ee" | "joint"`). Exactly one convention per dataset,
-   recorded in `features["action"]["info"]["action_space"]`.
+   (`"delta_ee" | "abs_ee" | "joint"`). Exactly one PRIMARY convention per
+   dataset, recorded in `features["action"]["info"]["action_space"]`; since
+   2026-09-11 every dataset ALSO carries the absolute companion column
+   `action.abs_ee` (§6 "two columns"), so a policy picks its space at training
+   time.
 3. **`world` is a first-class recording/action frame** alongside
    `arm_base:<arm_id>` and `camera:<camera_id>`. Everywhere a per-arm action
    frame is stored (`SessionSpec.frames`, `FrameAnnotations.action_frame`,
@@ -118,13 +132,21 @@ T_W_Ck = T_W_P ⊕ T_P_Ck          # T_P_Ck read from the calibration file
 
 ### 2.4 `ee:<arm_id>` (E_i) — the TCP
 
-The tool center point = MJCF site `link_tcp`, **`TCP_OFFSET_M` = 0.172 m past
-the link7 flange along tool +Z**, orientation identical to the flange
-(menagerie asset; the mavis fork's 0.165 m is rejected, 03-sim §3):
+The tool center point = MJCF site `link_tcp`. On a **gripper arm** it is
+**`TCP_OFFSET_M` = 0.172 m past the link7 flange along tool +Z and rotated 180°
+about tool z**: the xArm Gripper base is mounted `quat="0 0 0 1"` under link7
+(MJCF `xarm_gripper_base_link`) and `link_tcp` is its child (menagerie asset; the
+mavis fork's 0.165 m is rejected, 03-sim §3). On a **gripper-less arm** (the
+Perception Arm) the sim builder adds `link_tcp` at link7 with no offset — its TCP
+IS the flange. Corrected 2026-09-11; before that this section claimed the
+orientation was identical to the flange, and the hardware driver published the raw
+flange as `ee_pose`.
 
 ```
-T_Fi_Ei = Trans(0, 0, 0.172)      # F_i = link7 flange frame; pure translation
-T_Bi_Ei(t) = ArmState.ee_pose     # TCP in arm_base, reported by every driver
+T_Fi_Ei = (Rz(π), Trans(0, 0, 0.172))   # gripper arm; F_i = link7 flange frame
+T_Fi_Ei = I                             # gripper-less arm
+T_Bi_Ei(t) = ArmState.ee_pose           # TCP in arm_base, reported by every driver
+#   core.se3.flange_to_tcp(pose, gripper=...) / tcp_to_flange; FLANGE_TO_TCP_QUAT = (0,0,0,1)
 ```
 
 `ee:<id>` is never a recording frame (`SessionSpec` validator rejects it) —
@@ -159,8 +181,11 @@ q_B = quat_normalize( quat_mul(q_BA, q_A) )
 
 The three pairs actually used (all others compose from these):
 
-- **base → world** (record frame `world`, source `ArmState.ee_pose`):
-  `p_W = p_W_Bi(t) + R(q_W_Bi) p_B`, `q_W = q_W_Bi ⊗ q_B`, with
+- **base → world** (record frame `world`; source = the twin FK at `link_tcp`
+  of the measured joints for `observation.state`, of the COMMANDED joints for
+  `action.abs_ee` — §6.1, 04-runtime §10.3; `ArmState.ee_pose` is the same
+  quantity on every driver since 2026-09-11 but is no longer what the recorder
+  reads): `p_W = p_W_Bi(t) + R(q_W_Bi) p_B`, `q_W = q_W_Bi ⊗ q_B`, with
   `T_W_Bi(t)` from §2.2 (rail arms: re-evaluate every frame from `q[7]`).
 - **world → base** (policy trained in `world`, executed on arm i):
   `p_B = R(q_W_Bi)ᵀ (p_W − p_W_Bi(t))`, `q_B = q_W_Bi⁻¹ ⊗ q_W`.
@@ -175,18 +200,45 @@ The three pairs actually used (all others compose from these):
 (`w >= 0`). For railed arms `T_Ck_Bi` and `T_W_Bi` are recomputed per frame;
 `q_W_Bi` never changes (rail is a pure translation), only positions do.
 
+**Rotation codec of `abs_ee` (2026-09-11).** An `abs_ee` action block stores the
+orientation NOT as a quaternion but as **`r6` = the first two COLUMNS of the TCP
+rotation matrix, column-major `[R00, R10, R20, R01, R11, R21]`** (Zhou et al. 2019,
+"On the Continuity of Rotation Representations in Neural Networks"): column 0 is
+the tool x-axis, column 1 the tool y-axis, both expressed in the recording frame.
+Decode is Gram-Schmidt (`b1 = normalize(c1)`, `b2 = normalize(c2 − (b1·c2) b1)`,
+`b3 = b1 × b2`), so a regressed, slightly non-orthonormal pair still decodes to a
+proper rotation; a ~zero or parallel pair is a `ValueError` and the executor holds
+the arm. Core owns the codec — `se3.mat_to_rot6d / rot6d_to_mat / quat_to_rot6d /
+rot6d_to_quat` (canonical `w >= 0` on the way back) — no repo rolls its own.
+Observations keep the wxyz quaternion (`observation.state` §6.1 is unchanged); the
+r6 form exists for the regression target only. Frame conversion of an `abs_ee`
+pose is the pose rule above applied BEFORE encoding (convert the quaternion, then
+`quat_to_rot6d`).
+
 ### 3.2 Delta actions (`delta_ee`) — composition rule
 
 A `delta_ee` action for one arm is `Δ = [δp(3), δr(3), grip, (rail_δ)]` with
 `δr = quat_to_rotvec` of the delta rotation. Semantics (binding, matches
-`integrate_twist` / `ActionAnchor.apply_delta`): applied to the current
-**measured** TCP pose `(p, q)` expressed in the same frame F, with rotation
-about the TCP origin and axes of F (left/space composition):
+`integrate_twist` / `ActionAnchor.apply_delta`): a left/space-composition
+increment of the TCP pose `(p, q)` expressed in the same frame F, rotation about
+the TCP origin and axes of F:
 
 ```
 p' = p + δp                              # δp in F axes
 q' = quat_mul( rotvec_to_quat(δr), q )   # δr in F axes, rotation about TCP origin
 ```
+
+**Which pose `(p, q)` is (2026-09-11; supersedes "applied to the current measured
+TCP pose").** At RECORD time row `k` is the increment between two COMMANDED poses:
+`(p, q) = FK(q_cmd[k])`, `(p', q') = FK(q_cmd[k+1])` at the twin site `link_tcp`
+(the recorder's one-frame lookahead, 04-runtime §10). At EXECUTION time the
+increment is integrated on the LAST COMMAND, `(p, q) = FK(q_last)`, and the result
+is clamped to a leash around the MEASURED pose (`ControlConfig.leash`: 0.025 m /
+0.2 rad, overridable per session by `DaggerConfig.anchor_leash`) before IK — never
+re-anchored to the measured pose each tick (12-dagger §6 rule 1). The recorded
+column and the executed integral therefore share one definition, and integrating a
+recorded episode from frame 0 reproduces its `action.abs_ee` column (§11.11 uses
+exactly this: `cmd[0] = meas[0]`, the arm at rest at the first kept frame).
 
 ### 3.3 Delta actions — frame transform (rotate the delta)
 
@@ -399,29 +451,58 @@ vectors concatenate blocks in `WorkcellConfig` arm order):
 | `action_space` | per-arm dims (rail / no rail) | block layout |
 |---|---|---|
 | `delta_ee` (**canonical**) | 8 / 7 | `[ee.dx, ee.dy, ee.dz, ee.drx, ee.dry, ee.drz, gripper.pos, rail.dpos]` |
-| `abs_ee` | 10 / 9 | `[ee.x, ee.y, ee.z, ee.qw, ee.qx, ee.qy, ee.qz, gripper.pos, rail.pos]` |
+| `abs_ee` | **11 / 10** | `[ee.x, ee.y, ee.z, ee.r00, ee.r10, ee.r20, ee.r01, ee.r11, ee.r21, gripper.pos, rail.pos]` |
 | `joint` | 9 / 8 | `[joint1.pos … joint7.pos, gripper.pos, rail.pos]` |
+
+(`abs_ee` was 10 / 9 with a wxyz quaternion until 2026-09-11 — never recorded in
+that form; an early 2026-09-11 draft miscounted the r6 layout as 12 / 11. The
+widths are ALWAYS derived from `names`, `recorder/features.py::arm_action_names`.)
 
 Semantics:
 
-- **`delta_ee`**: per-tick deltas applied to the current **measured** TCP
-  pose in the arm's recording frame (§3.2) — the hil-serl mechanism that
-  makes human↔policy switches jump-free (12-dagger §6, binding for
-  DAgger-intended policies). `ee.dr*` is a rotation vector (`quat_to_rotvec`)
-  in frame axes; `rail.dpos` is a rail-axis delta, target clamped to
-  `[0, 0.65]` m; `gripper.pos` is the **absolute** open-fraction target
-  (gripper deltas would drift; upstream convention keeps it absolute).
-  Recorded deltas are per-**dataset-frame** increments (at `fps`), not
-  per-servo-tick; the 100 Hz loop interpolates.
-- **`abs_ee`**: absolute TCP pose in the recording frame, wxyz quaternion
-  (canonical `w >= 0` enforced at write). Used by chunked policies
-  (ACT/diffusion); handback rules in 12-dagger §6.2.
+- **`delta_ee`**: the executed commanded-TCP increment from recorded frame `k`
+  to `k+1` in the arm's recording frame (§3.2), integrated at inference on the
+  last COMMAND with a leash to the measured pose (12-dagger §6, binding for
+  DAgger-intended policies; the hil-serl "apply to the measured pose" rule is
+  history — see there). `ee.dr*` is a rotation vector (`quat_to_rotvec`) in
+  frame axes; `rail.dpos` is a rail-axis delta, target clamped to `[0, 0.65]`
+  m; `gripper.pos` is the **absolute** open-fraction target (gripper deltas
+  would drift; upstream convention keeps it absolute). Recorded deltas are
+  per-**dataset-frame** increments (at `fps`), not per-servo-tick; the 100 Hz
+  loop takes `dt / period` of a row per tick and integrates — each row exactly
+  ONCE in total (`min(dt / period, budget)` per tick until its budget is spent,
+  then hold until the next row; the 2026-09-11 row budget, 12-dagger §6 rule 1).
+- **`abs_ee`**: the absolute TCP pose in the recording frame — position + the
+  **r6** rotation of §3.1 (`ee.r00 … ee.r21` = matrix row-column indices of the
+  first two columns), the absolute gripper open fraction and the absolute
+  carriage position. Executed as a WAYPOINT: the command interpolates from
+  `FK(q_last)` toward the row so it arrives at the row's deadline (one period
+  after the row became current); an absolute value is never multiplied by a
+  tick or chunk factor (12-dagger §6 rule 2). Used by chunked policies
+  (ACT / diffusion) and by the recorded `action.abs_ee` column below.
 - **`joint`**: absolute joint targets, frame-free (§3.4). The `frames` map
-  still governs the `ee.*` dims of `observation.state`.
+  still governs the `ee.*` dims of `observation.state`. No executor path yet
+  (a `joint` row holds the arm).
 
 `action` always stores the **executed** action — post-twin-gate, post-clamp
 (`FrameAnnotations.executed_action`): the label is what the robot did, not
 what was asked (12-dagger §4).
+
+**Two columns, always (2026-09-11).** Every dataset the recorder writes carries
+BOTH `action` — the primary column in the dataset's `action_space` (`delta_ee`
+for everything the cell records) — AND **`action.abs_ee`**, the absolute companion:
+row `k` is the COMMANDED TCP + carriage at frame `k+1`, `FK(q_cmd[k+1])` at
+`link_tcp` converted into the recording frame with the full commanded base pose
+(the carriage moves the base), r6 rotation, and a `gripper.pos` identical to the
+delta column's gripper dim. Its feature `info` is `{apollo_schema: 1, action_space:
+"abs_ee", frames, rail, label: "commanded_tcp_at_next_frame", rotation:
+"rot6d_first_two_columns"}` (`label` / `rotation` are informative; the
+compatibility signature compares the four convention keys). A policy trained on
+either column is served the other's semantics by the same executor
+(`dagger/step.policy_step`), and an episode can be replayed from either
+(04-runtime §10.8). Datasets recorded before 2026-09-11 lack the column until
+`tools.backfill_abs_ee` adds it (§11.11); `dataset_incompatibility` names that
+tool when only `action.abs_ee` differs between a manifest and a resumed session.
 
 ### 6.1 `observation.state` layout (all action spaces)
 
@@ -433,8 +514,18 @@ Per-arm block, same prefix/order rules (dims: 16 rail / 15 no rail):
 ```
 
 Joints/gripper/rail are frame-free measurements; the `ee.*` entries are the
-measured TCP pose in the arm's declared recording frame (§3.1). Policies
-that want a leaner state select dims by name (`state_names` in `PolicySpec`).
+measured TCP pose in the arm's declared recording frame (§3.1). **Definition
+(2026-09-11, kind-independent):** `ee.*` = the twin's forward kinematics of the
+MEASURED joints (and carriage) at the site `link_tcp`, `RecorderKinematics.
+tcp_base(arm, q_meas)` converted with `base_world(arm, q_meas)` — NOT the
+driver-reported `ArmState.ee_pose`. Sim, hardware and backfilled episodes
+(§11.11) thereby share one definition bit-for-bit, and the dora `obs_state` /
+`arm_state` publishers use the same FK (14-dora §4.2). Until 2026-09-11 the
+hardware recorder wrote the SDK pose, which was the FLANGE (`tcp_offset` 0) with
+an RPY composed in the wrong order — the recorded orientation was ~10° off on the
+Manipulation Arm and ~145° off on the Perception Arm (02-hardware §2; core
+`se3.rpy_to_quat`, 01-core). Policies that want a leaner state select dims by name (`state_names` in
+`PolicySpec`).
 
 ## 7. LeRobot v3 dataset schema
 
@@ -470,19 +561,22 @@ are the namespace separator.
 | feature | dtype | shape | names |
 |---|---|---|---|
 | `action` | float32 | (8,) | `arm0_ee.dx, arm0_ee.dy, arm0_ee.dz, arm0_ee.drx, arm0_ee.dry, arm0_ee.drz, arm0_gripper.pos, arm0_rail.dpos` |
+| `action.abs_ee` (always, 2026-09-11) | float32 | (11,) | `arm0_ee.x, arm0_ee.y, arm0_ee.z, arm0_ee.r00, arm0_ee.r10, arm0_ee.r20, arm0_ee.r01, arm0_ee.r11, arm0_ee.r21, arm0_gripper.pos, arm0_rail.pos` |
 | `observation.state` | float32 | (16,) | `arm0_joint1.pos … arm0_joint7.pos, arm0_gripper.pos, arm0_rail.pos, arm0_ee.x, arm0_ee.y, arm0_ee.z, arm0_ee.qw, arm0_ee.qx, arm0_ee.qy, arm0_ee.qz` |
 | `observation.images.cam_env` | video | (480, 640, 3) | `height, width, channels` |
 | `observation.images.arm0_wrist` | video | (480, 640, 3) | `height, width, channels` |
 | + always-present features (§7.3) | | | |
 
-**2-arm workcell** — `action` (16,) = arm0 block ++ arm1 block;
-`observation.state` (32,); cameras `cam_env`, `arm0_wrist`, `arm1_wrist`.
-**3-arm workcell** — `action` (24,), `observation.state` (48,); up to 4
-cameras (3 wrist + 1 env). A rail-less arm drops its `rail.dpos`/`rail.pos`
-dims from its block (e.g. 2-arm with one rail: action (15,)) — dims are
-always derived from `names`, never assumed from arm count.
+**2-arm workcell** — `action` (16,) = arm0 block ++ arm1 block, `action.abs_ee`
+(22,); `observation.state` (32,); cameras `cam_env`, `arm0_wrist`, `arm1_wrist`.
+**3-arm workcell** — `action` (24,), `action.abs_ee` (33,), `observation.state`
+(48,); up to 4 cameras (3 wrist + 1 env). A rail-less arm drops its
+`rail.dpos`/`rail.pos` dims from its block (e.g. 2-arm with one rail: action
+(15,), `action.abs_ee` (21,)) — dims are always derived from `names`, never
+assumed from arm count.
 
-Dims by convention (per arm, rail / no rail): `delta_ee` 8/7, `abs_ee` 10/9,
+Dims by convention (per arm, rail / no rail): `delta_ee` 8/7, `abs_ee` **11/10**
+(r6 rotation, §3.1; 10/9 with a quaternion before 2026-09-11, never recorded),
 `joint` 9/8; state always 16/15.
 
 ### 7.3 Always-present features (every mode that records)
@@ -932,8 +1026,9 @@ convenience label ("#12 of 40"); the id is what every API takes.
 - **`frames.parquet`** — one row per recorded frame, one row group, written
   once at save from the in-memory episode buffer (a 25 fps episode of a few
   minutes is a few MB of floats). Columns: every §7 feature except the video
-  ones (`action`, `observation.state`, `intervention`, `action_source`,
-  `wallclock_ns`, DAgger extras §7.4), plus `timestamp` (float32,
+  ones (`action`, **`action.abs_ee`** (since 2026-09-11, §6 "two columns"; older
+  episodes gain it through §11.11), `observation.state`, `intervention`,
+  `action_source`, `wallclock_ns`, DAgger extras §7.4), plus `timestamp` (float32,
   `frame_index / fps`), `frame_index` (int64) and `task` (string, the
   per-frame task label). **Not** present: `episode_index`, `index`,
   `task_index` — the export assigns them. Column dtypes/shapes are exactly the
@@ -1178,6 +1273,78 @@ the trainer writes into the session directory (checkpoints, reference-gradient c
 logs) is its own business; the skill recommends `<session>/trainer/` and the runtime
 never reads it.
 
+### 11.11 Backfill of pre-2026-09-11 episodes (`tools.backfill_abs_ee`)
+
+Episodes recorded before 2026-09-11 lack `action.abs_ee` (§6) and, on hardware,
+carry a WRONG `observation.state` `ee.*`: the driver published the SDK's FLANGE
+pose (`tcp_offset` is 0 on both boxes) through an RPY→quaternion composed as
+`Rx·Ry·Rz` where the xArm convention is `Rz(yaw)·Ry(pitch)·Rx(roll)` (extrinsic
+XYZ). Verified against 15 hardware episodes: FK of the recorded joints and the
+controller's RPY agree to 0.0001° / 0.0014 mm once both are fixed; before the
+fix the recorded orientation was ~10° off on the Manipulation Arm and ~145° off
+on the Perception Arm (02-hardware §2; core `se3.rpy_to_quat`). One in-place tool
+brings such a dataset to the 2026-09-11 definitions:
+
+```
+python -m apollo_mavis_v2_runtime.tools.backfill_abs_ee <dataset dir> [--scene mavis_v2] [--dry-run] [--force]
+```
+
+(`<dataset dir>` = the directory holding `manifest.json` + `episodes/` — a
+`bc_demo/<name>` root or an Online DAgger `<session>/rollouts`; implementation
+`recorder/backfill_abs_ee.py`, the `tools.` module only re-exports it — the recorder
+package is the sanctioned parquet writer, 14-dora §1.) Refused up front when the
+manifest's primary `action_space` is not `delta_ee`, when the `action` /
+`observation.state` names do not match the manifest's arm layout, or when an
+episode is being recorded (`.tmp-*` present — end the session first). Per episode:
+
+1. **Backups first, OUTSIDE the episode directory** (its file set is pinned, §11.1):
+   `<dataset>/backups/<UTC stamp>/<episode_id>/{frames.parquet, episode.json}`
+   plus `<dataset>/backups/<stamp>/manifest.json` — never `.bak` files inside
+   `episodes/<id>/`. The stamp directory is created lazily (a dry run creates
+   nothing).
+2. **FK with the twin** (`RecorderKinematics(REGISTRY.build(scene))`,
+   `MUJOCO_GL=egl`): the scene is the episode's session sidecar's `spec.sim_scene`
+   / `spec.digital_twin_scene`, else `--scene` (default `mavis_v2`).
+3. **`observation.state` `ee.*` recomputed for every row** as
+   `convert_pose(arm, tcp_base(q_meas), base_world(q_meas))` — the §6.1
+   definition. For a sim episode this is a no-op (max change logged; flagged
+   above 0.1 mm), for a hardware episode it replaces the flange / wrong-RPY pose.
+4. **`action.abs_ee` by integrating the recorded deltas from frame 0**: `cmd[0] =
+   meas[0]` (the arm is at rest at the first kept frame), `p_{k+1} = p_k + δp[k]`,
+   `q_{k+1} = rotvec_to_quat(δr[k]) ⊗ q_k` (§3.2 left composition, deltas already
+   in the recording frame); row `k` = `(p_{k+1}, r6(q_{k+1}))`, the delta column's
+   gripper dim verbatim, `rail_meas[0] + cumsum(rail.dpos)[..k]`. The terminal
+   residual `|p_N − p_meas[N−1]|` is reported per arm and flagged above 20 mm
+   (sample data: 1–4 mm — the gate's clamps and the carriage's lag are inside the
+   recorded deltas, so the integral closes).
+5. `frames.parquet` rewritten like the recorder writes it (FixedSizeList float32,
+   snappy, ONE row group, `action.abs_ee` inserted right after `action`, every
+   other column preserved) via temp file + `os.replace`; `episode.json` gets
+   fresh `stats["observation.state"]` / `stats["action.abs_ee"]` and the
+   **marker** `backfill.abs_ee = {version: 1, at, tool:
+   "apollo_mavis_v2_runtime.tools.backfill_abs_ee", state_ee_recomputed: true,
+   fk_scene, terminal_residual_m: {arm: m}}`.
+6. **Idempotent**: an episode whose marker is version 1 and whose parquet has the
+   column is skipped unless `--force`.
+
+Only after EVERY episode succeeded does the manifest's `features` gain
+`action.abs_ee` (the `build_features` spec for the dataset's arms / frames, under
+`MANIFEST_LOCK`) and the export is marked stale — **manifest last**, so a crashed
+or partially failed run leaves `dataset_incompatibility` and the export consistent
+and the next run finishes the rest (done episodes are skipped). `exports/`,
+`trainer_spool/`, video and audio are never touched. `--dry-run` computes and
+prints everything (rows, status, residuals, state changes, flags) and writes
+nothing; exit status is non-zero on any failure.
+
+**Alignment guarantee.** A backfilled episode and a freshly recorded one are the
+same data: the live recorder builds `action.abs_ee` from the same
+`FK(q_cmd[k+1])` the deltas were built from, and the backfill's integral of those
+deltas reproduces it bit-for-bit on the test fixture (`tests/test_backfill_abs_ee.py`,
+`test_live_recorder_writes_the_column_and_the_backfill_reproduces_it_bitwise`); the
+recomputed `ee.*` is the §6.1 definition either way. Run it with no session open
+on the dataset; the shared account's `~/data/bc_demo/*` trees recorded before
+2026-09-11 are the ones it exists for.
+
 ### 11.9 Not in this layout
 
 - No Hub upload of the raw tree (it would hit the 10 k-entries-per-folder
@@ -1234,6 +1401,7 @@ Aligned by the consistency pass; until then this table governs:
 | 8 | 00-overview §3.3 / 04-runtime §10 (v0.1) "backed by LeRobot dataset v3 via `LeRobotDataset.create … finalize`" | since 2026-09-07 the recorder writes one directory per episode and LeRobot v3 is a derived export (§11); the §7 schema is unchanged |
 | 9 | §11.2 tree / §8.1 "bare name ⇒ `apollo/`" and one root `${APOLLO_HOME}/var/datasets/<ns>/<name>` for every namespace | since 2026-09-08 (15-online-dagger D5, operator; the morning's `pro_dagger/<s>` spelling never shipped) roots are per namespace: `bc_demo/<name>` → `~/data/bc_demo/<name>`, `online_dagger/<s>` → `~/data/online_dagger/<s>/rollouts`, a bare name resolves into `RuntimeConfig.datasets.default_namespace` (`bc_demo`); the generic root keeps every unmapped namespace incl. the existing `apollo/…` data (§11.10, 04-runtime §10.6). Grammar, tree and routes unchanged |
 | 10 | 12-dagger §4 lists three DAgger-only features | four since 2026-09-08: + `actor` (§7.4; `apollo_schema` not bumped) |
+| 11 | §6 / §7.2 `abs_ee` 10 / 9 with a wxyz quaternion; 12-dagger §6 / 04-runtime §11 "deltas applied to the current measured pose"; §6.1 `ee.*` "= `ArmState.ee_pose`" | since 2026-09-11: `abs_ee` is **11 / 10** with the r6 rotation (§3.1) and every dataset carries `action.abs_ee` next to `action` (§6); a `delta_ee` row integrates on the LAST COMMAND with a leash to the measured pose (§3.2, 12-dagger §6); `ee.*` of `observation.state` is the twin FK of the measured joints at `link_tcp` on every kind (§6.1); pre-2026-09-11 episodes are brought over by `tools.backfill_abs_ee` (§11.11). `apollo_schema` not bumped (additive column, same primary layout) |
 
 Open (tracked, not blocking): whether `observation.state` should also carry
 measured EE twist dims for dynamic tasks (schema bump to `apollo_schema = 2`

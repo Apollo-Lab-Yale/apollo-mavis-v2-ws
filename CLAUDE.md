@@ -73,7 +73,11 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
 
 - **No implicit motion.** The driver's `connect()` never homes a track; `home_rail`
   (Hardware-tab arm card, twin-gated, session-less) is the ONLY motion-class
-  maintenance op. Error clearing, `apply_backstops` and `recover` produce no
+  maintenance op. Error clearing, `apply_backstops`, `recover` and
+  `set_collision_sensitivity` (2026-09-11: the operator's 1 / 2 / 3 dropdown on the
+  Hardware-tab arm card and in the Cockpit; volatile — the config value 3 is re-applied
+  at the next connect; SDK 1.18.5 `set_collision_sensitivity` ends with `set_state(0)`
+  and returns raw uxbus codes, so 1 / 2 / 9 echoes are not failures) produce no
   motion. Teardown leaves the arms stopped with brakes engaged; tracks keep their
   homed state.
 - **`hardware_session.armed` gates every real driver connection.** The repo config
@@ -183,8 +187,23 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   flagged every held row `keyboard=False` and put episode save / discard on
   `KeyS` / `KeyF` (colliding with −x / gripper close); phase-13 reverts it.
 
-## Datasets (operator decisions, 2026-09-07 / 09-08)
+## Datasets (operator decisions, 2026-09-07 / 09-08 / 09-11)
 
+- **Two action columns since 2026-09-11 (10-frames §6, §11.11):** `action` = `delta_ee`
+  (canonical, unchanged: the executed commanded-TCP increment k→k+1) AND `action.abs_ee`
+  = `[ee.x, ee.y, ee.z, ee.r00, ee.r10, ee.r20, ee.r01, ee.r11, ee.r21, gripper.pos,
+  rail.pos]` per arm (11 dims with a rail, 10 without; rot6d = first two COLUMNS of R,
+  Gram-Schmidt decode via core `se3.rot6d_*`; row k = the COMMANDED TCP at frame k+1 in
+  `arm_base`, FK of `q_cmd` at the twin site `link_tcp`). `observation.state` keeps its
+  32-dim quaternion layout, but its `ee.*` is the TWIN FK of the measured joints (recorder
+  and backfill share one function) — **every hardware episode recorded before 2026-09-11
+  stored the SDK FLANGE pose (172 mm short along tool z) with a wrong RPY composition
+  (~10° off on the Manipulation Arm, 145° on the Perception Arm).** Fix on disk:
+  `python -m apollo_mavis_v2_runtime.tools.backfill_abs_ee <dataset dir>` (recomputes
+  `ee.*`, adds `action.abs_ee` by cumsum from frame 0, backups under
+  `<dataset>/backups/<stamp>/`, marker `episode.json['backfill']['abs_ee']`, manifest
+  patched last, idempotent). A dataset without the column 409s "Continue existing"
+  until backfilled. Run it with no session open, as the account that owns the files.
 - **One directory per episode** (`episodes/<episode_id>/{episode.json,
   frames.parquet, video/<camera_id>.mp4, audio.wav}`); ids are capture-time
   stamps, never reused or renumbered. **Roots are per namespace (operator
@@ -351,6 +370,41 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
     and the panel sat above the episode buttons; now 4 one-line rows with their own
     `max-height` + scroll and `EpisodeControls` ABOVE the readout.
 
+## Work in progress (2026-09-11) — inference interface, abs_ee, ee_pose fix
+
+- **Inference over dora works end to end for BOTH action spaces** (14-dora v1.3 + v1.4;
+  04-runtime §11/§12; 12-dagger §6). Per-arm streams `action_<arm>` are primary; a
+  Manipulation-Arm-only policy drives `grip` while the Perception Arm HOLDS. The executor
+  no longer re-anchors the per-tick delta to the MEASURED pose (that bled the motion on
+  the twin's soft servo: 8.7 % replay fidelity; MoveIt Servo #1857 is the same bug); it
+  integrates on the LAST COMMAND (`FK(q_last)`) with the teleop leash, and every
+  `delta_ee` row is applied exactly once in total (`ActionAnchor.row_step` budget — a
+  node publishing at 21 Hz against a 30 Hz announce over-applied 1.4× before). `abs_ee`
+  rows use deadline interpolation toward the waypoint. **Dry run on a real
+  drawer_assembling episode (932 frames, sim twin):** delta_ee RMS 14.5 mm / max 28.4 /
+  final 2.1 mm, rot RMS 19.7 mrad; abs_ee RMS 6.7 / max 17.4 / final 0.3 mm, rot RMS
+  3.5 mrad; 0 dropped / late actions; both wrist cameras 1313 frames each at the node
+  (`scripts/dev/replay_dryrun.py --action-space abs_ee`; runs under
+  `var/dryrun-inference/runs/`). The residual is the twin's servo BANDWIDTH (PD time
+  constant ~100 ms, ~9 % of the error closed per 10 ms tick, vs ~1 tick on the real arm;
+  raising kp alone does not help — kv / forcerange bound it; 03-sim §6). The session twin
+  already runs the servo-faithful scene (gravcomp + rail ×40) — nothing changed in sim.
+- **Hardware `ee_pose` was wrong** (02-hardware §2/§3.4, 10-frames §2.4): the SDK reports
+  the flange, xArm RPY is `Rz(yaw)·Ry(pitch)·Rx(roll)`, and the twin's `link_tcp` sits
+  0.172 m past the flange rotated 180° about tool z ONLY on a gripper arm. Fixed in core
+  `se3.rpy_to_quat` + hardware `units.sdk_to_tcp_pose(gripper=…)`; verified against 15
+  episodes to 0.0001° / 0.0014 mm. Teleop and IK always used FK and were never affected.
+- **Episode playback has a `source`** (`state` = joint replay as before | `delta_ee` |
+  `abs_ee` = the action column through the executor inside the current teleop / collect
+  sim session; PlaybackDialog "Replay source" select; hardware sessions refuse action
+  replay; verdict = TCP residual 5 mm / 0.02 rad after settling; 04-runtime §10.8).
+- **Collision sensitivity dropdown (1 / 2 / 3)** on the Hardware-tab arm card and in the
+  Cockpit (see the C31 note below); default 3 from config at every connect.
+- Recorded so far: the 15 developer-mirror episodes in `~/data/bc_demo/drawer_assembling`
+  are backfilled; the production copies under `/home/mavis-v2/data/bc_demo/`
+  (drawer 51, cabinet 50, lamp 5 as of 2026-09-11 04:12) are backfilled by the deploy
+  step of the same day (update this line when it lands).
+
 ## Work in progress (2026-09-09)
 
 - **Phase-12 / 13 / 14 and the 2026-09-08 follow-ups are COMMITTED and PUSHED**
@@ -397,7 +451,11 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   NOT do: make the door openable — the seal / hinge force is a real external torque and
   sensitivity 3 reads it as a collision. Lowering the Manipulation Arm's
   `collision_sensitivity` to 2 (then 1), weighing the payload, pulling along the door's
-  arc at 10–50 % speed are the operator's calls, not yet made. Same evening, UI:
+  arc at 10–50 % speed are the operator's calls. **Since 2026-09-11 the level (1 / 2 / 3)
+  is a dropdown on the Hardware-tab arm card AND in the Cockpit during a hardware
+  session** (`set_collision_sensitivity` maintenance op, both paths; the runtime remembers
+  the requested level per arm until the next connect, which restores the config value 3;
+  the UI shows the controller's read-back, never a browser-persisted choice). Same evening, UI:
   **Continue existing prefills Task from `DatasetInfo.task`** (05-ui §8.1 item 6) so a
   resume is one click. A long-running dev runtime started before that does NOT have the
   driver fix — restart it to pick it up (the shared account's copy has it).
@@ -505,7 +563,11 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   rollouts_dir}`, `EVENT_KINDS` = the phase-12 nine + `train_now`;
   `iteration_complete` / `pro_dagger_phase` never shipped). Spelling authority:
   core `protocol/external.py`; both contract goldens (runtime + policy-node) are
-  byte-identical and tested (sha256 `4dc67e12…`, 3698 B).
+  byte-identical and tested (sha256 `0f63e81d…`, 3826 B since v1.3 per-arm streams;
+  the phase-12 golden was `4dc67e12…`, 3698 B). Since 2026-09-11 (14-dora v1.4) the
+  runtime ACCEPTS a policy spec in `delta_ee` (8/7 dims per arm) OR `abs_ee` (11/10
+  dims: pos3 + rot6d + gripper.pos [+ rail.pos]); `SessionAnnounce.action_space` stays
+  the recorded canonical `delta_ee`.
   `dora.enabled` is FALSE in the repo config; the lab render turns it on with
   `DORA_BIND_HOST=wlp38s0` (the "APOLLO Lab" Wi-Fi, 192.168.0.88/24 on
   2026-09-07, DHCP) — never `0.0.0.0`, never the arm links. Ports 6113 / 53391

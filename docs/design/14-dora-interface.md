@@ -1,6 +1,22 @@
 # 14 — External interface over Dora (dora-rs 1.0) (binding once approved)
 
-Status: **v1.2 (2026-09-08, evening, late) — phase-14 is the Online DAgger SHELL of
+Status: **v1.4 (2026-09-11) — the external policy may act in `delta_ee` OR `abs_ee` (§4.2
+`SessionAnnounce.action_space` stays `delta_ee`, the recorded canonical; §5 the `action_dim`
+rule follows the NODE's announced layout; §6.1 step 2 accepts both spaces and checks
+`action_names` against the announced space's block widths — 8 / 7 vs 11 / 10; §6.2 abs rows
+pass through verbatim, no `chunk_dt` rescale; §16.6 record).** **v1.3 (2026-09-11, implemented
+before v1.4 the same day, written up the same evening) — per-arm action streams.** The policy
+node may publish `action_<arm_id>` per arm instead of (or beside) the whole-cell `action`;
+`PolicySpecModel.arms` names the arms a policy DRIVES and `action_frames` gives each its
+recording frame; **every other session arm HOLDS** (a Manipulation-Arm-only policy leaves the
+Perception Arm parked — "a fancy tripod"). Sections touched: §2.3 (the rendered
+`policy_action_<arm_id>` inputs / `action_<arm_id>` outputs, the microphone as a policy input),
+§5 (the per-arm row + its validation), §6.1 step 2 (the driven-arm resolution rule — blocks
+matched by NAME prefix in any order, the 409s, the per-DRIVEN-arm frame check), §6.2 (what the
+node publishes), §6.3 (staleness per arm), §8, §10, §11.1 (`PolicySource.driven_arms` / per-arm
+`staleness_scale`), §13 (`ExternalStatus.policy_arms`, the deltas, the goldens 3698 B → 3826 B),
+§16.7 record. Additive: `mavis_schema` stays 1 and `policy_action` is not deprecated.
+v1.2 (2026-09-08, evening, late) — phase-14 is the Online DAgger SHELL of
 `15-online-dagger.md` v2.0 (operator decision 2026-09-08 evening: the runtime knows no DAgger
 algorithm; PRO-DAgger is a reference implementation in the policy repo). Sections touched,
 v1.1 text superseded in-body and kept: §4.1 / §4.2 `events` (`gate` now actually published,
@@ -367,6 +383,19 @@ node settles the question by construction and doubles as the liveness canary
 `/` is the `node/output` separator. Ids are opaque tokens; consumers subscribe
 to declared ids and never parse them.
 
+**v1.3 (2026-09-11) — per-arm rows.** The renderer takes the configured arms
+(`render_dataflow(…, arm_ids=…)`, `WorkcellConfig` order — `view`, `grip` in the sim
+example) and emits, beside `policy_action`, one input `policy_action_<arm_id>: {source:
+policy/action_<arm_id>, queue_size: 1, queue_policy: drop_oldest}` per arm on
+`mavis_runtime` and the matching `action_<arm_id>` in the `policy` placeholder's outputs
+(`outputs: [action, spec, status, trainer_status, action_view, action_grip]`); the `policy`
+placeholder also receives `mic_<id>` (`queue_size: 32`, like the observer's — the Perception
+Arm's microphone is a policy input). With no arm ids the renderer emits the v1.2 shape
+(`tests/dora_bridge/test_dataflow.py::test_no_arm_ids_renders_the_v1_2_shape_and_no_mic_
+without_audio`); the committed example is re-pinned byte-for-byte and still `dora validate
+--strict-types` clean. `DoraWiring` hands the same arm list to `bridge.set_outputs(…)` and
+to the `ExternalPolicyHub`, so the declared inputs and the registered handlers cannot drift.
+
 ### 2.4 `DoraBridge` state machine
 
 `apollo_mavis_v2_runtime/dora_bridge/bridge.py::DoraBridge` is owned by
@@ -575,8 +604,11 @@ class SessionAnnounce(BaseModel):            # core protocol/external.py
     arm_ids: list[str] = []                  # WorkcellConfig order (block order everywhere)
     has_rail: dict[str, bool] = {}
     frames: dict[str, FrameRef] = {}         # recording frames actually in force
-    action_space: str | None = None          # "delta_ee" (v1 requirement, 12-dagger §6)
-    action_names: list[str] = []
+    action_space: str | None = None          # ALWAYS "delta_ee": the RECORDED canonical space
+                                             #   (10-frames §1.2); v1.4 (2026-09-11): the node's
+                                             #   own spec may say "abs_ee" instead — the announce
+                                             #   describes the dataset, not what the node must emit
+    action_names: list[str] = []             # the delta_ee layout over the session arms (8 / 7 each)
     state_names: list[str] = []
     camera_ids: list[str] = []
     cameras: dict[str, CameraAnnounce] = {}  # {resolution, fps, frame_ref, mount,
@@ -708,6 +740,7 @@ Appendix A).
 | id | producer placeholder / output | Arrow payload | required metadata (beyond §3.2) | queue |
 |---|---|---|---|---|
 | `policy_action` | `policy/action` | `Float32[K*D]` row-major, K chunk rows × D dims | `observation_id` (int), `chunk_len` K (int ≥ 1), `action_dim` D (int), `chunk_dt_s` (float), `policy_id` (str), `policy_version` (int), `compute_ms` (float), optional `image_seq_used` (list[int]), `finite` (bool) | 1, drop_oldest |
+| `policy_action_<arm_id>` (v1.3, 2026-09-11; one per CONFIGURED arm, rendered like `cam_<id>`) | `policy/action_<arm_id>` | `Float32[K*D_arm]` row-major, K chunk rows × that ARM's block only — `D_arm = len(arm_action_names(arm, has_rail, spec.action_space))`: 8 / 7 for `delta_ee`, 11 / 10 for `abs_ee` | the `policy_action` keys (`action_dim` = the block width); optional `arm_id` (str) — when present it must equal the stream's arm | 1, drop_oldest |
 | `policy_spec` | `policy/spec` | `Utf8[1]` JSON `PolicySpecAnnounce` | — | 1 |
 | `policy_status` | `policy/status` | `Utf8[1]` free text (dora-hub `status` convention) | — | 8 |
 | `policy_trainer_status` (additive, phase-14, 2026-09-08; row reworded 2026-09-08 evening) | `policy/trainer_status` | `Utf8[1]` JSON `TrainerStatusAnnounce` — the 10-field GENERIC contract (15-online-dagger §6): `mavis_schema`, `trainer_id`, `node_version`, `state: idle \| preparing \| training \| ready \| error`, `session_id` echo (`null` = alive only), `policy_version` (acting version after the last swap), `progress` (0..1), `metrics: dict[str, float]` (free-form finite scalars, e.g. `loss`, `proj_rate`), `detail`, `uptime_s`; every float `allow_inf_nan=False`. Superseded (2026-09-08 evening): v1.1's algorithm fields (`iteration`, `ref_grad{…}`, epoch / step / `n_proj` / pool sizes / `scale_check`) — a trainer puts whatever it wants into `metrics` | — (the common inbound keys; same `seq` counter as the node's other outputs) | 8 |
@@ -721,9 +754,13 @@ policy via the dora service pattern, §11.3), `cmd_request` / `cmd_response`
 Reserving the names keeps a later addition additive.
 
 The `policy` placeholder's declared outputs are `[action, spec, status, trainer_status]`
-(`POLICY_OUTPUTS`, append-only) since phase-14; the rendered dataflow and
-`dataflows/mavis_v2.example.dora.yml` carry the new input as `policy_trainer_status:
-{source: policy/trainer_status, queue_size: 8}`. A `policy_trainer_status` is cached by
+(`POLICY_OUTPUTS`, append-only) since phase-14 — plus, since v1.3 (2026-09-11), one
+`action_<arm_id>` per configured arm (`dataflow.policy_outputs(arm_ids)`; the per-arm ids are
+rendered from the workcell, so `POLICY_OUTPUTS` / `RUNTIME_INPUTS` themselves are unchanged and
+the goldens pin the two PREFIXES instead, §13); the rendered dataflow and
+`dataflows/mavis_v2.example.dora.yml` carry the phase-14 input as `policy_trainer_status:
+{source: policy/trainer_status, queue_size: 8}` and the v1.3 inputs as `policy_action_view` /
+`policy_action_grip` (§2.3). A `policy_trainer_status` is cached by
 the `ExternalPolicyHub` (newest wins, aged against `spec_stale_s`), surfaced as
 `ExternalStatus.trainer_status` and handed to the running Online DAgger session's
 coordinator (`ExternalPolicyHub.attach_trainer_sink` — the cached status is replayed on
@@ -735,9 +772,19 @@ parses into the pydantic model (else dropped + `dropped_inputs++`, reason in
 `policy_status`-style log); `mavis_schema` major matches; `session_id`
 matches; `seq` monotonic per `client`; numeric payloads finite where required
 (`policy_action` NaN rows are *passed through* — the executor's NaN 3-strike
-is the guard, 12-dagger §12); `action_dim == len(session action_names)` and
-`chunk_len × action_dim == len(payload)` else dropped. A dropped input never
-raises and never blocks.
+is the guard, 12-dagger §12); `action_dim` must equal the width of the NODE's
+announced layout (v1.4, 2026-09-11: the whole-cell `action` stream →
+`len(spec.action_names)`; a per-arm `action_<arm_id>` stream → that arm's block
+width in the ANNOUNCED space, `arm_action_names(arm, has_rail, spec.action_space)`
+= 8 / 7 for `delta_ee`, 11 / 10 for `abs_ee`) and `chunk_len × action_dim ==
+len(payload)` else dropped. **Per-arm streams (v1.3)** add three drop reasons, each
+counted and logged: the arm is not one this policy DRIVES (`policy_action_view: arm
+'view' is not driven by this policy (drives ['grip'])`), the `arm_id` metadata names
+another arm (`metadata arm_id 'view' != 'grip'`), or the block has the wrong width
+(`policy_action_grip action_dim 16 != 8`). Note that the whole-cell `policy_action` of a
+SUBSET policy is `len(spec.action_names)` wide — the DRIVEN blocks only, never the session
+layout: a 15-wide row sent to a Manipulation-Arm-only `delta_ee` policy's `policy_action`
+is `action_dim 15 != 8`, dropped. A dropped input never raises and never blocks.
 
 ## 6. External policy contract
 
@@ -752,12 +799,54 @@ inference}` and `policy is None`. `SessionInfo` echoes it. Bring-up
    within `dora.policy.spec_stale_s` (3 s; the node heartbeats it at 1 Hz) —
    otherwise **409 `no external policy attached`**. No waiting: the spec is
    cached, so `POST /api/session` stays fast.
-2. Frame / space check, verbatim as for checkpoints: `spec.action_space ==
-   "delta_ee"` and every session frame equals `spec.action_frame` — else 409
-   `policy/dataset frame mismatch`. `spec.action_names` must equal the
-   session's `arm_action_names(...)` concatenation exactly; `spec.state_names`
-   must be a subset of the session's state names (the node selects dims by
-   name; `obs_state` always carries the full layout).
+2. Space, driven arms, frames — in that order (`SessionManager.
+   _build_external_policy_stack`; every refusal is a 409 and nothing has moved):
+   - **Space:** `spec.action_space ∈ {"delta_ee", "abs_ee"}` (v1.4, 2026-09-11; else
+     409 `unsupported external policy action_space '<s>' (delta_ee or abs_ee)` —
+     `joint` has no executor path).
+   - **Driven-arm resolution (v1.3, 2026-09-11; `resolve_driven_arms`,
+     `DrivenArmsError` → 409).** The per-arm blocks are `arm_action_names(arm,
+     has_rail, spec.action_space)` of the NODE's space — **8 / 7 for `delta_ee`, 11 /
+     10 for `abs_ee`** (`[ee.x, ee.y, ee.z, ee.r00, ee.r10, ee.r20, ee.r01, ee.r11,
+     ee.r21, gripper.pos, rail.pos?]`, 10-frames §6) — never the announce's. With
+     `spec.arms` non-empty every entry must be a session arm (else `external policy
+     drives unknown arm(s) ['nope'] (session arms ['grip', 'view'])` — the e2e
+     asserts `"unknown arm"` in the detail) and listed once (`external policy lists
+     an arm twice: …`), and `spec.action_names` must be EXACTLY those arms' blocks
+     concatenated. With `spec.arms` empty the driven set is INFERRED — every session
+     arm whose whole block appears in `action_names` — and `action_names` must again
+     be exactly those blocks, so a legacy whole-cell spec resolves to every arm and a
+     list covering no whole block is refused (`external policy action_names […] cover
+     no whole arm block of the session layout […]`). **Blocks are matched by NAME, not
+     by position** (`action_block_layout`): each block must be contiguous and
+     complete, but the policy may concatenate its arms in ANY order, because it
+     announces its spec BEFORE a session exists and cannot know `SessionSpec.arms`
+     (the idle announce is in workcell order — `view`, `grip` on this cell — while the
+     recorded datasets put `grip` first); the names are `<arm_id>_`-prefixed, so at
+     most one block matches at any offset. Anything else is `external policy
+     action_names […] are not the per-arm blocks of […] concatenated (in any order);
+     expected the blocks {…}` or `… miss the whole block of arm(s) […]`. The resolved
+     set is kept in SESSION order and **every session arm outside it HOLDS** — the
+     Perception Arm of a Manipulation-Arm-only policy stays parked ("a fancy tripod":
+     its `q_cmd` never changes, asserted to 1e-9 over 2 s in the e2e); the manager
+     logs `external policy <id> drives ['grip']; ['view'] hold`.
+   - **Frames, per DRIVEN arm only:** the session's recording frame must equal
+     `spec.action_frames[arm]` (else `spec.action_frame`) — else 409 `policy/dataset
+     frame mismatch` (the arm and both frames go to the log). Undriven arms are not
+     checked. This is what made a TWO-arm external session launchable at all: the
+     cell records `arm_base:grip` / `arm_base:view` per arm, and before v1.3 one
+     `action_frame` had to equal both, so every two-arm external session 409'd.
+     `spec.state_names` must be a subset of the session's state names (the node
+     selects dims by name; `obs_state` always carries the full layout).
+   - **Compatibility rule:** the `session` announce keeps `action_space: delta_ee` +
+     the delta names because it describes the RECORDED dataset (the counterfactual
+     column and the training labels stay `delta_ee`, 12-dagger §4); a node trained on
+     the dataset's `action.abs_ee` column announces `abs_ee` with the abs names and is
+     accepted against that delta announce — the runtime's `policy_step` executes either
+     (12-dagger §6). A node must therefore never reject a session because the
+     announce's space differs from its own; it validates frames and arm ids only. The
+     fake node's `--action-space abs_ee` exercises this path; its `--arms grip[,view]`
+     exercises the subset.
 3. Construct `ExternalPolicySource` (§11.1) instead of `PolicyRunner`; **no
    `resolve_policy`, no `MLPPolicy`, no `PolicyReloaderImpl`, no
    `AsyncTrainerClientImpl`** (§11.3). DAgger still creates the recorder, the
@@ -811,10 +900,29 @@ loop:
   without touching `ActionAnchor`). `chunk_dt_s` defaults to the policy's own
   period; a policy trained on dataset-frame deltas at `fps` should send
   `chunk_dt_s = 1/fps` (open question §14).
-- Deltas are per-`chunk_dt_s` increments in the session's recording frame,
-  gripper absolute (10-frames §6). The runtime scales row 0 by
-  `(dt / chunk_dt_s) × staleness_scale` exactly as it scales in-process
-  outputs by `(dt / period)`.
+- **Per-arm streams (v1.3, 2026-09-11).** A node that drives a subset of the arms
+  (or simply prefers per-arm publishing) announces `spec.arms` and publishes
+  `action_<arm_id>` per driven arm — `Float32[K*D_arm]`, that arm's block only, the
+  same required metadata (`action_dim` = the block width) plus an optional `arm_id`
+  key. The whole-cell `action` is still accepted from such a node and then carries
+  exactly the driven blocks as `spec.action_names` lists them (any order, §6.1); the
+  runtime places each block into its arm's slot, so the two shapes may even
+  alternate. The reference node publishes per arm whenever the RUNNING dataflow
+  declares the `action_<arm_id>` outputs and falls back to `action` otherwise
+  (`arm_actions_sent` / `arm_action_fallbacks`); the fake node's `--arms grip`
+  publishes per arm only.
+- `delta_ee` rows are per-`chunk_dt_s` increments in the session's recording
+  frame, gripper absolute (10-frames §6). The runtime rescales the current row
+  from per-`chunk_dt_s` to per-`period` units and the executor then scales it by
+  `(dt / period) × staleness_scale`, so the applied increment is `dt / chunk_dt_s`
+  of the row — exactly as in-process outputs scale by `(dt / period)`. **`abs_ee`
+  rows (v1.4, 2026-09-11) are waypoints and pass through VERBATIM**: the rescale
+  mask is all zeros, no chunk or period factor ever touches an absolute value; the
+  executor interpolates the command from `FK(q_last)` so it reaches the row at
+  `t_row + period` (12-dagger §6 rule 2), gripper (index 9) and rail (index 10)
+  absolute. A hold row must REPEAT the last target (never zeros): a zero absolute
+  row is a real pose. The row's `finite` contract is per arm block; a NaN block
+  holds that arm (§6.1).
 - `observation_id` is **mandatory**: it is how the runtime applies the reset
   watermark and computes `obs_age = now − t_mono(observation_id)`; actions
   whose observation is older than `dora.policy.max_obs_age_s` (0.5 s) are
@@ -833,6 +941,10 @@ class PolicySpecAnnounce(BaseModel):
     node_version: str                   # package version of the node
     spec: PolicySpecModel               # pydantic mirror of core PolicySpec (action_space,
                                         #   action_frame, action_names, state_names, camera_keys, version)
+                                        #   + v1.3 (2026-09-11, appended last): arms: list[str] = []
+                                        #   (the arms this policy DRIVES; [] = every session arm) and
+                                        #   action_frames: dict[str, str] = {} (per-arm FrameRef; an
+                                        #   arm absent here uses action_frame; DRIVEN arms only)
     rate_hz: float                      # the node's own act() rate (10-30)
     chunk_len: int = 1
     chunk_dt_s: float | None = None
@@ -884,6 +996,21 @@ bridge leaving `attached` ⇒ hold. Telemetry: `DaggerStatus.policy_stale` /
 `InferenceStatus.policy_stale` (fixing an existing 04-runtime §15 drift) and
 the `external` block (§13). Resume after a gap goes through the handback slew
 window like a takeover handback (12-dagger §6).
+
+**Per arm (v1.3, 2026-09-11).** The source keeps ONE chunk slot per driven arm
+(`_ArmSlot`: rows, `t0`, `chunk_dt`), so the rule above runs per stream:
+`staleness_scale(now, arm_id)` ages THAT arm's current row (row 0 at once, one row
+per `chunk_dt_s` after), and the executor asks per arm (`dagger/step.py::
+staleness_of`) — a silent `action_grip` holds the Manipulation Arm only while
+`action_view` keeps driving. Without `arm_id` the value is the MINIMUM over the
+driven arms, which is what `DaggerStatus.policy_stale` / `InferenceStatus.
+policy_stale` report (a two-arm policy that has fed one stream only reads stale until
+the other's first row). An arm the policy does not drive answers 0 — moot, because
+the executor holds it before asking: its block in `latest()` is NaN by contract and
+never a NaN strike (`GatedPolicyExecutor._driven_finite` counts strikes on DRIVEN
+blocks only). A whole-cell `policy_action` refreshes every driven slot at once;
+`drop_and_requery()` and `pause()` clear every slot; the `PolicyOutput.t_mono` the
+executor sees is the NEWEST row's active time across the driven arms.
 
 ### 6.4 Reference repo `apollo-mavis-v2-policy-node` (decided)
 
@@ -985,6 +1112,8 @@ for ev in node:
 | Duplicate `mavis_runtime` (second runtime instance / stale process) | `flock` on `<var_dir>/mavis_runtime.lock` | second instance stays `unavailable` with detail; consumers key on `epoch` |
 | Idle arm reader loses a control box (cable, power) between sessions | report stream silent > 1 s / poll raises | that arm's `arm_state` block marks `stale: 1` and freezes; camera frames keep flowing with `pose_source: idle` and the last good `q`; reconnect with the same 1 → 10 s backoff; session BRINGUP is unaffected (it owns the connection while a session exists) |
 | Policy node crash / `kill -9` | no `policy_action`: `staleness_scale` → 0 after `period + 0.05 + 5·period` (0.45 s at 15 Hz); `policy_spec` silent > 3 s | arms hold; `policy_stale: true`, `external.policy_attached: false`; DAgger/inference session continues (takeover works; recorder keeps recording human frames); on a fresh spec + actions the handback slew window applies |
+| One per-arm stream falls silent (v1.3) | that arm's `staleness_scale(now, arm_id)` → 0 on the same timeline | THAT arm holds; the other driven arms keep following their streams; `policy_stale` reads the minimum over the driven arms |
+| Per-arm message for an arm the policy does not drive, an `arm_id` key naming another arm, or a block of the wrong width (v1.3) | validation on the bus thread | dropped, `dropped_inputs++`, reason logged (`… is not driven by this policy (drives […])`, `metadata arm_id … != …`, `action_dim 16 != 8`); never applied |
 | Policy node restarts with a different `policy_version` mid-episode | metadata diff | recorded as received; `events.policy_version_changed` + `external.version_changes_mid_episode++` (12-dagger §4 invariant becomes advisory for external policies — accepted trade-off, §11.3) |
 | Late / duplicate / pre-watermark action | `observation_id` ≤ watermark or obs age > `max_obs_age_s` | dropped, `actions_late++`; never applied |
 | Malformed input (bad JSON, wrong dims, non-monotonic `seq`, wrong `session_id`, other `mavis_schema` major) | validation on the bus thread | dropped, `dropped_inputs++`, rate-limited WARN |
@@ -1127,7 +1256,16 @@ existing `egl`/`perf`. CI runs the matrix with and without the `[dora]` extra.
    `IdleArmReader` with the FakeSDK (read-only: no `set_mode` / `set_state` /
    `set_servo_angle_j` / gripper writes recorded; pause before BRINGUP,
    resume after TEARDOWN); `INPUT_CLOSED` on `policy_*` ⇒
-   `policy_attached=false`.
+   `policy_attached=false`. **v1.3 (2026-09-11):** `tests/dora_bridge/
+   test_policy_source.py` — `test_resolve_driven_arms_subset_inference_and_refusals`,
+   `test_action_block_layout_maps_blocks_by_name_in_announced_order`,
+   `test_infer_policy_arms_from_declaration_or_prefixes`,
+   `test_hub_registers_one_input_per_configured_arm_and_reports_policy_arms`,
+   `test_grip_only_policy_holds_the_view_arm_and_accepts_both_stream_shapes` (the
+   15-wide session row with a NaN `view` block, per-arm staleness 1.0 / 0.0, the drop
+   cases of §5, the whole-cell shape still accepted),
+   `test_two_driven_arms_have_independent_slots_and_staleness`; `test_dataflow.py`
+   pins the per-arm rows, the v1.2 shape without arm ids and `dora validate`.
 3. **Private-daemon integration (`-m dora`).** Fixture `dora_control_plane`
    picks three free ports, starts coordinator + daemon exactly as §9, `dora
    start`s the rendered YAML, yields `DoraInfo`, and tears down with `dora stop
@@ -1161,9 +1299,21 @@ existing `egl`/`perf`. CI runs the matrix with and without the `[dora]` extra.
    pose (≤ 1e-6 in sim), `pose_source` flips `loop` → `idle` and `session_id`
    is `""`; the rendered YAML's `mavis_runtime` inputs are exactly `{tick,
    probe_heartbeat, policy_action, policy_spec, policy_status}`
-   (`node_config()` assertion); (d) control-loop non-interference — 60 s
+   (`node_config()` assertion; + `policy_trainer_status` since phase-14 and one
+   `policy_action_<arm_id>` per configured arm since v1.3 — `test_dataflow.py` pins
+   the set); (d) control-loop non-interference — 60 s
    teleop with the
-   bridge on vs off: tick p99 < 2 ms and `tick_overrun == 0` in both.
+   bridge on vs off: tick p99 < 2 ms and `tick_overrun == 0` in both; (e) **per-arm
+   streams (v1.3, 2026-09-11; `tests/dora_bridge/test_e2e_per_arm_policy.py`, 4 tests,
+   REAL server + REAL control plane on the two-arm `mavis_v2` sim cell)** — a `--arms
+   grip` fake drives the Manipulation Arm through `action_grip` while the Perception
+   Arm's `q_cmd` never changes (1e-9 over 2 s), `external.policy_arms == ["grip"]`
+   BEFORE the launch and in-session, 0 dropped / late, the fake's `per_arm_actions`
+   holds `grip` only and `mic_blocks > 0`; a whole-cell two-arm fake moves BOTH arms
+   (before v1.3 that launch 409'd `policy/dataset frame mismatch`); `--arms grip
+   --action-space abs_ee` holds the observed TCP with a 2 cm wiggle, never a joint jump
+   past `dq_max_rad`, Perception Arm still; `--arms nope` → 409 with `unknown arm` and
+   no session left behind.
 
 ## 11. Migration of the in-process policy path and the DAgger trainer
 
@@ -1182,8 +1332,12 @@ class PolicySource(Protocol):
     def start(self) -> None: ...
     def stop(self) -> None: ...
     def latest(self) -> tuple[PolicyOutput | None, float]: ...   # (output, t_recv)
-    def staleness_scale(self, now: float) -> float: ...
-    def drop_and_requery(self) -> None: ...                        # handback / boundary
+    def staleness_scale(self, now: float, arm_id: str | None = None) -> float: ...
+                                        # v1.3: THAT arm's stream with arm_id; the minimum over the
+                                        #   driven arms without (what telemetry reports)
+    def driven_arms(self) -> frozenset[str] | None: ...            # v1.3: None = every session arm;
+                                        #   a set = the executor HOLDS every other arm
+    def drop_and_requery(self, reason: str = "handback") -> None: ...   # handback / boundary
     def pause(self) -> None: ...
     def resume(self) -> None: ...
     @property
@@ -1196,8 +1350,14 @@ class PolicySource(Protocol):
 `dora_bridge/policy_source.py::ExternalPolicySource` (fed by the bridge;
 `drop_and_requery()` publishes `policy_reset` and sets the watermark;
 `current_version()` returns the metadata of the action in use) both satisfy
-it; `GatedPolicyExecutor` is typed against the Protocol with no behaviour
-change; `_build_policy_stack` branches on `spec.policy_source`. The recorder
+it (`PolicyRunner.driven_arms()` is `None` — an in-process checkpoint's layout IS
+the session's; `ExternalPolicySource` returns the set `resolve_driven_arms` produced;
+the `ReplayActionSource` of 04-runtime §10.8 the episode's arms); `GatedPolicyExecutor`
+is typed against the Protocol with no behaviour change — since v1.3 it reads
+`driven_arms()` per tick (`_drives`, `_driven_finite`: NaN strikes on DRIVEN blocks
+only) and `dagger/step.py::policy_step` holds an arm whose block is missing, short or
+non-finite, so an undriven arm is a hold, never a strike; `_build_policy_stack`
+branches on `spec.policy_source`. The recorder
 takes `policy_version` from `source.current_version()` for the frame's
 counterfactual (falls back to the last known version for NaN rows).
 
@@ -1356,6 +1516,11 @@ class ExternalStatus(BaseModel):            # telemetry.external
     trainer_status: TrainerStatusAnnounce | None = None   # newest policy_trainer_status while
                                             #   fresh (the session-less trainer pill); None once the
                                             #   node detaches / falls silent > spec_stale_s
+    # v1.3 (2026-09-11, additive, appended last):
+    policy_arms: list[str] = []             # the arms the FRESH spec drives: PolicySpecModel.arms,
+                                            #   else the <arm_id>_ prefixes of its action_names
+                                            #   (infer_policy_arms); [] when no spec is fresh — the
+                                            #   launcher reads "drives: Manipulation Arm" BEFORE the POST
 ```
 
 **Phase-14 deltas (2026-09-08, additive; as shipped the same evening — 15-online-dagger
@@ -1384,6 +1549,36 @@ announce; `SnapshotPublisher.publish_event(kind, payload, session_id)` carries t
 `event_kinds` ending `train_now`, `session_announce_fields` ending `online_dagger`,
 `policy_spec_announce_fields` ending `capabilities`; byte-identical (sha256 `4dc67e12…997d`,
 3698 B).
+
+**v1.3 deltas (2026-09-11, additive; `mavis_schema` stays 1; §16.7 is the record).** core
+`protocol/external.py`: `ARM_ACTION_OUTPUT_PREFIX = "action_"`, `IN_POLICY_ARM_ACTION_PREFIX =
+"policy_action_"`, `arm_action_output_id` / `policy_arm_action_input_id` /
+`arm_id_from_policy_arm_action_input` / `arm_id_from_arm_action_output`;
+`PolicySpecModel.arms: list[str] = []` and `PolicySpecModel.action_frames: dict[str, str] =
+{}` (appended last, in that order); `ExternalStatus.policy_arms` above. `RUNTIME_INPUTS` /
+`POLICY_OUTPUTS` are untouched — the per-arm ids are rendered from the workcell. runtime:
+`dora_bridge/dataflow.py` `render_dataflow(…, arm_ids)` / `policy_outputs(arm_ids)` (§2.3);
+`ExternalPolicyHub(arm_ids=…)` registers `policy_action_<arm>` per configured arm and exposes
+`policy_arms(now)`; `resolve_driven_arms` / `action_block_layout` / `arm_blocks` /
+`infer_policy_arms` / `DrivenArmsError`; `ExternalPolicySource(driven_arms=…)` with one
+`_ArmSlot` per driven arm, `driven_arms()`, per-arm `staleness_scale`; `dagger/policy_source.py`
+Protocol += `driven_arms()`, `staleness_scale(now, arm_id=None)`; `dagger/loop.py`
+`_driven_arms` / `_drives` / `_driven_finite`; `dagger/step.py::policy_step` (per-arm hold,
+`staleness_of`); `session/manager.py::_build_external_policy_stack` (space → driven arms →
+per-DRIVEN-arm frame check, §6.1); `DoraWiring` passes the workcell's arms to the bridge's
+outputs and the hub and `external_status` fills `policy_arms`; `dora_bridge/nodes/
+fake_policy.py --arms`; the `mavis-online-dagger-trainer` skill's `SKILL.md` /
+`references/contract.md` name the per-arm outputs (mirrored in the policy-node repo; the
+runtime test enforces the mirror). ui (05-ui): `components/externalPolicy.tsx`
+`drivenArmsLabel` (Manipulation Arm first, user-facing names) feeds the LaunchSheet's
+external-policy row (`externalPolicySummary`: `act_pick_place v3 · 10 Hz · drives:
+Manipulation Arm`), the InferencePanel's `drives: …` caption and the chip tooltip; a runtime
+predating the field renders `""`. Both contract goldens: **3698 B / `4dc67e12…997d` →
+3826 B / `0f63e81d…03df`**, byte-identical — `policy_spec_model_fields` gains `arms`,
+`action_frames` after `version`; two NEW keys appended last, `arm_action_output_prefix:
+"action_"` and `policy_arm_action_input_prefix: "policy_action_"`; `runtime_inputs`,
+`policy_outputs` and `session_announce_fields` unchanged (v1.3 adds nothing to
+`SessionAnnounce`).
 
 **hardware (02-hardware §8, §4):** `RealSenseCamera` enables the depth stream +
 `rs.align` when `CameraConfig.depth` (FakeSDK coverage); `~2 ms/frame` align
@@ -1689,6 +1884,120 @@ Its own implementation record — deviations, the e2e `tests/dora_bridge/
 test_e2e_online_dagger.py` (3 tests, 30.9–32.3 s on the private control plane), the refusal
 strings, `session.json`, open items — is `15-online-dagger.md` §12; the morning's PRO-DAgger
 v1.0 record is `15-pro-dagger.md` §15 (history only, never shipped).
+
+### 16.6 v1.4 — `abs_ee` from an external policy (2026-09-11)
+
+Implemented in the runtime (`dora_bridge/policy_source.py`, `session/manager.py::
+_build_policy_stack`, `dagger/step.py`) and mirrored in the fake node
+(`--action-space abs_ee`: announces the 11 / 10-dim blocks and HOLDS the observed TCP
+of `obs_state` as r6 + the observed gripper / rail, never a zero row) and the policy-node
+repo (`ReplayPolicy --action-space delta_ee|abs_ee` reads `action.abs_ee` or derives it
+from frame 0; `FakePolicy FAKE_ACTION_SPACE=abs_ee`; the node accepts `abs_ee` against a
+`delta_ee` announce). Facts: `SessionAnnounce.action_space` stays `delta_ee`
+(unchanged wire — **v1.4 adds nothing to the contract goldens**; the working tree's golden
+diff against the committed v1.2 file is v1.3's per-arm stream fields only: `PolicySpecAnnounce.
+spec.arms` / `action_frames`, `arm_action_output_prefix: "action_"`,
+`policy_arm_action_input_prefix: "policy_action_"` — runtime and policy-node copies stay
+byte-identical and tested); the per-arm
+block width, the `action_dim` check and the `resolve_driven_arms` mapping follow the
+NODE's announced space (§5, §6.1); abs rows are never rescaled (§6.2); the executor's
+counterfactual converts an abs row to the recorded delta width (12-dagger §4). Tests:
+`tests/dora_bridge/test_policy_source.py` (`test_abs_ee_rows_pass_verbatim_and_the_
+block_width_is_the_abs_layout`, `test_resolve_driven_arms_for_an_abs_ee_spec_uses_the_
+abs_blocks`), `tests/dagger/test_executor.py` (the abs deadline / counterfactual /
+staleness / handback-window cases), `tests/dora_bridge/test_import_confinement.py`
+unchanged. Measured only in sim: the dev script `scripts/dev/replay_dryrun.py
+--action-space {delta_ee,abs_ee} [--save-frames]` drives a recorded episode through the
+node and reports the abs fidelity metrics; the first numbers are in 04-runtime §10.8.
+Not run on the real arms; hardware still refuses `dagger` (D7).
+
+### 16.7 v1.3 — per-arm action streams (2026-09-11; implemented BEFORE v1.4 the same day, written up after it)
+
+**What.** A policy node may drive a SUBSET of the cell's arms and publish per arm. Wire:
+`action_<arm_id>` (policy output) ↔ `policy_action_<arm_id>` (runtime input), one pair per
+CONFIGURED arm, rendered from the workcell like `cam_<id>` (§2.3, §5); `PolicySpecModel.arms`
+(the arms the policy DRIVES; `[]` = every session arm, the v1.2 meaning of a whole-cell
+`action_names`) and `PolicySpecModel.action_frames` (per-arm FrameRef, checked for driven arms
+only) appended last; `ExternalStatus.policy_arms` appended last. Everything additive:
+`mavis_schema` 1, `policy_action` not deprecated, `SessionAnnounce` untouched. The motivating
+case is the cell's own: a policy trained on the Manipulation Arm's block of the recorded
+datasets drives `grip` while the Perception Arm stays where the operator parked it ("a fancy
+tripod", §7) — and, as a side effect, a whole-cell TWO-arm policy became launchable at all,
+because the frame check is now per driven arm (§6.1 step 2).
+
+**Runtime.** `dora_bridge/policy_source.py`: `ExternalPolicyHub(arm_ids=…)` registers one
+`policy_action_<arm>` input per configured arm (`_on_arm_action`) beside `policy_action`, and
+`policy_arms()` (declared `arms`, else the `<arm_id>_` prefixes of `action_names` —
+`infer_policy_arms`) feeds `ExternalStatus.policy_arms` outside a session; `resolve_driven_arms`
+/ `action_block_layout` / `arm_blocks` (§6.1 step 2 — blocks by NAME prefix, any order,
+session-order result, `DrivenArmsError` → 409); `ExternalPolicySource(driven_arms=…)` keeps ONE
+`_ArmSlot` (rows, `t0`, `chunk_dt`) per driven arm — a per-arm message fills its slot, the
+whole-cell `policy_action` is split by `action_block_layout` into the driven slots — and
+`latest()` composes the SESSION layout with each driven arm's current row rescaled by ITS
+`chunk_dt` (mask per space, §6.2) and NaN for every undriven arm; `staleness_scale(now,
+arm_id)` per arm, the minimum over the driven arms without (§6.3). `dagger/policy_source.py`
+(`PolicySource` Protocol): `driven_arms()`, `staleness_scale(now, arm_id=None)`;
+`PolicyRunner.driven_arms()` is `None`. `dagger/loop.py`: `_driven_arms` / `_drives` /
+`_driven_finite` (NaN strikes on DRIVEN blocks only); `dagger/step.py::policy_step` holds an arm
+with a missing / short / non-finite block and asks staleness per arm (`staleness_of`).
+`session/manager.py::_build_external_policy_stack`: space → `resolve_driven_arms` → the
+per-DRIVEN-arm frame check → `state_names ⊆ session`, then `ExternalPolicySource(…,
+driven_arms=driven)` and the INFO line `external policy <id> drives ['grip']; ['view'] hold`.
+`dora_bridge/dataflow.py`: `render_dataflow(…, arm_ids)` / `policy_outputs(arm_ids)`;
+`DoraWiring` hands the workcell's arms to `bridge.set_outputs` and the hub;
+`DoraWiring.external_status` fills `policy_arms`. Fake node `--arms grip[,view]`: announces
+`arms`, the restricted `action_names` (session order) and `action_frames` from the session's
+per-arm frames, publishes every action on `action_<arm_id>` with an `arm_id` key, counts
+`per_arm_actions` and `mic_blocks` (§6.2).
+
+**Policy node** (`~/projects/apollo-mavis-v2-ws-p12/apollo-mavis-v2-policy-node`, in its
+working tree on 2026-09-11, not yet committed there): `contract.py` carries the two prefixes +
+the four helpers; `--arms` selects the driven arms; `node.py` publishes `action_<arm_id>` per
+driven arm when the RUNNING dataflow declares those outputs and falls back to the whole-cell
+`action` otherwise (`arm_actions_sent` / `arm_action_fallbacks`); the replay loader of the dry
+run (`scripts/dev/replay_dryrun.py`, §16.6) drives the Manipulation Arm over `action_grip`.
+
+**UI** (05-ui): `components/externalPolicy.tsx` `drivenArmsLabel` (Manipulation Arm first,
+user-facing names) → the LaunchSheet's external-policy row `act_pick_place v3 · 10 Hz ·
+drives: Manipulation Arm` (`externalPolicySummary`), the InferencePanel's `drives: …` caption
+(`data-testid="inference-drives"`) and the chip tooltip; a runtime predating the field (no
+`policy_arms`) renders `""` (`externalPolicy.test.tsx`).
+
+**Contract goldens.** `tests/dora_bridge/golden/contract_golden.json` and the policy-node
+`tests/golden/contract_golden.json`: **3698 B / sha256 `4dc67e12…997d` → 3826 B / sha256
+`0f63e81d…03df`**, byte-identical, both tested. Diff against the v1.2 file:
+`policy_spec_model_fields` gains `arms`, `action_frames` (after `version`); two NEW keys
+appended last — `arm_action_output_prefix: "action_"` and `policy_arm_action_input_prefix:
+"policy_action_"`. `runtime_inputs` / `policy_outputs` are UNCHANGED (the per-arm ids are
+rendered from the workcell, so the golden pins the prefixes, not the ids);
+`session_announce_fields` unchanged. The committed example dataflow gained the inputs
+`policy_action_view` / `policy_action_grip`, the policy outputs `action_view, action_grip` and
+the policy input `mic_mic_view` (workcell order `view`, `grip`). v1.4 (§16.6) added nothing
+on top of this.
+
+**Tests.** Unit (`tests/dora_bridge/test_policy_source.py`): `test_resolve_driven_arms_
+subset_inference_and_refusals`, `test_action_block_layout_maps_blocks_by_name_in_announced_
+order`, `test_infer_policy_arms_from_declaration_or_prefixes`, `test_hub_registers_one_
+input_per_configured_arm_and_reports_policy_arms`, `test_grip_only_policy_holds_the_view_
+arm_and_accepts_both_stream_shapes`, `test_two_driven_arms_have_independent_slots_and_
+staleness`; `test_dataflow.py` (per-arm rows, the v1.2 shape without arm ids, `dora validate
+--strict-types`). Sim e2e `tests/dora_bridge/test_e2e_per_arm_policy.py` (4 tests, REAL server
++ REAL control plane; §10 item 4e). The abs-space variants (`test_abs_ee_rows_pass_verbatim_
+and_the_block_width_is_the_abs_layout`, `test_resolve_driven_arms_for_an_abs_ee_spec_uses_
+the_abs_blocks`) are v1.4's (§16.6).
+
+**Facts worth saying out loud.** (1) The whole-cell `action` of a subset policy is
+`len(spec.action_names)` wide — the DRIVEN blocks only, never the session layout (15 on a
+grip-only `delta_ee` policy is `action_dim 15 != 8`, dropped). (2) `policy_stale` is the
+MINIMUM over the driven arms: a two-arm policy that has fed one stream only reads stale until
+the other's first row. (3) `PolicySpecModel.arms`' core comment says "session order"; the
+runtime accepts ANY order (`action_block_layout`) — session order is the recommendation, not
+the rule, because a node announces before it can know the session's order. (4) The idle
+announce lists the arms in WORKCELL order (`view`, `grip`) and a running session in
+`SessionSpec.arms` order (`grip`, `view` for the recorded datasets); the fake node commits to
+the FIRST order it sees, the runtime does not care (blocks by name). (5) Not run on the real
+arms: hardware sessions still admit teleop and collect only (D7, `409 hardware sessions
+support teleop and data collection only`).
 
 ## Appendix A — v2 candidates: external viewpoint-command surface (removed from v1)
 

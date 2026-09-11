@@ -62,15 +62,30 @@ Core is m/rad/quat-wxyz; the SDK is mm + rad (always construct
 happens exactly once, here; nothing else multiplies by 1000. Joints/torques
 pass through (rad, N·m). Quat↔RPY helpers come from
 `apollo_mavis_v2_core.se3`; this module fixes convention and scaling (RPY =
-intrinsic XYZ per `core.se3.rpy_to_quat` — equivalently extrinsic ZYX — the
-xArm firmware convention).
+**extrinsic XYZ, `R = Rz(yaw)·Ry(pitch)·Rx(roll)`** — equivalently intrinsic ZYX —
+the xArm firmware convention, verified 2026-09-11 against 15 hardware episodes: FK
+of the recorded joints and the controller's reported RPY agree to 0.0001°. Before
+that date `core.se3.rpy_to_quat` composed `Rx·Ry·Rz`, which is
+wrong for any pose with two non-zero angles; only the read side was affected —
+the driver sends no Cartesian commands).
+
+The controller reports the **flange** (`tcp_offset` is zero on both boxes).
+`sdk_to_pose` / `pose_to_sdk` stay the pure unit + RPY converters (flange in,
+flange out); `sdk_to_tcp_pose(p, gripper=...)` composes `core.se3.flange_to_tcp`
+on top — `(Rz(π), Trans(0, 0, 0.172))` for a gripper arm (the xArm Gripper base is
+mounted 180° about tool z under link7, MJCF `xarm_gripper_base_link`
+`quat="0 0 0 1"`), identity for a gripper-less arm whose `link_tcp` IS the
+flange — and returns the twin's `link_tcp` pose, which is what `ArmState.ee_pose`
+carries (10-frames §2.4).
 
 ```python
 GRIPPER_PULSE_MAX = 850; GRIPPER_G2_MM_MAX = 84.0; RAIL_MM_MAX = 650
 
 def m_to_mm(x: float) -> float: ...           # + mm_to_m
-def pose_to_sdk(pose: Pose) -> list[float]:   # (m, wxyz) -> [x_mm,y_mm,z_mm,r,p,y rad]
-def sdk_to_pose(p: Sequence[float]) -> Pose:  # inverse; quat normalized, w >= 0
+def pose_to_sdk(pose: Pose) -> list[float]:   # (m, wxyz) -> [x_mm,y_mm,z_mm,r,p,y rad]; FLANGE
+def sdk_to_pose(p: Sequence[float]) -> Pose:  # inverse; quat normalized, w >= 0; FLANGE
+def sdk_to_tcp_pose(p, *, gripper: bool) -> Pose:      # flange SDK -> twin link_tcp
+    # = se3.flange_to_tcp(sdk_to_pose(p), gripper=gripper); + tcp_pose_to_sdk inverse
 def frac_to_pulse(f: float) -> int:           # [0,1] open frac -> pulses [0,850]; + inverse
 def frac_to_g2_mm(f: float) -> float:         # [0,1] -> [0, 84.0] mm; + inverse
 def rail_m_to_mm(x: float) -> int:            # m -> abs int mm, clamped [0, 650]; + inverse
@@ -301,7 +316,10 @@ the Studio-conflict detector latch every arm ~1.2 s after connect; fixed
 
 Swap-in is one reference assignment (GIL-atomic); `get_state()` never
 blocks: it assembles `ArmState` — `q`/`dq` (+ rail slot from
-`RailController.pos_m`; rail dq = 0.0), `ee_pose = units.sdk_to_pose(...)`,
+`RailController.pos_m`; rail dq = 0.0), `ee_pose = units.sdk_to_tcp_pose(...,
+gripper=(cfg.gripper != "none"))` — the wire carries the FLANGE, `ArmState.ee_pose`
+is the twin's `link_tcp` = flange ⊕ (Rz(π), +0.172 m along tool z) on a gripper arm
+(2026-09-11; before that the raw flange was published as the TCP),
 gripper state from the backend cache, `error_code`/`warn_code` from the
 monitor cache (**30003 carries no err/warn**), `mode`, `stale`, `ts`.
 **Staleness**: `monotonic() - mono_ts > 0.15 s` (15 missed frames) →
@@ -623,6 +641,7 @@ reduced-mode calls when no boundary is configured):
 torque-estimate based, wrong payload = false pos/negatives;
 (2) `set_collision_sensitivity(cfg.collision_sensitivity)` — volatile,
 re-applied every connect; never `save_conf()` (controllers stay config-clean);
+the operator may OVERRIDE this one at run time (below);
 (3) `set_self_collision_detection(True)` + `set_collision_tool_model(1)`
 classic / `(9)` G2 / `(0)` none;
 (4) optional reduced mode (off by default): `set_reduced_tcp_boundary(mm)`,
@@ -639,6 +658,50 @@ back; the monitor (§8.5, SDK default `report_type='rich'`) reports them every
 slow round as `collision_sensitivity`, `tcp_load_kg`, `tcp_load_cog_mm`, and
 the runtime compares them with the config (`backstops_match`). The values are
 volatile: a controller reboot drops them, the next connect re-applies them.
+
+**Operator override of the collision sensitivity (2026-09-11, operator
+decision).** `set_collision_sensitivity(api, level, codes=None) -> list[str]`
+is the level override: exactly ONE write, `api.set_collision_sensitivity(level,
+wait=False)` — the step-(2) call with the operator's level instead of
+`cfg.collision_sensitivity` — recorded under `"set_collision_sensitivity"` in
+`codes`, a non-zero code returned as the one warning string. `level` must be in
+`COLLISION_SENSITIVITY_LEVELS = {1, 2, 3}` (`ValueError` otherwise; 0 turns
+detection off, 4 / 5 false-trigger under payload — the monitor, the driver and
+core's `ArmMaintenanceRequest` all refuse the rest first). Two callers, one
+helper: the session-less monitor op `set_collision_sensitivity` (§8.6, the
+Hardware-tab arm card) and, inside a session, `XArmDriver.
+request_set_collision_sensitivity(level)` (the Cockpit control): flagged under
+`_phase_lock` like `request_recovery`, consumed by the 5 Hz `_MonitorThread.
+step()` (step 0b, after a pending recovery), the outcome published as
+`SettingResult(seq, ok, code, level, t_mono, detail)` via
+`XArmDriver.setting_result()` / `HardwareWorkcell.setting_result(arm_id)`
+(`HardwareWorkcell.request_set_collision_sensitivity(arm_id, level)` is the
+sibling channel of `request_recovery`, so the runtime's wrapped workcell
+forwards it unchanged). The driver never touches its phase, budget or streamer
+for it, and it cannot read the value back (§6 read-back: the `real` 30003 stream
+carries no sensitivity) — so `ok` there means the SDK accepted the write: code 0,
+or a **status echo** (`STATUS_ECHO_CODES` 1 / 2 / 9, now defined in
+`backstops.py` and imported by both `monitor.py` and `driver.py`) with `detail`
+saying so; the read-only monitor verifies the value the next time it holds the
+box. **The override is as volatile as the rest: the config value (3 on both lab
+arms) is re-applied at EVERY connect by `apply_backstops`**, which is the
+operator's chosen default — lower it to 2 / 1 for a task (the fridge door's
+C31, §3.5 / §16), and a fresh session starts from 3 again; the UI shows the
+controller's read-back, never the value it asked for.
+
+SDK 1.18.5 facts behind both callers (`x3/xarm.py:955-964`, verified
+2026-09-11): `set_collision_sensitivity(value, wait=True)` IGNORES `wait` — it
+first runs `wait_move()` (`base.py:2508`: returns at once when `mode != 0`, i.e.
+for the session driver's servo mode 1, and when an error is latched; on a
+stopped mode-0 arm it polls `get_state` ~10 times, ≤ 0.5 s — the monitor path),
+then `set_collis_sens(value)`, then an unconditional `set_state(0)`, and returns
+the RAW uxbus code without `_check_code` (hence the status echoes). None of it
+commands motion: `set_state(0)` is idempotent for a streaming arm, refused by the
+controller while an error is latched, and on a user-stopped arm (state 4, no
+error) it only re-arms the state machine — no servo command follows because the
+streamer is paused and the driver phase does not change. It is the same call
+`apply_backstops` has always issued session-less (measured 2026-09-04: no joint
+moved).
 
 ## 7. netsetup module (`netsetup/`)
 
@@ -918,7 +981,8 @@ ArmMonitorStatus = Literal["off", "connecting", "running", "stale", "paused", "e
 class ArmMonitorSample:            # data part of core ArmMonitorTelemetry + t_mono
     arm_id: str; seq: int; t_mono: float
     q: tuple[float, ...]           # 7 rad, controller order (identity to the twin)
-    tcp_pose: tuple[float, ...]    # [x, y, z m, roll, pitch, yaw rad], flange (tcp_offset 0)
+    tcp_pose: tuple[float, ...]    # [x, y, z m, roll, pitch, yaw rad], FLANGE (tcp_offset 0;
+                                   #   RPY extrinsic XYZ; the TCP = ArmState.ee_pose, not this)
     error_code: int = 0; warn_code: int = 0
     state: int | None = None; mode: int | None = None
     rail_present: bool | None; rail_homed: bool | None; rail_enabled: bool | None
@@ -1017,7 +1081,8 @@ class ArmStateMonitor:
 ## 8.6 Maintenance channel (`ArmStateMonitor.maintenance`, phase-09b)
 
 Operator-triggered, session-less controller maintenance for the UI's Hardware
-tab ("Clear errors", "Apply safety settings", "Home rail"). Design rules: (a)
+tab ("Clear errors", "Apply safety settings", "Home rail", the collision-
+sensitivity dropdown). Design rules: (a)
 **nothing moves except `home_rail`** — `clear_errors` never enables (brakes
 stay engaged; measured 2026-09-04: `clean_error()` on the Perception Arm
 cleared C19 with ≤ 5e-5 rad joint change), enabling + servo mode (`recover`) is
@@ -1030,20 +1095,25 @@ executed by the poll thread between polls, the caller only waits; (c)
 sample right before and right after the operation.
 
 ```python
-MaintenanceOp = Literal["clear_errors", "apply_backstops", "recover", "home_rail"]
+MaintenanceOp = Literal["clear_errors", "apply_backstops", "recover", "home_rail",
+                        "set_collision_sensitivity"]                    # 2026-09-11
 MAINTENANCE_SDK_METHODS = {
     "clear_errors":    {"clean_error", "clean_warn"},          # in that order
     "apply_backstops": set(backstops.BACKSTOP_SDK_METHODS),   # §6 order, cfg-dependent
     "recover":         set(),                                  # refused: needs a session
     "home_rail":       {"set_linear_track_back_origin",       # MOTION: carriage -> zero end
                         "set_linear_track_enable", "set_linear_track_speed"},  # no motion_enable
+    "set_collision_sensitivity": {"set_collision_sensitivity"},  # ONE write, the operator's
+                                                                  #   level 1..3; no motion
 }
 DEFAULT_MAINTENANCE_TIMEOUT_S = 10.0; HOME_RAIL_SDK_WAIT_S = 30.0
 HOME_RAIL_TIMEOUT_S = 45.0; HOME_RAIL_Q_TOL_RAD = 0.02
 
 def maintenance(self, op, driver_cfg=None, timeout_s=None, *,
-                expected_q=None, q_tol_rad=HOME_RAIL_Q_TOL_RAD) -> MaintenanceOutcome
+                expected_q=None, q_tol_rad=HOME_RAIL_Q_TOL_RAD,
+                level=None) -> MaintenanceOutcome
     # timeout_s None -> per-op default (10 s; 45 s for home_rail)
+    # level: set_collision_sensitivity only - 1 / 2 / 3, refused (ok=False) otherwise
 
 @dataclass(frozen=True)
 class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtime adds path)
@@ -1080,6 +1150,21 @@ class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtim
   ones; `detail` = "safety settings applied: sensitivity 3, payload 0.95 kg at
   (0, 0, 60) mm" [+ ", reduced-mode boundary on"], with a read-back note if the
   frame has not caught up yet).
+  `set_collision_sensitivity` (2026-09-11) — one write
+  (`backstops.set_collision_sensitivity(api, level, codes)`), then the same
+  `_settle_backstops` wait generalised to a target level (`sensitivity=level`:
+  the rich frame must echo that level; the payload is not part of this op), then
+  the after-sample. **Judged from the read-back**: `ok` iff
+  `after.collision_sensitivity == level`; the SDK code is diagnosis and — this
+  call returns the RAW reply too (`x3/xarm.py:964`) — a `STATUS_ECHO_CODES` echo
+  is not a failure ("… (set_collision_sensitivity returned 1: status echo, value
+  verified by read-back)"), any other non-zero code is. `detail` = "collision
+  sensitivity set to 2 (was 3; the config value 3 is re-applied at the next
+  connect)" (`driver_cfg` is optional here and only names that config value);
+  not ok = "collision sensitivity still reads 3 after writing 2" or, when a
+  hand-over pre-empted the read-back, "collision sensitivity 2 written but not
+  verified". The write set is exactly `{"set_collision_sensitivity"}`; nothing is
+  enabled, nothing moves (§6 on the SDK's internal `wait_move` / `set_state(0)`).
 - **`home_rail` (phase-09c) — the one motion op.** Request: `driver_cfg`
   (`rail_speed_mm_s`) + `expected_q` (the 7 joint angles the runtime's twin
   sweep was checked at; `q_tol_rad` default 0.02). Before-sample → refuse with
@@ -1118,6 +1203,9 @@ class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtim
   disconnects mid-homing. Homing duration on the lab tracks is unmeasured; the
   track's own homing speed register has no public SDK setter (out of scope).
 - **Refusals** (`ok=False`, no SDK call): `recover` ("recover needs a session");
+  `set_collision_sensitivity` with `level` None / not an int / outside 1..3
+  ("set_collision_sensitivity needs a level of 1, 2 or 3 (got 4); 0 turns
+  detection off and 4 / 5 false-trigger under payload");
   `apply_backstops` / `home_rail` without a `driver_cfg`; `home_rail` without a
   7-vector `expected_q`, with `q_tol_rad <= 0`, or on a monitor that does not
   poll a rail; monitor `off` / `paused` / `connecting` / `error` ("not connected
@@ -1349,7 +1437,11 @@ u32 size prefix, little-endian f32 payload) at configurable rate, plus
 Tests: SDK-parser integration (snapshot equals frames); staleness (pause
 200 ms → `stale` flips at 0.15 s + event, recovers on resume); dq EMA vs
 scripted trajectory; fuzz (truncated/torn/garbage — resync or flag, never
-crash). One live capture pins `sdk_to_pose` against Studio ground truth.
+crash); `test_state_snapshot_carries_frame_values_in_meters` pins the wire flange
+`[300, -50, 220, π, 0, 0]` → `ArmState.ee_pose` = the TCP `(0.3, -0.05, 0.048)` /
+`Ry(π)` and recovers the flange through `se3.tcp_to_flange`. `test_units.py` pins
+the RPY composition numerically (`Rz·Ry·Rx` for `(0.4, 0.5, -0.6)`, and that the
+old `Rx·Ry·Rz` differs) and `sdk_to_tcp_pose` for both gripper kinds.
 
 **netsetup**: everything runs through the injected `NmcliRunner`; tests use
 a `TranscriptRunner` matching argv against transcripts in `fixtures/nmcli/`
