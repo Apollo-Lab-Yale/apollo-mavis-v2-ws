@@ -400,10 +400,16 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   replay; verdict = TCP residual 5 mm / 0.02 rad after settling; 04-runtime §10.8).
 - **Collision sensitivity dropdown (1 / 2 / 3)** on the Hardware-tab arm card and in the
   Cockpit (see the C31 note below); default 3 from config at every connect.
-- Recorded so far: the 15 developer-mirror episodes in `~/data/bc_demo/drawer_assembling`
-  are backfilled; the production copies under `/home/mavis-v2/data/bc_demo/`
-  (drawer 51, cabinet 50, lamp 5 as of 2026-09-11 04:12) are backfilled by the deploy
-  step of the same day (update this line when it lands).
+- **Deployed and backfilled 2026-09-11 (~11:05 UTC):** the shared account's checkout is at
+  ws `ba9baec` (update.sh: venvs re-synced, UI rebuilt, config re-rendered); all 106
+  production episodes under `/home/mavis-v2/data/bc_demo/` (drawer 51, cabinet 50,
+  lamp 5) and the 15 developer-mirror episodes in `~/data/bc_demo/drawer_assembling`
+  are backfilled (backups `<dataset>/backups/20260911T11*Z/`, exports marked stale;
+  the Manipulation Arm's `ee.*` moved 172 mm, the Perception Arm's orientation was
+  recomputed). `GET .../playback` on a production episode lists `sources
+  [state, delta_ee, abs_ee]`. The runtime restarted as PID 633345; healthcheck OK
+  except the libsurvive tracker line (dongle busy after the restart — see the tracker
+  notes; not caused by this change).
 
 ## Work in progress (2026-09-09)
 
