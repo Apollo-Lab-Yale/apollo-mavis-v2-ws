@@ -82,8 +82,8 @@ for repo in "$CORE_DIR" "$SIM_DIR" "$HARDWARE_DIR"; do
   # xarm-python-sdk git pin.
   (cd "$repo" && run uv sync --locked "${DEV_FLAG[@]}")
 done
-log "uv sync apollo-mavis-v2-runtime (sim + hardware + audio extras; ~5 GB of torch/CUDA wheels on first run)"
-(cd "$RUNTIME_DIR" && run uv sync --locked "${DEV_FLAG[@]}" --extra sim --extra hardware --extra audio)
+log "uv sync apollo-mavis-v2-runtime (sim + hardware + audio + dora extras; ~5 GB of torch/CUDA wheels on first run)"
+(cd "$RUNTIME_DIR" && run uv sync --locked "${DEV_FLAG[@]}" --extra sim --extra hardware --extra audio --extra dora)
 
 # --- pysurvive (OUT of uv.lock: every plain `uv sync` above removes it) ------------------
 log "pysurvive (libsurvive Python bindings, self-contained wheel)"
