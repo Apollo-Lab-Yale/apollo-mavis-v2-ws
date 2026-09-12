@@ -4,7 +4,9 @@ Status: **v1.4 (2026-09-11) — the external policy may act in `delta_ee` OR `ab
 `SessionAnnounce.action_space` stays `delta_ee`, the recorded canonical; §5 the `action_dim`
 rule follows the NODE's announced layout; §6.1 step 2 accepts both spaces and checks
 `action_names` against the announced space's block widths — 8 / 7 vs 11 / 10; §6.2 abs rows
-pass through verbatim, no `chunk_dt` rescale; §16.6 record).** **v1.3 (2026-09-11, implemented
+pass through verbatim, no `chunk_dt` rescale; §16.6 record). Both spaces have now driven the
+REAL arms (§16.8, 2026-09-12): `abs_ee` to 5.0 mm / 11.7 mrad, `delta_ee` with an OPEN
+hardware-only rotation drift — prefer `abs_ee` on the cell.** **v1.3 (2026-09-11, implemented
 before v1.4 the same day, written up the same evening) — per-arm action streams.** The policy
 node may publish `action_<arm_id>` per arm instead of (or beside) the whole-cell `action`;
 `PolicySpecModel.arms` names the arms a policy DRIVES and `action_frames` gives each its
@@ -2035,6 +2037,78 @@ arms: hardware sessions admitted teleop and collect only (D7, `409 hardware sess
 support teleop and data collection only`) until 2026-09-12 — since then dagger / inference
 are admitted behind `hardware_session.policy_modes` (15-online-dagger D7 as amended), still
 unverified live.
+
+### 16.8 First policy-driven motion on the REAL arms (2026-09-12)
+
+**What ran.** The `--loader replay` node of §16.6 attached as the `policy` placeholder on the
+LAB control plane (`daemon_port` 53391) and drove the Manipulation Arm over `action_grip`
+inside a `mode: inference`, `kind: hardware`, `policy_source: external` session — the first
+policy-driven motion of the real cell (D7 as amended, admitted behind
+`hardware_session.policy_modes`; 15-online-dagger §12). Episode
+`bc_demo/lamp_assembling/20260911T214721.850Z-7b6028` (425 frames @ 25 fps, 17.0 s, native
+`action.abs_ee`, recorded FROM the "2026-09-09 FurnitureBench" profile whose stored posture
+equals frame 0 to 1e-6 rad, Perception Arm motionless throughout, carriage fixed at 0.636 m),
+`start_from: profile:e2d42f3418b74418b6d0db89e5add5ed`, `--arms grip`, the Perception Arm
+holding. Runs under `var/dryrun-inference/runs/20260912T04*-hardware-*`.
+
+**Numbers** (`speed_scale` 0.6, node `--speed` 0.5, `--rate-hz` 15; TCP error of the measured
+pose against the recorded one):
+
+| space | pos rms / max / final | rot rms / final | rotation from frame 0 | late / dropped |
+| --- | --- | --- | --- | --- |
+| `abs_ee` | 5.0 / 23.2 / **0.0** mm | 11.7 / **0.01** mrad | 47–48 mrad (recorded 45) | 0 / 0 |
+| `delta_ee` | 4.1 / 7.8 / 3.3 mm | **195 / 180** mrad | **267 mrad** (recorded 45) | 0 / 0 |
+
+Every run: 100 Hz loop, 0 overruns, `gate=ok` and `held=[]` throughout, `ik_slips` 0,
+`ik_diverged` 0, no controller fault, `abs_ee` reproducible across two runs (5.0 / 5.1 mm).
+
+**The publish rate must scale WITH `speed_scale` — a REPLAY-only constraint.** The runtime
+spreads one `delta_ee` row over one ANNOUNCED period (`period = 1/ann.rate_hz`, §6.2 +
+`ActionAnchor.row_step`), so the per-tick joint demand is `row × rate_hz/100` against a cap of
+`dq_max × speed_scale`. The recording used 0.74 of the cap at `speed_scale` 1.0 and 25 fps, so
+the faithful relation is `rate_hz ≈ fps × speed_scale` with node `--speed ≈ speed_scale`.
+Measured in sim on this episode at `speed_scale` 0.1: `--rate-hz` 30 → **159 mm** pos rms,
+`--rate-hz` 3 → **14.7 mm** (the residual is §16.6's twin servo bandwidth). **`--chunk-dt-s`
+is not this knob**: for `delta_ee` the runtime rescales each row by `period/chunk_dt`, so a
+dishonest value multiplies total travel by `1/(rate × chunk_dt)`; for `abs_ee` it never enters
+the path. The constraint does NOT apply to a trained policy: a replay is open-loop in time
+(frame `k` advances on a clock, so unachieved motion piles up) while a policy reads
+`obs_state` and acts from the MEASURED pose. A policy needs only an honest `rate_hz` (and
+`chunk_dt_s` when one row is worth more than one period — a 25 fps-trained delta row published
+at 30 Hz otherwise runs 20 % fast).
+
+**`abs_ee` is robust to a reduced `speed_scale`; `delta_ee` is not.** An absolute waypoint keeps
+converging when a cap delays the arm; a clipped `delta_ee` row is dropped forever because the
+next tick anchors on `FK(q_last)` — the already cap- and gate-clipped command — with no
+absolute reference anywhere in the loop. Hence the table's rotation column: an OPEN
+`delta_ee` rotation defect, **hardware-only** (sim 18.8 mrad on the same episode). It is a
+smooth DRIFT, not a jump — the largest single-observation change is 9.1 mrad (mean 1.3), zero
+steps above 20 mrad, accumulating to 267 mrad where the recording rotated 45; `abs_ee` on the
+same trajectory stays bounded at 42 mrad and returns to 0. Final per-joint deviation is
+concentrated in the wrist (J7 0.196 rad) where the recording performed a null-space
+re-configuration the TCP-delta stream cannot convey. **Prefer `abs_ee` on the real arms and
+never lower `speed_scale` on a `delta_ee` policy** until this is fixed.
+
+**Driver fix (`scripts/dev/replay_dryrun.py`).** The script waited 30 s for
+`state == "running"`, but `POST /api/session` returns after BRING-UP and a
+`start_from: profile:<id>` motion then runs in the background (`SessionState.START_FROM`,
+progress in `telemetry.session.start_from_progress`; 04-runtime §5), planned and gated one arm
+at a time — minutes at a reduced `speed_scale`. On 2026-09-12 03:02 the old budget expired
+mid-motion and the `finally` teardown logged `start_from cancelled: session teardown -
+Manipulation Arm; Perception Arm not moved`, leaving the arm parked half-way to the profile.
+It now waits on the STATE (`bringup` / `start_from` are progress, anything else aborts at once)
+with `--start-timeout-s` (default 420) and prints the per-arm bring-up rows; `--chunk-dt-s` is
+passed through for completeness with the warning above.
+
+**Not reproduced: the grasp.** The recorded grasp squeezes the lamp shade's narrow end from
+OUTSIDE — the command asks for 15.5 mm (`gripper.pos` is ABSOLUTE, `frac × units.
+GRIPPER_G2_MM_MAX` 84.0) and the fingers stall at **59.0 mm** for 10.5 s. Every replay closed
+to 14–15 mm, i.e. on air: the shade sat **22.6 mm** from its recorded pose (the bulb's base
+12.6 mm), measured with `var/dryrun-inference/align_shade.py`, which compares one live
+`view_wrist` MJPEG frame against frame 0 of the recorded video — valid with ZERO motion
+because the Perception Arm never moves in this episode. So the gripper channel is verified
+(commanded 15.5 mm, reached 15.0 mm) and the grasp is a scene-placement matter, not a wire or
+executor one. A successful replayed grasp reads as a stall near 59 mm.
 
 ## Appendix A — v2 candidates: external viewpoint-command surface (removed from v1)
 

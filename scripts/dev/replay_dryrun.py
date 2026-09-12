@@ -18,7 +18,8 @@ saves one decoded RGB frame per camera and the depth frame (if any) as PNG into 
         [--dataset bc_demo/drawer_assembling] [--arms grip] [--mode step|chunk] \
         [--action-space delta_ee|abs_ee] [--timeline dense|wallclock] [--speed 1.0] \
         [--rate-hz 30] [--url http://127.0.0.1:8866] [--node-bin .../mavis-policy-node] \
-        [--out DIR]
+        [--kind sim|hardware] [--speed-scale 0.1] [--start-from profile:<id>] \
+        [--node-path <episode dir>] [--start-timeout-s 420] [--out DIR]
 
 Prerequisites: a runtime with the dora bridge ON (the private sim instance of
 `var/dryrun-inference/mavis_v2_dryrun.yaml`, never the production one on :8765) and the
@@ -59,6 +60,16 @@ def parse() -> argparse.Namespace:
     p.add_argument("--timeline", default="dense", choices=["dense", "wallclock"])
     p.add_argument("--speed", type=float, default=1.0)
     p.add_argument("--rate-hz", type=float, default=30.0)
+    p.add_argument("--chunk-dt-s", type=float, default=None,
+                   help="the period the node ANNOUNCES per step row (node default 1/rate_hz). "
+                        "This is the knob that makes a replay fit under a reduced `speed_scale`: "
+                        "the runtime spreads one `delta_ee` row over `chunk_dt_s` (row_step budget) "
+                        "and sets an `abs_ee` waypoint's deadline from it, so the per-tick demand is "
+                        "`row / (chunk_dt_s * rate)`. The lamp episode's peak row needs 0.00445 "
+                        "rad/tick at the recorded cadence = 7.4x the joint cap at speed_scale 0.1; "
+                        "at `--speed 0.1 --chunk-dt-s 0.4` it needs 0.00045 rad/tick = 0.74x that "
+                        "cap - the SAME cap utilisation the arm had while recording at 100 %. Rule "
+                        "of thumb: `chunk_dt_s ~= 1 / (fps * speed)` and `speed ~= speed_scale`")
     p.add_argument("--url", default="http://127.0.0.1:8866")
     p.add_argument("--kind", default="sim", choices=["sim", "hardware"],
                    help="session kind; hardware needs hardware_session.policy_modes on the runtime")
@@ -72,6 +83,11 @@ def parse() -> argparse.Namespace:
                         "readable mirror when the runtime's copy is owned by another account)")
     p.add_argument("--node-bin", default=str(DEFAULT_NODE_BIN))
     p.add_argument("--out", default=None, help="output dir (default var/dryrun-inference/runs/<stamp>)")
+    p.add_argument("--start-timeout-s", type=float, default=420.0,
+                   help="budget for the session to reach RUNNING. A hardware `start_from: "
+                        "profile:<id>` motion runs in the BACKGROUND after the POST returns "
+                        "(SessionState.START_FROM), one arm at a time at speed_scale, so it "
+                        "takes MINUTES at 10 % - never seconds (2026-09-12 incident below)")
     p.add_argument("--settle-s", type=float, default=0.5)
     p.add_argument("--timeout-margin-s", type=float, default=90.0)
     return p.parse_args()
@@ -131,7 +147,9 @@ def main() -> int:
     info = api.get(f"/api/datasets/{ns}/{name}/episodes/{a.episode}/playback").json()
     print(f"runtime {health['version']} epoch {health['epoch'][:8]}; episode {a.episode}: "
           f"{info['frames']} frames @ {info['fps']} fps ({info['duration_s']} s); arms {arms}; "
-          f"action_space {a.action_space}, mode {a.mode}, timeline {a.timeline}, speed x{a.speed:g}")
+          f"action_space {a.action_space}, mode {a.mode}, timeline {a.timeline}, speed x{a.speed:g}, "
+          f"chunk_dt {a.chunk_dt_s if a.chunk_dt_s else 1.0 / a.rate_hz:.4f} s, "
+          f"speed_scale {a.speed_scale:g}")
     ws_url = a.url.replace("http://", "ws://") + "/ws/telemetry"
 
     # -- 1. the replay node (attaches as `policy`, waits at frame 0) ---------------------------
@@ -148,6 +166,7 @@ def main() -> int:
         a.node_bin, "--loader", "replay", "--path", str(Path(a.node_path) if a.node_path else ep_dir), "--arms", ",".join(arms),
         "--replay-mode", a.mode, "--timeline", a.timeline, "--speed", str(a.speed),
         "--rate-hz", str(a.rate_hz), "--daemon-port", str(dora["daemon_port"]),
+        *(("--chunk-dt-s", str(a.chunk_dt_s)) if a.chunk_dt_s else ()),
         "--settle-s", str(a.settle_s), "--report", str(report_path), "--log-level", "INFO",
         "--action-space", a.action_space, "--save-frames", str(frames_dir),
     ]
@@ -188,12 +207,53 @@ def main() -> int:
             return 4
         session_id = r.json()["session_id"]
         t0 = time.monotonic()
-        while api.get("/api/session").json()["state"] != "running":
-            time.sleep(0.05)
-            if time.monotonic() - t0 > 30:
-                print("session never reached running", file=sys.stderr)
+        # Wait on the STATE, never on a short clock. `POST /api/session` returns after
+        # BRING-UP; a `start_from: profile:<id>` motion then runs in the BACKGROUND
+        # (`SessionState.START_FROM`, progress in `telemetry.session.start_from_progress`
+        # - 04-runtime §5), planned and gated ONE ARM AT A TIME at `speed_scale`, so on
+        # hardware at 10 % it takes MINUTES. On 2026-09-12 03:02 this loop's old 30 s
+        # budget expired mid-motion, the `finally` below deleted the session and the
+        # runtime logged `start_from cancelled: session teardown - Manipulation Arm;
+        # Perception Arm not moved`, leaving the Manipulation Arm parked half-way to the
+        # profile. A state the session cannot leave on its own (fault / recovering /
+        # teardown) aborts at once instead of burning the budget.
+        working = {"bringup", "start_from"}
+        last_note = 0.0
+        while True:
+            sr = api.get("/api/session")
+            if sr.status_code == 404:
+                print("session disappeared while waiting for it to run", file=sys.stderr)
                 return 4
-        print(f"session {session_id[:8]} running ({time.monotonic() - t0:.2f} s)")
+            state = sr.json().get("state")
+            if state == "running":
+                break
+            sess = tele.latest(timeout=2.0).get("session") or {}
+            if state not in working:
+                print(f"session state {state!r}, not running: {sess.get('fault_detail') or '(no detail)'}",
+                      file=sys.stderr)
+                return 4
+            if time.monotonic() - t0 > a.start_timeout_s:
+                print(f"session still {state!r} after {a.start_timeout_s:.0f} s - giving up",
+                      file=sys.stderr)
+                return 4
+            if time.monotonic() - last_note > 5.0:
+                last_note = time.monotonic()
+                prog = sess.get("start_from_progress")
+                steps = "; ".join(
+                    f"{b.get('arm_id')} {b.get('step')}={b.get('status')}"
+                    for b in (sess.get("bringup") or [])
+                    if b.get("status") != "ok"
+                )
+                bits = [f"{time.monotonic() - t0:5.0f}s {state}"]
+                if prog is not None:
+                    bits.append(f"{prog * 100:.0f}%")
+                if steps:
+                    bits.append(steps)
+                if sess.get("fault_detail"):
+                    bits.append(sess["fault_detail"])
+                print("  " + " | ".join(bits))
+            time.sleep(0.3)
+        print(f"session {session_id[:8]} running ({time.monotonic() - t0:.1f} s)")
 
         # -- 3. walk the arms to the episode's first frame ------------------------------------
         t0 = time.monotonic()
