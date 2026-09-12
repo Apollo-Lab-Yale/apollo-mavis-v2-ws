@@ -969,7 +969,16 @@ resolution / fps and `align_depth_to_color` (default) runs
 `rs.align(rs.stream.color)` in the capture thread → `CameraFrame.depth`
 ((H, W) uint16 in `depth_scale_m` units, §8.7; "z16, v1 ignores" was the
 phase-11 state); ≥1 s warmup; `device.hardware_reset()` retry for the "wedged
-after unclean shutdown" failure (both from LeRobot). **Since 2026-09-11 this is
+after unclean shutdown" failure (both from LeRobot). **Bounded reopen
+(2026-09-11)**: a capture exception (one `wait_for_frames` timeout after a USB
+hiccup) no longer marks the camera `failed` for good — the capture thread stops
+the pipeline and starts a fresh one (plain restart first, `hardware_reset()`
+before the second attempt), re-reads the depth scale, re-creates `rs.align` and
+warms up again, and gives up (`failed`, pipeline released, thread stopped — the
+runtime replaces it at the next `start_previews()`) only after `REOPEN_ATTEMPTS`
+= 2 consecutive reopens that yielded no frame; `seq` stays monotonic, `latest()`
+keeps the last good frame, `reopen_count` counts the attempts for telemetry.
+**Since 2026-09-11 this is
 how the lab's two wrist cameras are opened** (`configs/mavis_v2.yaml`: `kind:
 realsense`, `depth: true`, `align_depth_to_color: true`, 640×480 @ 30). The
 serial is the RealSense DEVICE serial (what `rs-enumerate-devices` prints), NOT
