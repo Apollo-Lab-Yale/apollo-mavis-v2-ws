@@ -360,9 +360,10 @@ Phase behavior (identical skeleton for all four modes; overview §4):
    12. *Camera adoption* (rule 4): for every open preview camera
        `hub.set_fps(cam_id, video.session_fps)`; the ids go to
        `ActiveSession.adopted_streams` (NOT `streams`: `SessionInfo.streams` is
-       `[]`, teardown restores the fps instead of removing the stream, the UVC
-       node is never re-opened, `hardware_camera()` keeps returning the same
-       object). The `<id>_align` overlays keep running: the monitor is paused, so
+       `[]`, teardown restores the fps instead of removing the stream, the
+       camera device — the RealSense pipeline since 2026-09-11, a UVC node for a
+       `v4l2` entry — is never re-opened, `hardware_camera()` keeps returning the
+       same object). The `<id>_align` overlays keep running: the monitor is paused, so
        `TwinOverlayRenderer.set_state_provider(SessionStateProvider(inner
        workcell, session arms, frozen samples))` feeds them from the driver's
        `states()` (live tint) and any frozen sample (grey, "frozen at last
@@ -1351,7 +1352,7 @@ idle|recording|saving|returning` (`returning` only with `return_to_start`,
 - **Hardware collect.** `_validate_hardware` admits `mode ∈ {teleop,
   collect}`; the recorder is built inside `_bringup_hardware` after the rig
   connects and `start_from` is planned, reading the **adopted** preview
-  cameras (no second UVC open; none live → 409 `"data collection needs at
+  cameras (no second open of the device; none live → 409 `"data collection needs at
   least one live hardware camera - none is open (see the Hardware tab camera
   tiles)"`), and started after the loop; bring-up progress shows a `recorder`
   row per arm (`pending` → `ok "recording into <repo_id>"`). A dataset refusal
@@ -2476,13 +2477,18 @@ paced at stream fps) → encoded[stream_id]: LatestSlot[bytes(header+jpeg)]
   `sim`/`twin`; `twin_overlay.stream_suffix` (default `_align`) is the only
   knob and a colliding id is skipped with an error log.
 - **Pre-session previews**: real-camera streams are available with no
-  session, encoded at **~15 fps** (landing-page grid); on session start the
-  session's cameras switch to configured fps, on teardown back to 15. Hardware
+  session, encoded at `video.preview_fps` (landing-page grid) — **30 since
+  2026-09-11**, ~15 before: the dora camera taps ride these preview streams, so
+  between sessions every camera output reached consumers at 14.98 Hz (measured
+  on the lab runtime via `telemetry.external.publish_hz`) while in a session it
+  ran at `session_fps` 30; now 30 Hz both ways. On session start the session's
+  cameras switch to `session_fps`, on teardown back to `preview_fps`. Hardware
   (phase-09c): the switch IS the adoption — `hub.set_fps(cam_id,
   video.session_fps)` on every open preview camera, ids recorded in
-  `ActiveSession.adopted_streams`, the same `OpenCVCamera` object keeps the UVC
-  node (never re-opened, `hardware_camera()` unchanged), `set_fps(…,
-  preview_fps)` at teardown; `SessionInfo.streams` stays `[]`.
+  `ActiveSession.adopted_streams`, the same camera object (`RealSenseCamera` for
+  the lab's wrist cameras since 2026-09-11, `OpenCVCamera` for a `v4l2` entry)
+  keeps the device open (never re-opened, `hardware_camera()` unchanged),
+  `set_fps(…, preview_fps)` at teardown; `SessionInfo.streams` stays `[]`.
 - Sender: `await slot_fresh(); await ws.send_bytes(buf)` — a slow client
   skips frames (client also drops while a decode is in flight, 05-ui §5.4).
 - 640×480@30 ⇒ 25–60 KB/frame, 6–15 Mbps/stream; encode 1–3 ms/frame
@@ -2503,8 +2509,13 @@ ADOPTS them in place — fps switch only — instead of taking them over, phase-
 above). Hardware camera ids must not collide with
 sim scene camera names (one VideoHub namespace).
 `SessionManager.hardware_camera(cam_id)` returns the started preview camera
-(or `None`): a UVC node cannot be opened twice, so every other consumer of a
-real frame — the twin overlay below — reads `latest()` from that one object.
+(or `None`): a camera device cannot be opened twice (a UVC node, or a RealSense
+unit held by a librealsense pipeline), so every other consumer of a real frame —
+the twin overlay below, the dora camera taps — reads `latest()` from that one
+object. Since 2026-09-11 the lab's wrist cameras are `kind: realsense` with
+`depth: true`, so that one object also carries the aligned depth image, which the
+dora bridge publishes as `cam_<id>_depth` (14-dora §4.2); the VideoHub and the
+recorder ignore it.
 
 **Digital-twin alignment overlays (phase-09a;
 `docs/prompts/phase-09a-hardware-twin-overlay.md`; `streams/twin_overlay.py`).**
@@ -2624,19 +2635,30 @@ workcells:                   # POST /api/session picks by requested kind
                                         #   G2 + D435i + mount ≈ 0.95 kg @ (0, 0, 60) mm, D435i +
                                         #   NT-USB Mini + mount ≈ 0.55 kg @ (0, 0, 90) mm; sensitivity
                                         #   3 on both; reduced_tcp_boundary_mm / expected_sn unset
-    cameras:                                # both wrist cams are RealSense D435i used as UVC
-                                            # colour cameras: by USB serial (by-id collides
-                                            # between the depth and colour interfaces), YUYV
-                                            # only; serial -> arm mapping confirmed 2026-09-04
-      - {id: grip_wrist, kind: v4l2, serial: "349643062582", fourcc: YUYV,
-         resolution: [640, 480], fps: 30,
+    cameras:                                # both wrist cams are RealSense D435i opened through
+                                            # librealsense since 2026-09-11 (kind realsense, the
+                                            # runtime [hardware] extra pulls pyrealsense2): colour
+                                            # rgb8 + z16 depth aligned to colour, addressed by the
+                                            # RealSense DEVICE serial (rs-enumerate-devices), NOT
+                                            # the USB iSerial the 2026-09-04..09-10 v4l2/YUYV
+                                            # colour-only entries carried (349643062582 / 322143060792;
+                                            # 02-hardware §8). Serial -> arm mapping confirmed
+                                            # 2026-09-04 from the tiles, re-derived 2026-09-11 from
+                                            # pyrealsense2 physical_port -> sysfs usb serial.
+      - {id: grip_wrist, kind: realsense, serial: "327122074467",
+         resolution: [640, 480], fps: 30, depth: true, align_depth_to_color: true,
          intrinsics: {fx: 608.19, fy: 608.23, cx: 327.39, cy: 247.90}}  # D435i COLOUR (Inverse
                                                    # Brown-Conrady, distortion ignored)
-      - {id: view_wrist, kind: v4l2, serial: "322143060792", fourcc: YUYV,   #   imager
-         resolution: [640, 480], fps: 30,                                   #   (rs-enumerate-
+      - {id: view_wrist, kind: realsense, serial: "243522071002",            #   imager
+         resolution: [640, 480], fps: 30, depth: true, align_depth_to_color: true,   # (rs-enumerate-
          intrinsics: {fx: 606.36, fy: 606.38, cx: 311.90, cy: 249.45}}  #   devices -c),
                                             # fovy = 2·atan(240/fy) ≈ 43.2°, NOT the MJCF
-                                            # depth fovy 57; the twin overlay renders with them
+                                            # depth fovy 57; the twin overlay renders with them.
+                                            # depth: true -> the dora bridge publishes
+                                            # cam_grip_wrist_depth / cam_view_wrist_depth (uint16 mm,
+                                            # colour-sized; 14-dora §4.2); measured on the real pair
+                                            # 2026-09-11: 30.0 / 30.1 fps, 96 % / 91 % valid pixels.
+                                            # Datasets record video only (unchanged).
     safety: {enabled: true, geom_inflation_m: 0.008, min_clearance_m: 0.016}
   sim:      { <WorkcellConfig>: sim_scene, cameras (kind sim),
               safety: {safety_debug: false} }
@@ -2684,7 +2706,8 @@ recorder: {fps: 25, vcodec: auto, jpeg_quality: 80,
            extrinsics_max:  {pos_m: 0.010, rot_rad: 0.035}}   #   verify, 10-frames §5.3
                              # (the 2026-09-07 interim `video_file_size_mb` never shipped — §10)
 telemetry_hz: 25
-video: {preview_fps: 15, session_fps: 30}
+video: {preview_fps: 30, session_fps: 30}   # preview 15 -> 30 (2026-09-11): the dora camera taps ride the
+                                            #   preview streams, so consumers saw 14.98 Hz between sessions
 dagger: {policy_hz: 15, t_blend_s: 0.3, pause_others_on_takeover: true,
          anchor_leash: null,        # 2026-09-11: LeashConfig{pos_m, rot_rad} for the policy /
                                     #   replay ActionAnchor; null = control.leash (§11)
@@ -2911,8 +2934,10 @@ wrist camera matching an arm, without `digital_twin_scene`, or without the
 previews); `Runtime.stop()` stops overlay → monitor before everything else.
 `Runtime(cfg, monitor_factory=…)` is the test seam that replaces the hardware
 package's `ArmStateMonitor`. `CameraConfig.intrinsics` on the hardware wrist
-cameras are the D435i **colour** intrinsics (the depth stream is not used);
-without them the overlay renders with fovy 43.2° and logs a warning. Both lab
+cameras are the D435i **colour** intrinsics (the overlay never reads depth; the
+depth stream, on since 2026-09-11, is aligned to the colour frame, so the same
+intrinsics describe it); without them the overlay renders with fovy 43.2° and
+logs a warning. Both lab
 tracks are unhomed at power-on, so `rail_fallback_m` (grip 0.65 = the operator's
 right end, view 0.0 = the left end, matching the `mavis_v2` keyframe) is what
 the twin shows until the operator homes them (`home_rail`, §13.1);

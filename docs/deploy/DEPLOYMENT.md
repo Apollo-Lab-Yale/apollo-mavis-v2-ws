@@ -76,7 +76,8 @@ Before you start — **read this first**:
    change (S7).
    Also running against the real cell: arm reachability probes, the read-only controller
    monitor + twin overlays, the RØDE microphone preview, Vive tracker teleop + calibration
-   wizard, the two RealSense colour previews (mapped to the arms by USB serial, S4), and
+   wizard, the two RealSense previews (mapped to the arms by RealSense device serial, S4;
+   colour + aligned depth through librealsense since 2026-09-11), and
    full **sim** sessions on the `mavis_v2` digital twin.
 3. Exactly **one** process may own the Watchman dongle, the microphone capture and the
    arms (S8). The developer's runtime on `:8765` owns them right now; the ops service
@@ -149,7 +150,10 @@ account, not as root). It performs S1 and the system half of S5.
    ```
 
    Not needed: `python3-venv` (uv creates venvs itself), a system CUDA toolkit (the
-   runtime venv ships CUDA 13 wheels), `pyrealsense2` (cameras are opened as v4l2/OpenCV).
+   runtime venv ships CUDA 13 wheels), a system `pyrealsense2` — since 2026-09-11 the wheel
+   (`pyrealsense2>=2.54`, 2.58.4 on this box) rides the runtime's `hardware` extra and `uv
+   sync` installs it; until 2026-09-10 no pyrealsense2 was installed at all because the
+   cameras were opened as v4l2/OpenCV (history, S4 "Cameras").
 
 2. NVIDIA driver + EGL — must already be there (580.173.02 on this box, upgraded 2026-09-01):
 
@@ -178,9 +182,12 @@ account, not as root). It performs S1 and the system half of S5.
 4. inotify: `/etc/sysctl.d/60-inotify.conf` already raises
    `fs.inotify.max_user_watches=524288` system-wide (the script re-creates it if missing).
 
-5. `librealsense2-utils` must be installed: `rs-enumerate-devices` is what wakes a
-   cold-booted D435i so the plain-UVC reader gets frames (S4 "Cameras", S11). It comes from
-   Intel's apt repository, not Ubuntu's.
+5. `librealsense2-utils` — keep it installed: `rs-enumerate-devices -s` is how the RealSense
+   DEVICE serials in the camera config are read and `-c` the colour intrinsics (S4 "Cameras").
+   Until 2026-09-10 it was also what woke a cold-booted D435i so the plain-UVC reader got
+   frames; since the cameras are opened through librealsense itself (2026-09-11) that wake is
+   history, still wired in for a `kind: v4l2` entry (S11). It comes from Intel's apt
+   repository, not Ubuntu's.
 
 ### UFACTORY Studio (the xArm desktop client)
 
@@ -383,9 +390,11 @@ Exact diff versus the repo config (values, comments stripped):
 
 Unchanged because the repo already has the lab values: `host: 127.0.0.1`, `port: 8765`,
 arm IPs `grip` 192.168.1.201 / `view` 192.168.2.219 (gripper `xarm_g2`, `view`
-`microphone: true`), the two wrist cameras (`grip_wrist` serial `349643062582`,
-`view_wrist` serial `322143060792`; `kind: v4l2`, `fourcc: YUYV`, 640×480 @ 30 — see
-"Cameras" below), `microphone.enabled: true` with `source_match: NT-USB Mini`,
+`microphone: true`), the two wrist cameras (`grip_wrist` RealSense serial `327122074467`,
+`view_wrist` RealSense serial `243522071002`; `kind: realsense`, colour + aligned depth,
+640×480 @ 30 since 2026-09-11 — the 2026-09-04..09-10 render carried `kind: v4l2`, `fourcc:
+YUYV` and the USB iSerials; see "Cameras" below), `microphone.enabled: true` with
+`source_match: NT-USB Mini`,
 `hardware_probe` on 502, the phase-09a `hardware_monitor` / `twin_overlay` blocks, the wrist
 cameras' D435i colour `intrinsics` (2026-09-04), the phase-09b per-arm controller backstops
 (`tcp_load_kg` / `tcp_load_cog_mm` / `collision_sensitivity`: `grip` 0.95 kg @ (0, 0, 60) mm,
@@ -474,34 +483,44 @@ here on purpose; `ss -tlnp | grep 8765` and `ps -o lstart= -p <pid>` answer it i
 ```bash
 bash ~/apollo-mavis-v2-ws/scripts/deploy/render-lab-config.sh          # -> ~/apollo-mavis-v2-ws/var/mavis_v2_lab.yaml
 # stop-gap if the two camera tiles turn out crossed (see below): swap the serials without touching the repo
-CAMERA_SERIALS="grip_wrist=322143060792,view_wrist=349643062582" bash ~/apollo-mavis-v2-ws/scripts/deploy/render-lab-config.sh
+CAMERA_SERIALS="grip_wrist=243522071002,view_wrist=327122074467" bash ~/apollo-mavis-v2-ws/scripts/deploy/render-lab-config.sh   # RealSense DEVICE serials (2026-09-11), not USB iSerials
 # turn the dora external interface on for policy nodes / LAN subscribers (phase-12; see the knobs above)
 DORA_BIND_HOST=wlp38s0 bash ~/apollo-mavis-v2-ws/scripts/deploy/render-lab-config.sh
 DORA_BIND_HOST=wlp38s0 DORA_MACHINES="gpubox" bash ~/apollo-mavis-v2-ws/scripts/deploy/render-lab-config.sh   # + one remote consumer machine
 ```
 
-Cameras (**verify on first deploy**): the runtime opens each RealSense's colour stream as a
-plain v4l2 device that it finds by **USB serial** (core `CameraConfig.serial`, sysfs lookup;
-no by-id path, no `pyrealsense2`, `fourcc: YUYV` because the RS colour node offers no MJPG),
-so `/dev/video*` numbering and plug order do not matter. Two D435i are attached, serials
-`322143060792` and `349643062582` (`lsusb -d 8086: -v 2>/dev/null | grep iSerial`, or
-`v4l2-ctl --list-devices`). `lsusb -d 8086:0b3a` lists both D435i units; on apollo-pc-1 they
-hang off different USB host controllers — 349643062582 on PCI 29:00.3 (USB bus 6),
-322143060792 on PCI 29:00.1 (USB bus 4). The repo maps `349643062582 → grip_wrist`
-(Manipulation Arm) and `322143060792 → view_wrist` (Perception Arm) — **confirmed by the
-operator on 2026-09-04** from the Hardware-tab tiles (the pre-2026-09-04 config had the two
-serials the other way round — a guess, corrected from those tiles). If a camera is ever
-replaced or moved: cover one lens and watch the Welcome page → Hardware tab tiles; if they are crossed, swap the two serials in
-`configs/mavis_v2.yaml` (developer: commit + push, then S9 re-render) or use the
-`CAMERA_SERIALS` stop-gap above until then (note that `rs-enumerate-devices` prints the
-ASIC serials, not these USB serials — read them with `lsusb -v`). The script exits with an
-error for a camera id that is not in the repo config, so a rename there cannot be ignored
-silently. An unplugged camera shows a black tile with `live: false`
-and has no other effect. **Cold boot**: a D435i's colour stream stays silent after a reboot
-until librealsense has opened the device once; the driver runs `rs-enumerate-devices -s`
-(librealsense2-utils, from Intel's apt repo — present on apollo-pc-1, keep it installed) once
-per process before the first RealSense open, so no manual step is needed as long as that
-tool exists (S11 has the manual fallback).
+Cameras (**verify on first deploy**): since 2026-09-11 the runtime opens each wrist D435i
+through **librealsense** (`kind: realsense`; `pyrealsense2` 2.58.4 from the runtime's
+`hardware` extra, no system package) — colour rgb8 plus z16 depth aligned to colour at
+640×480 @ 30 (`depth: true`, `align_depth_to_color: true`) — and finds it by the **RealSense
+DEVICE serial** (core `CameraConfig.serial`; the serial `rs-enumerate-devices -s` prints), so
+`/dev/video*` numbering and plug order do not matter. Two D435i are attached
+(`lsusb -d 8086:0b3a` lists both units); the repo maps `327122074467 → grip_wrist`
+(Manipulation Arm; USB iSerial 349643062582, firmware 5.17.0.10, USB bus 6 / PCI 29:00.3) and
+`243522071002 → view_wrist` (Perception Arm; USB iSerial 322143060792, firmware 5.15.1, USB bus
+4 / PCI 29:00.1). The RS device serial is NOT the USB iSerial (`lsusb -d 8086:0b3a -v | grep
+iSerial`) that the 2026-09-04..09-10 configs carried, when the cameras were plain v4l2
+colour devices (`kind: v4l2`, `fourcc: YUYV` because the RS colour node offers no MJPG, no
+`pyrealsense2`); the two serial families were tied together on 2026-09-11 from pyrealsense2
+`physical_port` → the sysfs `serial` of that USB device, and the result agrees with the
+mapping the **operator confirmed on 2026-09-04** from the Hardware-tab tiles (the
+pre-2026-09-04 config had the two serials the other way round — a guess, corrected from those
+tiles). Probe on the real pair (service paused, both cameras at once, 8 s): 30.0 / 30.1 fps,
+depth on every frame, 96 % (grip, table at 35–43 cm) / 91 % (view, 44 cm – 2.2 m) valid depth
+pixels, `depth_scale` 0.001 m; the dora bridge publishes `cam_grip_wrist_depth` /
+`cam_view_wrist_depth` (uint16 mm) next to the colour streams, datasets stay video-only. If a
+camera is ever replaced or moved: cover one lens and watch the Welcome page → Hardware tab
+tiles; if they are crossed, swap the two serials in `configs/mavis_v2.yaml` (developer: commit
++ push, then S9 re-render) or use the `CAMERA_SERIALS` stop-gap above until then (RS device
+serials, as in the example). The script exits with an error for a camera id that is not in
+the repo config, so a rename there cannot be ignored silently. An unplugged camera shows a
+black tile with `live: false` and has no other effect. **Cold boot** (history of the v4l2
+path): a D435i's colour UVC stream stayed silent after a reboot until librealsense had opened
+the device once, so `OpenCVCamera` runs `rs-enumerate-devices -s` (librealsense2-utils, from
+Intel's apt repo — present on apollo-pc-1) once per process before the first RealSense open;
+with `kind: realsense` the pipeline IS that open and no wake is involved. Keep the tool
+installed anyway — it reads the device serials and the colour intrinsics
+(`rs-enumerate-devices -c`), and a `kind: v4l2` fallback still relies on it (S11).
 
 ### libsurvive lighthouse calibration (per account!)
 
@@ -1207,7 +1226,7 @@ a lighthouse config invalidates the yaw: redo the Yaw wizard.
 | tracker `error`: permission / cannot open device | mavis-v2 lacks `plugdev` or the udev rule is missing: `id mavis-v2`, `ls -la /dev/bus/usb/…` should be `root plugdev 0660`; `sudo udevadm trigger --subsystem-match=usb`; restart `user@<uid>` after group changes. |
 | tracker `searching` forever | controller off/asleep, or stations off; `--lighthousecount 3` must match the powered stations. Yaw/base-station: Debug page (`#/devices`) wizard. |
 | microphone `absent` / `error: pactl…` | mavis-v2's PulseAudio does not see the card: (a) `XDG_RUNTIME_DIR` unset → service must run under the user manager (it does) — from shells export it; (b) mavis-v2 not in `audio` (`/dev/snd/* root:audio 0660`); (c) the developer's PA has a stream open on the RØDE (S8.3, set its card profile off); (d) `pactl info` fails → `systemctl --user status pulseaudio.socket pulseaudio.service` as mavis-v2 (**verify on first deploy**: module-udev-detect for a seatless user). Never open `hw:CARD=Mini` directly: EBUSY and it stalls every Pulse recorder. |
-| both wrist-cam tiles black after a reboot (`/api/cameras` `live: false`, log: `select() timeout` / `cannot open`) | cold-boot quirk of the D435i colour UVC stream: it delivers nothing until librealsense has opened the device once. The driver runs `rs-enumerate-devices -s` automatically before the first RealSense open — check `command -v rs-enumerate-devices` (librealsense2-utils, Intel apt repo) and the runtime log for `RealSense wake`; manual fallback: run `rs-enumerate-devices -s`, then restart the service. `rs-enumerate-devices` prints ASIC serials (243522071002 / 327122074467), not the USB serials in the config. |
+| both wrist-cam tiles black after a reboot (`/api/cameras` `live: false`) | With `kind: realsense` (since 2026-09-11) the runtime's own librealsense pipeline opens the device, so the old cold-boot quirk does not apply: check that `rs-enumerate-devices -s` lists both DEVICE serials (`327122074467` grip, `243522071002` view — the serials in the config since 2026-09-11) and that no other process holds them (a developer's runtime, `realsense-viewer`; S8 — one owner per device, a UVC open on the same unit blocks librealsense), then read the camera's `hardware_reset()` retry in the runtime log (02-hardware §8). History, for a `kind: v4l2` entry (the 2026-09-04..09-10 lab config; log `select() timeout` / `cannot open`): the D435i colour UVC stream delivers nothing after a reboot until librealsense has opened the device once; `OpenCVCamera` runs `rs-enumerate-devices -s` automatically before the first RealSense open (`RealSense wake` in the log; `command -v rs-enumerate-devices`, librealsense2-utils from Intel's apt repo) — manual fallback: run it, then restart the service. In that layout the config held the USB iSerials, not the device serials the tool prints. |
 | sim previews black / `stream died` in the log, EGL errors | render node permission: mavis-v2 needs `render` (`/dev/dri/renderD* root:render 0660`); `/dev/nvidia*` are 0666. Check `MUJOCO_GL=egl` in `systemctl --user show mavis-runtime -p Environment`; `egl_device_id: 0` = PCI 41:00.0. An EGL failure kills only the preview streams, not the runtime. |
 | `POST /api/session` kind=hardware → 409 `<Arm>: rail not homed - home it from the Hardware tab (Home rail) before starting a session` | expected after every power-on (phase-09c): both tracks boot unhomed and a session needs the carriage position for the gate twin — and since phase-09d BOTH arms are always in a session, so both tracks must be homed. Card → **Home rail** → dry-run verdict → confirm (the carriage MOVES to the operator's left end, ≤ 45 s; or, phase-09d, the sheet says `pre-positioning planned` and the ARM MOVES FIRST along the planned path at 10 %, then the carriage — 202 job, watch the phases in the sheet) → `rail 0.000 m`; then check the `*_align` overlay before the session. Other 409s from the same matrix: `hardware sessions support teleop and data collection only (<mode> on hardware: not yet)` (collect is admitted on hardware since 2026-09-07 — 04-runtime §5 / §10.5; DAgger / Online DAgger and inference stay on the Sim tab, 15-online-dagger D7; the pre-2026-09-07 string was `hardware sessions support teleop only`), `hardware sessions include every configured arm (Manipulation Arm, Perception Arm) - missing [...]` (a client posted a subset — the UI never does since phase-09d; both arms always join, so the Perception Arm must be homed / error-free too), `no monitor sample` (box off / monitor paused), `controller error N is latched - clear errors first` (**Clear errors**; the Perception Arm's `C19` blocked every session until it was fixed in Studio on 2026-09-05), `rail homing in progress` (wait for the carriage / the job), `control box … is unreachable`, `hardware bring-up failed: <Arm>: <stage> - …` (the drivers were torn down again, the monitor resumed — read the stage), `profile motion not collision-free: <failure> (<pair>) - …` (phase-09d: `start_from: profile:<id>` was planned on the gate twin inside bring-up and no collision-free path exists from the measured posture — use `keep_current` or another profile; the session was torn down). |
 | **Home rail** refused / failed (sheet shows a red verdict or an error, `ok: false`, 409) | `Sweep blocked — no safe pre-positioning path` (`status: refused`, phase-09d) = the twin sweep found a pair within 25 mm somewhere along the 0–0.65 m travel at the arm's current posture (`rail_sweep.first_blocked_m` / `first_blocked_pair`) AND no candidate posture (scene keyframe, `<arm>_home`) is reachable by a rail-position-agnostic path: fold the arm toward the factory-zero posture in xArm Studio (joints 2–7 near 0; or move the other arm) and re-open Home rail — nothing was written. (`Current posture blocks the sweep — pre-positioning planned` is NOT a refusal: confirm and the arm moves first; an older runtime shows `Sweep blocked — homing refused` instead.) 409 `clear errors first` → **Clear errors** first; 409 `end the session first` → end the hardware session; 409 `needs the digital twin` → the lab config lacks `digital_twin_scene` or the runtime venv lacks the sim extra. `ok: false … the arm moved since the sweep was checked` → keep the arm still between the dry run and the confirm. `ok: false … on_zero still 0` after the 30 s SDK wait → the track never reached its zero switch: check the track cable / `hardware_monitor.arms[].rail_*` registers, **Clear errors**, retry. UI `no answer after 60 s` → read the card's rail pill; the runtime may still have finished. While homing the arm reads `stale` + `maintenance_busy` and `POST /api/session` is 409. |

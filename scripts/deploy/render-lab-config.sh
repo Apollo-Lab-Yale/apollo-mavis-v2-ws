@@ -5,7 +5,7 @@
 # "developer sim defaults" and "operations on the real cell": absolute data paths,
 # ui_dist, host/port, the lab tracker settings (backend libsurvive, --lighthousecount 3,
 # yaw_deg 116.3, rail_in_ik false), hardware_session.armed, the arm IPs and (when given)
-# the camera USB serials. The result is validated with the runtime's own config model
+# the cameras' RealSense device serials. The result is validated with the runtime's own config model
 # before it is installed. Idempotent. NO sudo: LAB_CONFIG lives in the ops account's own
 # $DATA_ROOT so it can re-render alone; sudo is used only if LAB_CONFIG points into a
 # directory the caller cannot write (e.g. /etc).
@@ -21,10 +21,13 @@
 #   LOG_LEVEL=INFO      logging.level (DEBUG adds per-event IK slips + driver events); the
 #                       rotating log file goes to $DATA_ROOT/logs (KEEP_REPO_PATHS keeps ${APOLLO_HOME}/var/logs)
 #   LIBSURVIVE_CONFIG=$DATA_ROOT/libsurvive/config.json GRIP_IP VIEW_IP
-#   CAMERA_SERIALS="grip_wrist=349643062582,view_wrist=322143060792"
-#                       override workcells.hardware.cameras[].serial by camera id (the repo
-#                       maps the two RealSense USB serials to the arms; swap here as a
-#                       stop-gap if the Hardware-tab tiles are crossed). Unknown id = error.
+#   CAMERA_SERIALS="grip_wrist=327122074467,view_wrist=243522071002"
+#                       override workcells.hardware.cameras[].serial by camera id. Since
+#                       2026-09-11 the value is the RealSense DEVICE serial (what
+#                       `rs-enumerate-devices -s` prints; kind realsense), NOT the USB iSerial
+#                       the 2026-09-04..09-10 v4l2 entries carried (349643062582 / 322143060792).
+#                       The repo maps the two device serials to the arms; swap here as a
+#                       stop-gap if the Hardware-tab tiles are crossed. Unknown id = error.
 #   TRAINER_PORT=5758   dagger.trainer.port for a second (developer) instance
 #   DORA_BIND_HOST=wlp38s0  phase-12 (14-dora §9/§12): render `dora.enabled: true` bound to this
 #                       IPv4 or INTERFACE NAME (the APOLLO Lab Wi-Fi is DHCP: 192.168.0.88/24 on
@@ -162,8 +165,9 @@ ips = {"grip": env["GRIP_IP"], "view": env["VIEW_IP"]}
 for i, arm in enumerate(hw.get("arms", [])):
     if arm.get("id") in ips and arm.get("ip") != ips[arm["id"]]:
         setv(("workcells", "hardware", "arms", i, "ip"), ips[arm["id"]])
-# Cameras are matched by USB serial (core CameraConfig.serial, sysfs lookup); the repo
-# config carries the lab mapping. CAMERA_SERIALS only overrides serials of ids that exist.
+# Cameras are matched by serial (core CameraConfig.serial: the RealSense DEVICE serial for
+# kind realsense - the lab path since 2026-09-11 - or the USB iSerial via sysfs for kind v4l2);
+# the repo config carries the lab mapping. CAMERA_SERIALS only overrides serials of ids that exist.
 cam_ids = [cam.get("id") for cam in hw.get("cameras", [])]
 for item in filter(None, (s.strip() for s in env["CAMERA_SERIALS"].split(","))):
     cam_id, sep, serial = item.partition("=")

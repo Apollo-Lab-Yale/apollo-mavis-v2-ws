@@ -330,8 +330,12 @@ nodes:
       policy_status: {source: policy/status, queue_size: 8}
     outputs: [heartbeat, session, telemetry, events, arm_state, arm_cmd, obs_state,
               policy_reset,
-              cam_view_wrist_cam, cam_view_wrist_cam_depth, cam_grip_wrist_cam,   # per config
-              mic_mic_view]
+              cam_view_wrist_cam, cam_view_wrist_cam_depth, cam_grip_wrist_cam,   # per config (sim
+              mic_mic_view]                                                       #   example; the lab
+              # HARDWARE config emits the REAL cameras cam_grip_wrist, cam_grip_wrist_depth,
+              # cam_view_wrist, cam_view_wrist_depth (D435i through librealsense, 2026-09-11) PLUS
+              # the twin's rendered cam_*_wrist_cam / cam_front / cam_top (+ cam_view_wrist_cam_depth)
+              # - see the naming caveat under §4.1
   - id: policy                   # placeholder: the policy repo attaches as Node("policy")
     path: dynamic
     inputs:
@@ -551,9 +555,22 @@ kept for one minor and listed in `SessionAnnounce.deprecated_keys`.
 | `arm_cmd` | same ticks as `arm_state` | `Float64[Σ dof]` | `arm_ids`, `dof` (list[int]) | session RUNNING |
 | `obs_state` | `dora.publish.obs_hz` (30; 10–100) | `Float32[S]` | `observation_id` (int, monotonic per session from 1), `tick`, `state_names` (list[str]), `arm_ids`, `frames` (list[str], per-arm FrameRef), `has_rail`, `image_camera_ids` (list[str]), `image_seq` (list[int]), `engaged_arm` (str, `""`), `episode_state` (str) | session RUNNING, modes dagger/inference (and collect when `publish.obs_in_collect`) |
 | `policy_reset` | on reset | `Utf8[1]` JSON `PolicyResetMsg` | — | session RUNNING with `policy_source: external` |
-| `cam_<camera_id>` | camera stream fps (preview 15 / session 30) | `UInt8[H*W*3]` | `camera_id`, `encoding: "rgb8"`, `width`, `height`, `primitive: "image"`, `frame_seq` (`CameraFrame.seq`), `frame_t_mono`, `frame_wallclock_ns`, `frame_ref: "camera:<id>"`, `mount` (`"ee:<arm>"` or `"world"`), `intrinsics` (list[float] `[fx,fy,cx,cy]`, when known), `distortion` (list[float]); wrist cams **always** (in and out of sessions) `q` (list[float], 8), `tcp_pose_world` (7), `camera_pose_world` (7, OpenCV convention), `pose_t_mono` (float, snapshot time used for the FK), `pose_source` (`"loop"` \| `"idle"`) | always (process-lifetime previews included) |
-| `cam_<camera_id>_depth` | camera fps | `UInt16[H*W]` | as above with `encoding: "mono16"`, `depth_scale_m: 0.001`, `aligned_to: "color"`, same `frame_seq` as the rgb frame | when `CameraConfig.depth` (hardware) or the sim depth stream is on; else declared but silent |
+| `cam_<camera_id>` | camera stream fps (`video.preview_fps` — 30 since 2026-09-11, 15 before — / `session_fps` 30) | `UInt8[H*W*3]` | `camera_id`, `encoding: "rgb8"`, `width`, `height`, `primitive: "image"`, `frame_seq` (`CameraFrame.seq`), `frame_t_mono`, `frame_wallclock_ns`, `frame_ref: "camera:<id>"`, `mount` (`"ee:<arm>"` or `"world"`), `intrinsics` (list[float] `[fx,fy,cx,cy]`, when known), `distortion` (list[float]); wrist cams **always** (in and out of sessions) `q` (list[float], 8), `tcp_pose_world` (7), `camera_pose_world` (7, OpenCV convention), `pose_t_mono` (float, snapshot time used for the FK), `pose_source` (`"loop"` \| `"idle"`) | always (process-lifetime previews included) |
+| `cam_<camera_id>_depth` | camera fps | `UInt16[H*W]` | as above with `encoding: "mono16"`, `depth_scale_m: 0.001`, `aligned_to: "color"`, same `frame_seq` and width/height as the rgb frame | when `CameraConfig.depth` (hardware — every camera configured `depth: true` joins the depth list automatically, `dora_bridge/wiring.py`) or the camera is in `publish.depth_cameras` (sim / twin depth); else declared but silent. Verified on the real D435i pair 2026-09-11 (§4.2 "Depth") |
 | `mic_<mic_id>` | `telemetry_hz` (25) | `Float32[1920]` mono PCM in [−1, 1] | `sample_rate: 48000`, `channels: 1`, `sample_type: "f32"`, `block_seq`, `t_mono_first_sample`, `rms_dbfs`, `peak_dbfs`, `overruns`, `status` (MicStatus) | when `microphone.enabled` and the reader retains samples |
+
+**Camera ids on the lab (HARDWARE) config — say this out loud, it confused a
+consumer (2026-09-11).** The REAL wrist cameras are **`cam_grip_wrist`**
+(Manipulation Arm) and **`cam_view_wrist`** (Perception Arm) — Intel RealSense
+D435i through librealsense since 2026-09-11, rgb8 640×480 @ 30 — with their depth
+siblings **`cam_grip_wrist_depth`** and **`cam_view_wrist_depth`** (mono16, uint16 mm,
+same width/height as the colour frame, aligned to colour). The `cam_grip_wrist_cam` /
+`cam_view_wrist_cam` / `cam_front` / `cam_top` outputs on that same config are the
+**digital twin's rendered scene cameras** (synthetic, 15 fps render), and
+`cam_view_wrist_cam_depth` is the twin's synthetic depth, NOT the D435i's. The
+`_wrist_cam` suffix always means the MJCF camera of the twin scene; the bare
+`<arm>_wrist` id is the physical camera. Depth is published only — datasets record
+video, never depth (10-frames §11).
 
 ### 4.2 Details
 
@@ -705,17 +722,26 @@ later additive field). `intrinsics` (`[fx, fy, cx, cy]`; sim
 `distortion` ride the same metadata, so with `camera_pose_world` a consumer
 back-projects its own depth pixels into world without any other channel.
 
-**Depth** needs additive plumbing that does not exist yet: core
-`CameraFrame.depth: np.ndarray | None` ((H, W) uint16, mm) +
-`depth_scale_m: float = 0.001`, `CameraConfig.depth: bool = False` +
-`align_depth_to_color: bool = True`; hardware `RealSenseCamera` enabling
-`rs.stream.depth` z16 and `rs.align(rs.stream.color)` in its capture thread
-(02-hardware §8 already reserves `depth`); sim `RenderService` gaining a depth
-sibling (`Renderer.enable_depth_rendering()`, metres → uint16 mm) for cameras
-in `dora.publish.depth_cameras`, lifting 03-sim §7's "depth off in v1" for
-those streams only. The Perception Arm's wrist camera on hardware must then be
-configured `kind: realsense, serial: <RealSense serial>, depth: true` — **not** the phase-11
-`v4l2` by-id path (UVC open blocks librealsense on the same device). Recorder
+**Depth** rides additive plumbing (phase-12, §16; the v0.3 text called it
+"does not exist yet"): core `CameraFrame.depth: np.ndarray | None` ((H, W)
+uint16, mm) + `depth_scale_m: float = 0.001`, `CameraConfig.depth: bool =
+False` + `align_depth_to_color: bool = True`; hardware `RealSenseCamera`
+enabling `rs.stream.depth` z16 and `rs.align(rs.stream.color)` in its capture
+thread (02-hardware §8); sim `RenderService`'s depth sibling
+(`Renderer.enable_depth_rendering()`, metres → uint16 mm) for cameras in
+`dora.publish.depth_cameras`, lifting 03-sim §7's "depth off in v1" for those
+streams only. A hardware camera reaches the bus with depth when it is configured
+`kind: realsense, serial: <RealSense DEVICE serial>, depth: true` — **not** the
+phase-11 `v4l2` path (a UVC open blocks librealsense on the same device), which is
+exactly why the lab config moved. **Verified on the real D435i pair on
+2026-09-11** (runtime `configs/mavis_v2.yaml`: BOTH wrist cameras `kind: realsense`,
+`depth: true`, `align_depth_to_color: true`, 640×480 @ 30; `grip_wrist` = RS serial
+327122074467, `view_wrist` = RS serial 243522071002 — the device serials, not the
+USB iSerials of the old v4l2 entries): with the lab service paused and both cameras
+open at once for 8 s, 30.0 / 30.1 fps, depth on every frame, valid-depth fraction
+96 % (grip, table 35–43 cm away) / 91 % (view, 44 cm – 2.2 m), `depth_scale` 0.001 m.
+The bridge therefore publishes `cam_grip_wrist_depth` and `cam_view_wrist_depth`
+next to `cam_grip_wrist` / `cam_view_wrist` (naming caveat under §4.1). Recorder
 and VideoHub ignore `depth` (datasets unchanged).
 
 **Microphone** re-publishes the phase-11 `MicrophoneReader` cadence (one
@@ -1064,7 +1090,10 @@ controller) a viewpoint, an operator:
 
 TEARDOWN holds the arm where it is (zero-twist ramp, no native gohome —
 04-runtime §5), the publishers keep running, and the consumer reads
-`cam_view_wrist_cam` (+ `cam_view_wrist_cam_depth`) at preview fps with
+`cam_view_wrist_cam` (+ `cam_view_wrist_cam_depth`) — on the lab HARDWARE config the
+REAL Perception Arm camera is `cam_view_wrist` (+ `cam_view_wrist_depth`, the D435i's
+aligned depth since 2026-09-11); `cam_view_wrist_cam` there is the twin's render
+(§4.1) — at preview fps (`video.preview_fps`, 30 since 2026-09-11) with
 `camera_pose_world`, `tcp_pose_world`, `q`, `intrinsics` and `distortion` on
 every frame (§4.2). Nothing on the bus can move the arm afterwards: the only
 inbound command family is the policy's (§5), and it is accepted only inside
@@ -1446,7 +1475,9 @@ dora:
     obs_hz: 30                   # obs_state (10-100); policy nodes rate-limit themselves
     obs_in_collect: false        # also publish obs_state in collect sessions
     cameras: all                 # all | [camera ids]
-    depth_cameras: [view_wrist_cam]   # sim depth stream / hardware depth publish list
+    depth_cameras: [view_wrist_cam]   # sim / twin depth sibling list; a hardware camera with
+                                      #   CameraConfig.depth: true joins automatically (both lab
+                                      #   wrist cameras since 2026-09-11)
     image_pose: true             # q / tcp_pose_world / camera_pose_world / intrinsics on wrist-cam
                                  #   frames, in and out of sessions (the fixed-viewpoint contract, §7)
     audio: true
@@ -1650,8 +1681,10 @@ Still open:
 
 1. **Camera encoding for remote consumers** — raw rgb8 at 30 Hz is fine on
    one host; do you want a JPEG/downscaled variant in v1? (Resolved 2026-09-04:
-   the Perception Arm's camera is USB serial `322143060792` = `view_wrist`, the
-   Manipulation Arm's is `349643062582` = `grip_wrist`.)
+   the Perception Arm's camera was USB iSerial `322143060792` = `view_wrist`, the
+   Manipulation Arm's `349643062582` = `grip_wrist` — the `kind: v4l2` addressing
+   of that day; since 2026-09-11 the config carries the RealSense DEVICE serials,
+   `243522071002` = `view_wrist`, `327122074467` = `grip_wrist`, §4.2 "Depth".)
 2. **Upstream bug report** — file the coordinator 1 MiB WebSocket-cap /
    leaked-subscription / `dora down` false-success issue with the
    `/tmp/dora-bench` repro before we rely on any `dora topic`/`record` tooling?

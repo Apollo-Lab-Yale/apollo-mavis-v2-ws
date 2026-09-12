@@ -372,6 +372,13 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
 
 ## Work in progress (2026-09-11) — inference interface, abs_ee, ee_pose fix
 
+- **Lab wrist cameras through librealsense with aligned depth (runtime `000c12f`, on main):**
+  `kind: realsense` by RS device serial (327122074467 grip / 243522071002 view), `depth: true`,
+  `preview_fps` 15 → 30; probed on the real pair 2026-09-11 (30.0 / 30.1 fps, 96 % / 91 % valid
+  depth) and the bridge now emits `cam_grip_wrist_depth` / `cam_view_wrist_depth`. Docs:
+  02-hardware §8 / §8.7, 04-runtime §13.4 / §14, 14-dora §4.1 / §4.2, DEPLOYMENT "Cameras".
+  A runtime started before it still runs the v4l2 path — restart to pick it up.
+
 - **Inference over dora works end to end for BOTH action spaces** (14-dora v1.3 + v1.4;
   04-runtime §11/§12; 12-dagger §6). Per-arm streams `action_<arm>` are primary; a
   Manipulation-Arm-only policy drives `grip` while the Perception Arm HOLDS. The executor
@@ -554,12 +561,26 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   camera-measured 2026-09-02..06 (03-sim §4.3); still unverified: the carriage mesh
   is ~7.5 cm short along the rail, the microphone body pose, the Perception Arm's
   bracket (its overlay carries an overlay-only principal-point nudge).
-- Wrist cameras: both D435i (USB `8086:0b3a`) as plain UVC YUYV 640×480@30, addressed
-  by USB serial (349643062582 → `grip_wrist`, 322143060792 → `view_wrist`), never
-  by `/dev/v4l/by-id`. Cold-boot quirk: no frames until librealsense has opened the
-  device once — `OpenCVCamera` runs `rs-enumerate-devices -s`; keep it installed.
-  Colour intrinsics are in `configs/mavis_v2.yaml` (fovy ≈ 43.2°, not the MJCF 57;
-  MuJoCo's principal-point sign is opposite to OpenCV's).
+- Wrist cameras: both Intel RealSense D435i (USB `8086:0b3a`), **opened through
+  librealsense since 2026-09-11** (`kind: realsense`, pyrealsense2 2.58.4 via the runtime's
+  `hardware` extra): colour rgb8 + z16 depth aligned to colour, 640×480 @ 30, addressed by
+  the RealSense DEVICE serial (`rs-enumerate-devices -s`), which is NOT the USB iSerial:
+  `grip_wrist` = RS `327122074467` (USB iSerial 349643062582, fw 5.17.0.10, USB bus 6 /
+  PCI 29:00.3), `view_wrist` = RS `243522071002` (USB iSerial 322143060792, fw 5.15.1, USB
+  bus 4 / PCI 29:00.1); mapping re-derived from pyrealsense2 `physical_port` → sysfs
+  `serial`. Measured on the real pair: 30.0 / 30.1 fps, depth on every frame, 96 % / 91 %
+  valid depth pixels, `depth_scale` 0.001 m. The dora bridge publishes `cam_grip_wrist_depth`
+  / `cam_view_wrist_depth` (uint16 mm) next to `cam_grip_wrist` / `cam_view_wrist`; datasets
+  stay video-only. **Naming caveat**: on the hardware config `cam_*_wrist_cam`, `cam_front`,
+  `cam_top` and `cam_view_wrist_cam_depth` are the TWIN's rendered cameras (synthetic, 15 fps),
+  the real ones are the bare `cam_<arm>_wrist` ids. `video.preview_fps` is 30 (was 15 —
+  consumers saw 14.98 Hz between sessions). `CAMERA_SERIALS=` in `var/lab.env` /
+  `render-lab-config.sh` now takes RS device serials. History (2026-09-04..09-10): plain UVC
+  YUYV colour via `OpenCVCamera` by USB iSerial, never `/dev/v4l/by-id`, with the cold-boot
+  `rs-enumerate-devices -s` wake — still true for any `kind: v4l2` entry; keep
+  `librealsense2-utils` installed (serials, `-c` intrinsics). Colour intrinsics are in
+  `configs/mavis_v2.yaml` (fovy ≈ 43.2°, not the MJCF 57; MuJoCo's principal-point sign is
+  opposite to OpenCV's); aligned depth shares them.
 - Microphone: RØDE NT-USB Mini via PulseAudio ONLY (direct `hw:CARD=Mini` gives
   EBUSY and stalls other recorders); source
   `alsa_input.usb-R__DE_Microphones_R__DE_NT-USB_Mini_750BFEE8-00.mono-fallback`,

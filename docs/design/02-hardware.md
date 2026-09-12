@@ -932,19 +932,24 @@ the requested format). The serial route exists because a RealSense D435i
 exposes its depth (interface 0) and colour (interface 3) sensors as separate
 UVC interfaces that BOTH claim `...-video-index0`, so udev keeps one by-id
 symlink per name and the winner changes between plugs (observed 2026-09-04 on
-the MAVIS cell — never address the wrist cameras by by-id). The D435i enumerates as USB
+the MAVIS cell — never address the wrist cameras by by-id). **This v4l2 route carried
+the lab's two wrist cameras from 2026-09-04 to 2026-09-10 — colour only, `fourcc: YUYV`,
+addressed by the USB iSerial; since 2026-09-11 they are opened through librealsense
+(`RealSenseCamera` below, with depth), so the D435i-under-V4L2 facts that follow are
+history that still applies to any `kind: v4l2` entry.** The D435i enumerates as USB
 `8086:0b3a` (`lsusb -d 8086:0b3a` shows both units); on the lab host the two units hang
-off different USB host controllers — 349643062582 on PCI 29:00.3 (USB bus 6),
-322143060792 on PCI 29:00.1 (USB bus 4). **Cold-boot wake**: after a
+off different USB host controllers — USB iSerial 349643062582 on PCI 29:00.3 (USB bus 6),
+322143060792 on PCI 29:00.1 (USB bus 4). **Cold-boot wake** (v4l2 path): after a
 reboot a D435i's colour UVC interface delivers no frames at all (`select() timeout` on
-every read; observed 2026-09-04, kernel 7.0.11, firmware 5.15.1 / 5.17.0.10 — ASIC
-243522071002 = fw 5.15.1 (`view_wrist`), 327122074467 = fw 5.17.0.10 (`grip_wrist`)) until
-librealsense has opened the device once. Before the first RealSense node (USB
-`idVendor` 8086, read from sysfs) is opened, `OpenCVCamera` calls `wake_realsense()`,
-which runs `rs-enumerate-devices -s` (librealsense2-utils) once per process — the tool
-queries and releases the devices in about a second and the colour streams work
-afterwards. A missing tool is logged once and the open proceeds (a cold-booted D435i
-then ends in `failed` = black tile, nothing crashes).
+every read; observed 2026-09-04, kernel 7.0.11, firmware 5.15.1 / 5.17.0.10 — RealSense
+device serial 243522071002 = fw 5.15.1 (`view_wrist`), 327122074467 = fw 5.17.0.10
+(`grip_wrist`)) until librealsense has opened the device once. Before the first RealSense
+node (USB `idVendor` 8086, read from sysfs) is opened, `OpenCVCamera` calls
+`wake_realsense()`, which runs `rs-enumerate-devices -s` (librealsense2-utils) once per
+process — the tool queries and releases the devices in about a second and the colour
+streams work afterwards. A missing tool is logged once and the open proceeds (a
+cold-booted D435i then ends in `failed` = black tile, nothing crashes). With `kind:
+realsense` the pipeline IS that first open, so the wake is not needed there.
 `cv2.VideoCapture(path, cv2.CAP_V4L2)` with `cv2.setNumThreads(1)` first.
 Configure in order, **verifying each set() by read-back** (V4L2 silently
 clamps): `CAP_PROP_FOURCC = cfg.fourcc` first (default `MJPG` — UVC webcams
@@ -955,17 +960,38 @@ failed (UI greys the tile) — never crash the workcell. Enumeration: glob
 `/dev/v4l/by-id/*-video-index0` (fallback `/dev/video*`) + one test `read()`
 per node (the odd per-UVC metadata node opens but yields no frames).
 
-RealSenseCamera (import-guarded, `[realsense]` extra): by serial —
+RealSenseCamera (import-guarded, `[realsense]` extra; since 2026-09-11 the
+runtime's `[hardware]` extra also pulls `pyrealsense2>=2.54` — 2.58.4 in the lab
+venv — so a lab install needs no extra step): by serial —
 `rs.config.enable_device(cfg, serial)`, `enable_stream(rs.stream.color, w,
-h, rs.format.rgb8, fps)` (already RGB); optional `depth: bool` (z16, v1
-ignores); ≥1 s warmup; `device.hardware_reset()` retry for the "wedged after
-unclean shutdown" failure (both from LeRobot). **V4L2-ghost dedup** in
+h, rs.format.rgb8, fps)` (already RGB); `depth: bool` opens z16 at the colour
+resolution / fps and `align_depth_to_color` (default) runs
+`rs.align(rs.stream.color)` in the capture thread → `CameraFrame.depth`
+((H, W) uint16 in `depth_scale_m` units, §8.7; "z16, v1 ignores" was the
+phase-11 state); ≥1 s warmup; `device.hardware_reset()` retry for the "wedged
+after unclean shutdown" failure (both from LeRobot). **Since 2026-09-11 this is
+how the lab's two wrist cameras are opened** (`configs/mavis_v2.yaml`: `kind:
+realsense`, `depth: true`, `align_depth_to_color: true`, 640×480 @ 30). The
+serial is the RealSense DEVICE serial (what `rs-enumerate-devices` prints), NOT
+the USB iSerial the v4l2 path used: `grip_wrist` = RS `327122074467` (USB
+iSerial 349643062582, fw 5.17.0.10, USB bus 6 / PCI 29:00.3), `view_wrist` = RS
+`243522071002` (USB iSerial 322143060792, fw 5.15.1, USB bus 4 / PCI 29:00.1);
+the mapping was re-derived on 2026-09-11 from pyrealsense2 `physical_port` → the
+sysfs `serial` of that USB device and agrees with the operator's 2026-09-04 tile
+check. Probe on the real pair (lab service paused, both cameras at once, 8 s):
+30.0 / 30.1 fps, depth on every frame, valid-depth fraction 96 % (grip, looking
+at the table 35–43 cm away) / 91 % (view, 44 cm – 2.2 m), `depth_scale` 0.001 m.
+Depth goes to the dora bridge only — `cam_grip_wrist_depth` / `cam_view_wrist_depth`
+(mono16, uint16 mm, colour-sized; 14-dora §4.2) — the recorder and the VideoHub
+ignore it, so datasets stay video-only. **V4L2-ghost dedup** in
 `find_all_cameras()`: query RealSense serials first, exclude those USB
 devices from the OpenCV list (RS color sensors also appear as `/dev/video*`;
 match by-id symlinks containing `Intel_RealSense` or the RS USB bus/dev).
 Pre-session preview: cameras start **before** any session (landing page
-shows real streams at reduced ~15 fps per the binding video protocol), so
-`start_cameras()` is independent of arm bring-up.
+shows real streams at `video.preview_fps` per the binding video protocol — 30
+since 2026-09-11, ~15 before: the dora camera taps ride the preview streams, so
+consumers saw 15 Hz between sessions), so `start_cameras()` is independent of
+arm bring-up.
 
 ## 8.5 Read-only state monitor (`monitor.py`, phase-09a)
 
@@ -1250,8 +1276,11 @@ no motion. It feeds the runtime's idle `arm_state` publisher between sessions
 hardware monitor). Verified against the FakeSDK only, never on the boxes.
 RealSense: `CameraConfig.depth` opens the depth stream and
 `align_depth_to_color` aligns it; the runtime publishes it as
-`cam_<id>_depth` (uint16 mm). The lab cameras are plain UVC colour (`kind:
-v4l2`), so hardware depth is unverified on the real D435i (14-dora §16).
+`cam_<id>_depth` (uint16 mm). Until 2026-09-10 the lab cameras were plain UVC
+colour (`kind: v4l2`) and hardware depth was unverified on the real D435i; on
+2026-09-11 both wrist cameras moved to `kind: realsense, depth: true` and the
+real pair was probed — 30.0 / 30.1 fps, depth on every frame, 96 % / 91 % valid
+depth pixels, `depth_scale` 0.001 m (§8 above, 14-dora §4.2 "Depth").
 
 ## 9. HardwareWorkcell assembly & bring-up (`workcell.py`)
 

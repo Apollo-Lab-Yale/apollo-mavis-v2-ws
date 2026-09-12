@@ -28,7 +28,7 @@ for a in d.get("arms", []):
     if mark == "BAD": rc = 1
     print(f"[{mark}] arm {a['arm_id']} {a['ip']} reachable={a['reachable']} gripper={a['gripper']} rail={a['has_rail']}")
 for c in d.get("cameras", []):
-    print(f"[{'OK ' if c['live'] else 'note'}] camera {c['camera_id']} live={c['live']}" + ("" if c["live"] else " (camera unplugged, USB serial not the one in configs/mavis_v2.yaml, or a cold-booted D435i that rs-enumerate-devices could not wake -- see DEPLOYMENT.md S11)"))
+    print(f"[{'OK ' if c['live'] else 'note'}] camera {c['camera_id']} live={c['live']}" + ("" if c["live"] else " (camera unplugged, RealSense device serial not the one in configs/mavis_v2.yaml (rs-enumerate-devices -s lists them; kind realsense since 2026-09-11), or a cold-booted D435i that rs-enumerate-devices could not wake -- see DEPLOYMENT.md S11)"))
 print(f"[{'OK ' if d.get('hardware_ready') else 'BAD'}] hardware_ready={d.get('hardware_ready')}")
 sys.exit(rc)
 PYEOF
