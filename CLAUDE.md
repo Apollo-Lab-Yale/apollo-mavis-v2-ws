@@ -419,6 +419,9 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   `action.abs_ee` natively and their `ee.*` equals the twin FK to 0.0001 mm — the
   backfilled and the new data align. At 20:05 the arm NICs `enp36s0f0/f1` were
   `unavailable` (no link) and the Vive dongle was not on USB: physical, not software.
+  **Operator decision 2026-09-11 evening: the Vive tracker is NO LONGER a hard
+  requirement** — a `[BAD] tracker` healthcheck line is acceptable, the controller may be
+  dropped later; keep the tracker code path but do not block deploys or sessions on it.
 
 ## Work in progress (2026-09-09)
 
