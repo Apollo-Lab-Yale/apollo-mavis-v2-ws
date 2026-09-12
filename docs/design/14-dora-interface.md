@@ -890,7 +890,8 @@ trainer role — a trainer-capable node lists **`"online_dagger"`**;
 `SessionAnnounce.online_dagger: OnlineDaggerAnnounce | None` (additive, appended last;
 `{session_name, session_dir, rollouts_dir}`) is how the runtime tells it where the
 session lives. `POST /api/session` adds, AFTER `_check_dataset_spec` and the hardware
-refusal matrix (D7: `dagger` on hardware is still 409 there) and BEFORE the
+refusal matrix (D7: `dagger` on hardware is 409 there while `hardware_session.policy_modes`
+is false — admitted with it true since 2026-09-12, 15-online-dagger D7 as amended) and BEFORE the
 return-to-start check (`SessionManager._check_online_dagger`, before any side effect),
 the 409s `"Online DAgger session '<s>' already exists - resume it or pick another
 name"`, `"Online DAgger session '<s>' not found"`, `"Online DAgger session '<s>':
@@ -1942,7 +1943,8 @@ staleness / handback-window cases), `tests/dora_bridge/test_import_confinement.p
 unchanged. Measured only in sim: the dev script `scripts/dev/replay_dryrun.py
 --action-space {delta_ee,abs_ee} [--save-frames]` drives a recorded episode through the
 node and reports the abs fidelity metrics; the first numbers are in 04-runtime §10.8.
-Not run on the real arms; hardware still refuses `dagger` (D7).
+Not run on the real arms; hardware refused `dagger` (D7) until 2026-09-12, when it was
+admitted behind `hardware_session.policy_modes` — still unverified live.
 
 ### 16.7 v1.3 — per-arm action streams (2026-09-11; implemented BEFORE v1.4 the same day, written up after it)
 
@@ -2029,8 +2031,10 @@ the rule, because a node announces before it can know the session's order. (4) T
 announce lists the arms in WORKCELL order (`view`, `grip`) and a running session in
 `SessionSpec.arms` order (`grip`, `view` for the recorded datasets); the fake node commits to
 the FIRST order it sees, the runtime does not care (blocks by name). (5) Not run on the real
-arms: hardware sessions still admit teleop and collect only (D7, `409 hardware sessions
-support teleop and data collection only`).
+arms: hardware sessions admitted teleop and collect only (D7, `409 hardware sessions
+support teleop and data collection only`) until 2026-09-12 — since then dagger / inference
+are admitted behind `hardware_session.policy_modes` (15-online-dagger D7 as amended), still
+unverified live.
 
 ## Appendix A — v2 candidates: external viewpoint-command surface (removed from v1)
 

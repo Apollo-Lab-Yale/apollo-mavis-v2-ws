@@ -294,7 +294,8 @@ arms; **Tab** cycles which one keyboard teleop drives; non-active arms hold.
    runtime counts no iterations and stores no training artefact. It returns the
    arms to the start profile between rollouts (D6) and serves the agentic skill
    (`mavis-online-dagger-trainer`) a policy repo's coding harness uses to set the
-   loop up. Sim only until the operator admits it on hardware (15-online-dagger D7).
+   loop up. Admitted on hardware since 2026-09-12 behind `hardware_session.policy_modes`
+   (15-online-dagger D7 as amended; unverified on the real arms).
    Superseded (2026-09-08 evening) — the morning's clause "PRO-DAgger … the runtime
    owns the iteration state machine (R kept rollouts → `iteration_complete` → …) …
    `~/data/pro_dagger/<session_name>/`" (`15-pro-dagger.md`, history only).

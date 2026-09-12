@@ -38,7 +38,9 @@ were DELETED, not aliased; superseded in-body with dated notes, kept in
 `OnlineDaggerSessionInfo`, `DatasetInfo.namespace` / `.path`, `SessionInfo.online_dagger`,
 §14 the exported models, §19 ledger rows 11–14, §20 the external additions
 (`OnlineDaggerAnnounce`, the 10-field `TrainerStatusAnnounce`, `EVENT_KINDS` + `train_now`)
-— all additive, `mavis_schema` stays 1).
+— all additive, `mavis_schema` stays 1; amended 2026-09-12 — `WorkcellStatus.policy_modes`
+(the runtime's `hardware_session.policy_modes` on the wire, always true for sim; §12, §14) —
+additive).
 Conforms to `00-overview.md` v0.3 (binding spine).
 Research ground truth: `docs/research/{dagger-online-training, lerobot-data,
 xarm-python-sdk, xarm7-ik}.md`. Message shapes mirror `05-ui.md` §2 exactly.
@@ -1330,6 +1332,13 @@ class WorkcellStatus(BaseModel):         # GET /api/workcell[?kind=hardware|sim]
     hardware_ready: bool = False         # every configured hardware arm reachable ==
                                          #   "open"; gates the Hardware-tab mode
                                          #   launchers (05-ui §8.1); additive, phase-11
+    policy_modes: bool = False           # 2026-09-12, additive: hardware = the RENDERED
+                                         #   config's hardware_session.policy_modes
+                                         #   (inference / dagger sessions + action-column
+                                         #   playback admitted on the real arms); always
+                                         #   true for sim. Opens the Hardware-tab DAgger /
+                                         #   Inference cards (05-ui §8.1); an older
+                                         #   runtime omits it = refused
 
 class SceneInfo(BaseModel):              # GET /api/scenes?kind=sim|twin
     scene_id: str; label: str; num_arms: int
@@ -1951,6 +1960,7 @@ All of core tests with no robot, no MuJoCo, no network.
   legacy-dict additivity for every additive field (`TrackerTelemetry.*`,
   `TelemetryMsg.microphone`, `TelemetryMsg.hardware_monitor`,
   `ArmStatusInfo.reachable`, `WorkcellStatus.hardware_ready`,
+  `WorkcellStatus.policy_modes` (2026-09-12),
   `ArmTelemetry.fault_detail` / `.recovering`, the `ArmMonitorTelemetry`
   safety read-back + `maintenance_busy`); `MicStatus` identical on
   `MicrophoneTelemetry` and `MicrophoneInfo`; `ArmMonitorStatus` /

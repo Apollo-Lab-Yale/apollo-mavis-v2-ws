@@ -52,7 +52,9 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   overlay residual is ~18 px / 15–30 mm and the gate cannot see the kitchen or the
   cart), then the first hardware run of phase-12 / 13 / 14 code with the operator
   present; the first policy-repo trainer on the Online DAgger shell (sim);
-  admitting Online DAgger on hardware is the operator's call (D7).** Phase-15
+  Online DAgger / inference on hardware are ADMITTED behind
+  `hardware_session.policy_modes` since 2026-09-12 (D7 as amended) but UNVERIFIED —
+  first trial = playback of a recorded episode at 10 %.** Phase-15
   (GELLO Manipulation) was implemented on 2026-09-09 and then CUT the same evening
   at the operator's request — see "GELLO Manipulation was cut" below.
 - `docs/deploy/DEPLOYMENT.md` — the lab machine, services, network profiles,
@@ -303,9 +305,14 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
 - **D5** session dir `~/data/online_dagger/<session>/{session.json, rollouts/}`
   (namespace `online_dagger`, subdir `rollouts`); the trainer's artefacts are
   its own business (skill suggests `<session>/trainer/`). **D6** return-to-start
-  applies to rollouts (default ON). **D7 hardware still refuses dagger**
-  (`409 hardware sessions support teleop and data collection only`) until the
-  operator says go.
+  applies to rollouts (default ON). **D7 — amended 2026-09-12: hardware admits
+  `dagger` / `inference` behind `hardware_session.policy_modes`** (repo default false;
+  the lab render sets it with `HARDWARE_POLICY_MODES=true`, ON since 2026-09-12); with
+  the knob false the 409 stays and names it (`hardware sessions support teleop and data
+  collection only (<mode> on hardware: not yet - hardware_session.policy_modes is
+  false; …)`). Same `GatedPolicyExecutor` stack as sim over the rig's capped control
+  config + the gate twin; rollouts from the adopted wrist cameras (04-runtime §5 step
+  11, §11). UNVERIFIED on the real arms — see "Work in progress (2026-09-12)".
 - **D8** the skill is **`mavis-online-dagger-trainer`** (the generic
   `OnlineDaggerTrainer` hooks + `references/contract.md` + a worked
   `references/pro-dagger-example.md`), shipped INSIDE the runtime wheel
@@ -314,7 +321,8 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   One-liner shown in the sheet: `curl -s http://<lab-host>:8765/api/
   online_dagger/skill.tgz | tar xz -C ~/.claude/skills/` (port **8765**, never 8000).
 - REST: `GET /api/online_dagger/{skill,skill.tgz,sessions}`; `POST /api/session`
-  409s in order: session-dir rules (`"Online DAgger session '<s>' already exists -
+  409s in order: on hardware with `policy_modes` false the D7 line first, then
+  session-dir rules (`"Online DAgger session '<s>' already exists -
   resume it or pick another name"` / `… not found` / `… session.json is
   unreadable`), exporting / legacy tree, `no external policy attached (…)`,
   `no Online DAgger trainer attached (the policy node does not report the
@@ -370,6 +378,32 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
     and the panel sat above the episode buttons; now 4 one-line rows with their own
     `max-height` + scroll and `EpisodeControls` ABOVE the readout.
 
+## Work in progress (2026-09-12) — policy-driven motion admitted on hardware
+
+- **`hardware_session.policy_modes` is ON in the lab render since 2026-09-12**
+  (`HARDWARE_POLICY_MODES=true` in `var/lab.env`; repo default `false`; operator
+  decision). It admits `mode: inference` / `dagger` (incl. Online DAgger) on the real
+  arms and the action-column playback (`source: delta_ee | abs_ee`); with it false the
+  old 409 stays and names the knob. The hardware session builds the SAME
+  `GatedPolicyExecutor` stack as sim over the rig's speed-scaled, servo-capped control
+  config, the unconditional `SafetyGate` on the gate twin and the adopted wrist cameras
+  (`SessionManager._bringup_hardware` step 11c → `_build_policy_stack(control_cfg,
+  loop_kwargs, recorder_kwargs)`; the policy is resolved inside the refusal matrix,
+  before a box is enabled); the executor's SlewLimits / leash and the driver-side caps
+  are unchanged. Docs: 04-runtime §5 / §11 / §12 / §13.1 / §14, 15-online-dagger D7 +
+  §12, 11-safety §4, 14-dora, DEPLOYMENT S4. Fake-driver tests in
+  `tests/test_hardware_session.py` (four `policy_modes` tests).
+- **Policy-driven motion on the real arms is still UNVERIFIED.** First trial = playback
+  of a recorded episode through the Datasets panel's playback dialog inside a hardware
+  teleop session at speed scale 10 %, hand on the E-stop; only then a policy session
+  (`wait_for_trainer_ready`, Manipulation Arm alone). Everything in "Rules that protect
+  the cell" applies — the twin is still ~15–30 mm out and blind to the cart / kitchen.
+- **Not done:** the UI's Hardware tab still greys the DAgger / Inference cards out
+  (`REASON.hardwareTeleopOnly` in `apollo-mavis-v2-ui/src/lib/launch.ts`) — REST admits
+  them, the launcher does not read the knob (`WorkcellStatus` carries no such field);
+  until that lands a hardware policy session is started over REST, playback over the
+  dialog. A runtime started before this change still refuses them — restart it.
+
 ## Work in progress (2026-09-11) — inference interface, abs_ee, ee_pose fix
 
 - **Lab wrist cameras through librealsense with aligned depth (runtime `000c12f`, on main):**
@@ -404,7 +438,8 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
 - **Episode playback has a `source`** (`state` = joint replay as before | `delta_ee` |
   `abs_ee` = the action column through the executor inside the current teleop / collect
   sim session; PlaybackDialog "Replay source" select; hardware sessions refuse action
-  replay; verdict = TCP residual 5 mm / 0.02 rad after settling; 04-runtime §10.8).
+  replay unless `hardware_session.policy_modes` (2026-09-12); verdict = TCP residual
+  5 mm / 0.02 rad after settling; 04-runtime §10.8).
 - **Collision sensitivity dropdown (1 / 2 / 3)** on the Hardware-tab arm card and in the
   Cockpit (see the C31 note below); default 3 from config at every connect.
 - **Deployed and backfilled 2026-09-11 (~11:05 UTC):** the shared account's checkout is at
@@ -484,6 +519,12 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   **Continue existing prefills Task from `DatasetInfo.task`** (05-ui §8.1 item 6) so a
   resume is one click. A long-running dev runtime started before that does NOT have the
   driver fix — restart it to pick it up (the shared account's copy has it).
+- **Dora e2e tests vs the lab's dora plane (2026-09-12):** since dora publishing is ON in the
+  lab runtime, `pgrep -x dora` on this host ALWAYS finds the lab's coordinator + daemon
+  (children of the `mavis-v2` runtime). The runtime's dora-marked suites leak-check with that
+  same machine-wide `pgrep`, so they cannot run here while the lab runtime is up — run them
+  with the lab service stopped, or scope the leak check to the test's own process tree first.
+  The non-dora suite is unaffected (do not gate it on `pgrep -x dora`).
 - Known follow-ups: lerobot's `StreamingVideoEncoder` start / finish hold the
   GIL 160–330 ms at `start_episode` and up to 324 ms at `finish_episode` with
   `h264_nvenc` (04-runtime §10.5 "GIL stall"; an encoder subprocess is the fix);

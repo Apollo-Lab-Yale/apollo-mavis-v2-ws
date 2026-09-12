@@ -83,7 +83,12 @@ at bring-up and survives a runtime crash; L4 acts even with no collision in sigh
 command from every source — keyboard twist, joint-jog panel (`jog` and `goto`), policy
 actions, DAgger/inference takeover input, planner trajectories (resets, profile loads,
 `goto` jumps) — passes the twin gate before reaching a real arm. No mode, feature, or
-recovery path may bypass it. Enforcement is architectural:
+recovery path may bypass it. Since 2026-09-12 the DAgger / inference half of that list is
+no longer hypothetical on the real cell: policy-driven sessions are admitted behind
+`hardware_session.policy_modes` (04-runtime §5 / §11; 15-online-dagger D7 as amended) and
+reach the arms through the same `GatedPolicyExecutor` → `SafetyGate` chokepoint over the
+rig's speed-scaled, servo-capped control config — no new dispatch path was added, and
+nothing of it has run on the real arms yet. Enforcement is architectural:
 
 1. **Single dispatch point.** `runtime.control.loop.ControlLoop` is the only code in the
    stack calling `ArmInterface.command_joints` / `command_rail` / `command_gripper`. Mode

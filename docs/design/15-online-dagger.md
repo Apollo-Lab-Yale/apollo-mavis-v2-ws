@@ -67,7 +67,21 @@ and the code disagreed, the code won and the deviation is recorded in §12.
   skill and coordinator are REMOVED, not aliased (never shipped).
 - **D6** Return-to-start applies to rollouts (default ON, per-session opt-out) — unchanged.
 - **D7** Hardware still refuses `dagger` (`409 hardware sessions support teleop and data
-  collection only`) until the operator says go.
+  collection only`) until the operator says go. **Amended 2026-09-12 (operator decision):
+  the operator said go — `dagger` and `inference` on hardware are admitted behind the
+  rendered config's `hardware_session.policy_modes` (repo default `false`; the lab render
+  sets it with `HARDWARE_POLICY_MODES=true` and has it ON since 2026-09-12). With the knob
+  false the 409 above stays and names the knob (`… (<mode> on hardware: not yet -
+  hardware_session.policy_modes is false; the lab render sets it with
+  HARDWARE_POLICY_MODES=true)`). With it true the hardware session builds the SAME
+  `GatedPolicyExecutor` stack as sim over the rig's speed-scaled, servo-capped control
+  config and the unconditional gate twin, resolves the policy inside the refusal matrix
+  (before a box is enabled) and records the rollouts from the adopted wrist cameras
+  (04-runtime §5 step 11, §11). Policy-driven motion on the real arms is still
+  UNVERIFIED — first-run guidance: speed scale 10 %, E-stop in hand, replay a recorded
+  episode through the playback dialog (`source: abs_ee`, 04-runtime §10.8) BEFORE any
+  policy drives; then a session with `wait_for_trainer_ready` on the Manipulation Arm
+  alone.**
 - **D8** The skill is `mavis-online-dagger-trainer`: the generic contract plus a worked
   PRO-DAgger example that lives in the policy-node repo (`mavis_policy_node.pro_dagger`, kept
   as the reference implementation ON TOP of the generic `mavis_policy_node.online_dagger`
@@ -531,8 +545,10 @@ mavis-online-dagger-trainer/` (`cmp`, re-run).
 
 **`POST /api/session` for an Online DAgger body — the 409s in evaluation order**
 (`SessionManager.create()`: `_check_dataset_spec` → hardware matrix → `_check_online_dagger` →
-`_check_return_to_start`): on hardware `"hardware sessions support teleop and data collection
-only (dagger on hardware: not yet)"` (D7, before anything else); `"Online DAgger session '<s>'
+`_check_return_to_start`): on hardware with `hardware_session.policy_modes` false `"hardware
+sessions support teleop and data collection only (dagger on hardware: not yet -
+hardware_session.policy_modes is false; the lab render sets it with HARDWARE_POLICY_MODES=true)"`
+(D7, before anything else; admitted with the knob true since 2026-09-12); `"Online DAgger session '<s>'
 already exists - resume it or pick another name"`; `"Online DAgger session '<s>' not found"`;
 `"Online DAgger session '<s>': session.json is unreadable - fix or remove it"`; `"dataset
 'online_dagger/<s>' is being exported - retry in a moment"` (or the legacy-tree text); `"no
@@ -620,9 +636,16 @@ heartbeat or an action's metadata.
    of this work (it spawns no fake node). Accept, gate on load, or rerun with the dev runtime
    stopped. The `test_return_to_start.py` flake is the encoder GIL-stall / WS-deadman follow-up
    in CLAUDE.md.
-2. **Hardware (D7)** — `dagger` on hardware is still 409 before any Online DAgger check runs;
-   nothing here was exercised on the real cell or the lab dora plane (sim + the two fakes
-   only). The runtime must be restarted to pick any of it up.
+2. **Hardware (D7)** — `dagger` on hardware was 409 before any Online DAgger check ran.
+   **2026-09-12: admitted behind `hardware_session.policy_modes` (D7 as amended in §0; the
+   lab render has it ON), covered by the fake-driver tests
+   `test_external_inference_session_is_admitted_with_policy_modes` and
+   `test_online_dagger_session_is_admitted_with_policy_modes_and_records_rollouts` in
+   `tests/test_hardware_session.py`** — still nothing exercised on the real cell or the lab
+   dora plane (sim + the fakes only). Open: the UI's Hardware tab still greys the DAgger /
+   Inference cards out (`REASON.hardwareTeleopOnly`) — REST admits them, the launcher does
+   not read the knob (`WorkcellStatus` carries no such field yet). The runtime must be
+   restarted to pick any of it up.
 3. **Gate-event publication scope** — `events.gate` is now session-wide for every policy
    session with the bridge on; `events.episode_discarded` is still published by Online DAgger
    sessions ONLY (plain external / checkpoint dagger and collect sessions publish nothing on

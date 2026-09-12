@@ -60,6 +60,16 @@ def parse() -> argparse.Namespace:
     p.add_argument("--speed", type=float, default=1.0)
     p.add_argument("--rate-hz", type=float, default=30.0)
     p.add_argument("--url", default="http://127.0.0.1:8866")
+    p.add_argument("--kind", default="sim", choices=["sim", "hardware"],
+                   help="session kind; hardware needs hardware_session.policy_modes on the runtime")
+    p.add_argument("--speed-scale", type=float, default=1.0,
+                   help="SessionSpec.speed_scale (hardware: the servo caps; first real-arm runs 0.1)")
+    p.add_argument("--start-from", default="keep_current",
+                   help="SessionSpec.start_from: keep_current | profile:<id> (hardware: the FurnitureBench "
+                        "profile the recordings started from, planned + gated, one arm at a time)")
+    p.add_argument("--node-path", default=None,
+                   help="episode dir the NODE reads (default: the runtime's own dataset root; use a "
+                        "readable mirror when the runtime's copy is owned by another account)")
     p.add_argument("--node-bin", default=str(DEFAULT_NODE_BIN))
     p.add_argument("--out", default=None, help="output dir (default var/dryrun-inference/runs/<stamp>)")
     p.add_argument("--settle-s", type=float, default=0.5)
@@ -100,7 +110,7 @@ def main() -> int:
     a = parse()
     arms = [x.strip() for x in a.arms.split(",") if x.strip()]
     stamp = time.strftime("%Y%m%dT%H%M%S")
-    out = Path(a.out) if a.out else WS / "var" / "dryrun-inference" / "runs" / f"{stamp}-{a.action_space}-{a.mode}-{a.timeline}-x{a.speed:g}"
+    out = Path(a.out) if a.out else WS / "var" / "dryrun-inference" / "runs" / f"{stamp}-{a.kind}-{a.action_space}-{a.mode}-{a.timeline}-x{a.speed:g}"
     out.mkdir(parents=True, exist_ok=True)
     report_path = out / "report.json"
     frames_dir = out / "frames"
@@ -135,7 +145,7 @@ def main() -> int:
     env.pop("DORA_COORDINATOR_ADDR", None)
     env.pop("DORA_COORDINATOR_PORT", None)
     cmd = [
-        a.node_bin, "--loader", "replay", "--path", str(ep_dir), "--arms", ",".join(arms),
+        a.node_bin, "--loader", "replay", "--path", str(Path(a.node_path) if a.node_path else ep_dir), "--arms", ",".join(arms),
         "--replay-mode", a.mode, "--timeline", a.timeline, "--speed", str(a.speed),
         "--rate-hz", str(a.rate_hz), "--daemon-port", str(dora["daemon_port"]),
         "--settle-s", str(a.settle_s), "--report", str(report_path), "--log-level", "INFO",
@@ -165,10 +175,13 @@ def main() -> int:
         # SessionSpec has no action_space key: the session records delta_ee and the runtime
         # sizes the per-arm blocks from the ANNOUNCED spec (delta_ee 8/7 or abs_ee 11/10).
         spec = {
-            "mode": "inference", "kind": "sim", "arms": ["grip", "view"],
+            "mode": "inference", "kind": a.kind, "arms": ["grip", "view"],
             "frames": {"grip": "arm_base:grip", "view": "arm_base:view"},
-            "sim_scene": "mavis_v2", "policy_source": "external", "start_from": "keep_current",
+            "policy_source": "external", "start_from": a.start_from,
+            "speed_scale": a.speed_scale,
         }
+        if a.kind == "sim":
+            spec["sim_scene"] = "mavis_v2"
         r = api.post("/api/session", json=spec)
         if r.status_code != 200:
             print(f"POST /api/session -> {r.status_code} {r.text}", file=sys.stderr)
