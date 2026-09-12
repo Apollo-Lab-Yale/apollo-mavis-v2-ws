@@ -17,7 +17,7 @@
 #   KEY=value per line, sourced by this script; variables already exported win over the
 #   file). The lab box keeps DORA_BIND_HOST there so update.sh re-renders the same config.
 # Knobs (env): TRACKER_BACKEND=libsurvive LIGHTHOUSE_COUNT=3 TRACKER_YAW_DEG=116.3
-#   RAIL_IN_IK=false HARDWARE_ARMED=true MIC_ENABLED=true EGL_DEVICE_ID=0 RUNTIME_HOST RUNTIME_PORT UI_DIST
+#   RAIL_IN_IK=false HARDWARE_ARMED=true HARDWARE_POLICY_MODES=false MIC_ENABLED=true EGL_DEVICE_ID=0 RUNTIME_HOST RUNTIME_PORT UI_DIST
 #   LOG_LEVEL=INFO      logging.level (DEBUG adds per-event IK slips + driver events); the
 #                       rotating log file goes to $DATA_ROOT/logs (KEEP_REPO_PATHS keeps ${APOLLO_HOME}/var/logs)
 #   LIBSURVIVE_CONFIG=$DATA_ROOT/libsurvive/config.json GRIP_IP VIEW_IP
@@ -70,6 +70,7 @@ export LIGHTHOUSE_COUNT="${LIGHTHOUSE_COUNT:-3}"
 export TRACKER_YAW_DEG="${TRACKER_YAW_DEG:-116.3}"
 export RAIL_IN_IK="${RAIL_IN_IK:-false}"
 export HARDWARE_ARMED="${HARDWARE_ARMED:-true}"
+export HARDWARE_POLICY_MODES="${HARDWARE_POLICY_MODES:-false}"
 export MIC_ENABLED="${MIC_ENABLED:-true}"
 export EGL_DEVICE_ID="${EGL_DEVICE_ID:-0}"
 export LIBSURVIVE_CONFIG="${LIBSURVIVE_CONFIG:-$DATA_ROOT/libsurvive/config.json}"
@@ -129,6 +130,9 @@ setv(("control", "rail_in_ik"), flag("RAIL_IN_IK"))
 # real xArm drivers / home the rails (repo default false; HARDWARE_ARMED=false renders
 # a config that still monitors the boxes read-only but refuses sessions and home_rail).
 setv(("hardware_session", "armed"), flag("HARDWARE_ARMED"))
+# Policy-driven motion on the real arms (inference / dagger sessions, action-column playback):
+# operator decision 2026-09-12, repo default false; HARDWARE_POLICY_MODES=true admits it.
+setv(("hardware_session", "policy_modes"), flag("HARDWARE_POLICY_MODES"))
 setv(("tracker", "backend"), env["TRACKER_BACKEND"])
 args = list(data.get("tracker", {}).get("libsurvive_args") or [])
 if "--lighthousecount" in args:
