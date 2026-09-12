@@ -407,9 +407,18 @@ one), commit + push there first, then bump the pointer here. Fresh checkout:
   are backfilled (backups `<dataset>/backups/20260911T11*Z/`, exports marked stale;
   the Manipulation Arm's `ee.*` moved 172 mm, the Perception Arm's orientation was
   recomputed). `GET .../playback` on a production episode lists `sources
-  [state, delta_ee, abs_ee]`. The runtime restarted as PID 633345; healthcheck OK
-  except the libsurvive tracker line (dongle busy after the restart — see the tracker
-  notes; not caused by this change).
+  [state, delta_ee, abs_ee]`. **Dora publishing is ON in the lab since 2026-09-11 ~20:10**
+  (`var/lab.env`: `DORA_BIND_HOST=wlp38s0`, `DORA_MACHINES=gpubox`; `/api/dora` state
+  `attached`, coordinator 6113 / daemon 53391 / zenoh 7447 on 192.168.0.88; every camera
+  tap incl. `grip_wrist` / `view_wrist` publishes). Two deploy facts learned the hard way:
+  (1) `install-stack.sh` synced the runtime WITHOUT the `dora` extra, so the lab venv had no
+  dora-rs and the bridge reported "dora python package not importable" — fixed in the
+  script (`--extra dora`); (2) any `uv sync` in the runtime dir REMOVES the pysurvive wheel
+  (out of uv.lock) — re-install it from `third_party/wheels/` afterwards, as the script
+  does. Episodes recorded by the new runtime (47 lamp episodes on 2026-09-11) carry
+  `action.abs_ee` natively and their `ee.*` equals the twin FK to 0.0001 mm — the
+  backfilled and the new data align. At 20:05 the arm NICs `enp36s0f0/f1` were
+  `unavailable` (no link) and the Vive dongle was not on USB: physical, not software.
 
 ## Work in progress (2026-09-09)
 
