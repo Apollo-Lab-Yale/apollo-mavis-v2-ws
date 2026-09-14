@@ -2104,11 +2104,13 @@ passed through for completeness with the warning above.
 OUTSIDE — the command asks for 15.5 mm (`gripper.pos` is ABSOLUTE, `frac × units.
 GRIPPER_G2_MM_MAX` 84.0) and the fingers stall at **59.0 mm** for 10.5 s. Every replay closed
 to 14–15 mm, i.e. on air: the shade sat **22.6 mm** from its recorded pose (the bulb's base
-12.6 mm), measured with `var/dryrun-inference/align_shade.py`, which compares one live
+12.6 mm), measured with `scripts/dev/align_props.py`, which compares one live
 `view_wrist` MJPEG frame against frame 0 of the recorded video — valid with ZERO motion
 because the Perception Arm never moves in this episode. So the gripper channel is verified
 (commanded 15.5 mm, reached 15.0 mm) and the grasp is a scene-placement matter, not a wire or
 executor one. A successful replayed grasp reads as a stall near 59 mm.
+
+**Tooling (`scripts/dev/`).** `run_hw_replay.sh <space> <speed_scale> <node_speed> <rate_hz>` is the invocation above with the rate rule in its header; `align_props.py` measures the prop offset (zero motion, reference extracted from the episode video on demand); `grab_preview_frames.py` records the wrist previews THROUGH a replay (the node's own `--save-frames` only fires in its WAITING phase, so nothing had seen the grasp moment until this existed); `mavis_v2_dryrun.yaml` + `dryrun_ctl.sh` are the private SIM runtime of §16.6 (port 8866, its own dora plane 6213 / 53491 / 7547, fake tracker and mic — it never touches the boxes, the dongle or 8765), which is where a configuration should be proven before the cell sees it.
 
 ## Appendix A — v2 candidates: external viewpoint-command surface (removed from v1)
 

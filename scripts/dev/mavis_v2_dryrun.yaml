@@ -1,0 +1,96 @@
+# Private SIM runtime for the replay dry run, under the SHARED LAB ACCOUNT (2026-09-12).
+# No hardware workcell, fake microphone, fake tracker, own ports and own var tree: it never
+# touches the control boxes, PulseAudio, the Vive dongle or port 8765 of the production
+# runtime. Copy it to ${APOLLO_HOME}/var/dryrun-inference/ (the paths below anchor there) and
+# start it with scripts/dev/dryrun_ctl.sh (never `uv run`). 14-dora §16.6 / §16.8.
+host: 127.0.0.1
+port: 8866
+ui_dist: null
+workcells:
+  sim:
+    kind: sim
+    sim_scene: mavis_v2
+    arms:
+      - id: view
+        base_in_world: {}
+        gripper: none
+      - id: grip
+        base_in_world: {}
+    cameras: []
+    safety:
+      safety_debug: false
+profiles_dir: ${APOLLO_HOME}/var/dryrun-inference/profiles
+datasets_root: ${APOLLO_HOME}/var/dryrun-inference/datasets
+datasets:
+  default_namespace: bc_demo
+  namespaces:
+    bc_demo:
+      root: ~/data/bc_demo
+    online_dagger:
+      root: ${APOLLO_HOME}/var/dryrun-inference/online_dagger
+      subdir: rollouts
+checkpoints_root: ${APOLLO_HOME}/var/dryrun-inference/checkpoints
+calibration_dir: ${APOLLO_HOME}/var/dryrun-inference/calibration
+control:
+  rate_hz: 100
+  translate_frame: world
+  orphan_session_grace_s: 0        # headless: no /ws/control socket is ever opened
+recorder:
+  fps: 25
+  audio: true
+telemetry_hz: 25
+video: {preview_fps: 15, session_fps: 30, jpeg_quality: 80}
+egl_device_id: 1                   # the production runtime renders on GPU 0
+logging:
+  level: INFO
+  dir: ${APOLLO_HOME}/var/dryrun-inference/logs
+  file: runtime.log
+  max_bytes: 20971520
+  backup_count: 5
+  access_log: false
+microphone:
+  enabled: true
+  mic_id: mic_view
+  label: Perception Arm microphone
+  backend: fake                    # synthetic blocks -> dora mic_mic_view; PulseAudio untouched
+  sample_rate: 48000
+  bins: 64
+  stale_s: 0.5
+hardware_probe: {enabled: false}
+hardware_monitor: {enabled: false}
+twin_overlay: {enabled: false}
+hardware_session: {armed: false}
+tracker:
+  backend: fake
+  libsurvive_config_path: ${APOLLO_HOME}/var/dryrun-inference/libsurvive/config.json
+dora:
+  enabled: true
+  node_id: mavis_runtime
+  dataflow_name: mavis_v2_dryrun
+  bind_host: 127.0.0.1
+  machine_id: lab
+  machines: []
+  rescan_s: 5.0
+  auth: null
+  coordinator_port: 6213
+  daemon_port: 53491
+  zenoh_port: 7547
+  var_dir: ${APOLLO_HOME}/var/dryrun-inference/dora
+  attach_retry_s: [1.0, 10.0]
+  bus_poll_s: 0.002
+  publish:
+    state_hz: 50
+    idle_state_hz: 10
+    obs_hz: 30
+    obs_in_collect: false
+    cameras: [grip_wrist_cam, view_wrist_cam]
+    depth_cameras: [view_wrist_cam]
+    image_pose: true
+    audio: true
+    telemetry: true
+    events: true
+  policy:
+    spec_stale_s: 3.0
+    max_obs_age_s: 0.5
+  log:
+    quiet_node_diagnostics: true
