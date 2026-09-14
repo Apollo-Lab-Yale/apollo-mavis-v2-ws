@@ -31,16 +31,22 @@ SCALE="${2:-0.6}"; SPEED="${3:-0.5}"; RATE="${4:-15}"
 EP="${EPISODE:-20260911T214721.850Z-7b6028}"          # lamp_assembling: 425 frames, frame0 == the FurnitureBench profile
 DS="${DATASET:-bc_demo/lamp_assembling}"
 PROF="${START_FROM:-profile:e2d42f3418b74418b6d0db89e5add5ed}"   # "2026-09-09 FurnitureBench"
-NODE="${NODE_BIN:-$HOME/apollo-mavis-v2-policy-node/.venv/bin/mavis-policy-node}"
+# Unset by default so replay_dryrun.py's own DEFAULT_NODE_BIN applies (it knows the
+# developer layout); the lab account exports NODE_BIN=~/apollo-mavis-v2-policy-node/.venv/bin/mavis-policy-node
+NODE="${NODE_BIN:-}"
 DRIVER="${DRIVER:-$HERE/replay_dryrun.py}"
+URL="${URL:-http://127.0.0.1:8765}"   # the PRODUCTION runtime; the sim dry-run one is :8866
 
 cd "$WS"
 echo "=== preflight $(date -Is)"
-curl -s -m 5 http://127.0.0.1:8765/api/session; echo
+curl -sS -m 5 "$URL/api/session" || { rc=$?
+  echo "preflight: nothing answered at $URL (curl exit $rc) - start the runtime, then retry" >&2
+  exit 1; }
+echo
 echo "=== GO $SPACE  speed_scale=$SCALE node_speed=$SPEED rate_hz=$RATE  ep=$EP"
 exec apollo-mavis-v2-runtime/.venv/bin/python "$DRIVER" \
   --episode "$EP" --dataset "$DS" --arms grip \
   --kind hardware --action-space "$SPACE" \
   --speed "$SPEED" --rate-hz "$RATE" --speed-scale "$SCALE" \
   --start-from "$PROF" --start-timeout-s 600 \
-  --url http://127.0.0.1:8765 --node-bin "$NODE"
+  --url "$URL" ${NODE:+--node-bin "$NODE"}

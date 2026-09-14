@@ -11,6 +11,7 @@
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"          # absolute: survives any cwd
 WS="$(cd "$HERE/../.." && pwd)"                # the workspace root, not an assumed $HOME path
+case "${1-}" in start|stop|status) ;; *) echo "usage: $0 start|stop|status" >&2; exit 2;; esac
 D=$WS/var/dryrun-inference
 CFG=$D/mavis_v2_dryrun.yaml
 PIDF=$D/run/runtime.pid
