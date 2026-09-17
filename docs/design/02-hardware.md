@@ -1148,7 +1148,7 @@ def maintenance(self, op, driver_cfg=None, timeout_s=None, *,
                 expected_q=None, q_tol_rad=HOME_RAIL_Q_TOL_RAD,
                 level=None) -> MaintenanceOutcome
     # timeout_s None -> per-op default (10 s; 45 s for home_rail)
-    # level: set_collision_sensitivity only - 1 / 2 / 3, refused (ok=False) otherwise
+    # level: set_collision_sensitivity only - 0 / 1 / 2 / 3, refused (ok=False) otherwise
 
 @dataclass(frozen=True)
 class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtime adds path)
@@ -1238,8 +1238,8 @@ class MaintenanceOutcome:       # data part of core ArmMaintenanceResult (runtim
   disconnects mid-homing. Homing duration on the lab tracks is unmeasured; the
   track's own homing speed register has no public SDK setter (out of scope).
 - **Refusals** (`ok=False`, no SDK call): `recover` ("recover needs a session");
-  `set_collision_sensitivity` with `level` None / not an int / outside 1..3
-  ("set_collision_sensitivity needs a level of 1, 2 or 3 (got 4); 0 turns
+  `set_collision_sensitivity` with `level` None / not an int / outside 0..3
+  ("set_collision_sensitivity needs a level of 0, 1, 2 or 3 (got 4); 0 turns
   detection off and 4 / 5 false-trigger under payload");
   `apply_backstops` / `home_rail` without a `driver_cfg`; `home_rail` without a
   7-vector `expected_q`, with `q_tol_rad <= 0`, or on a monitor that does not
